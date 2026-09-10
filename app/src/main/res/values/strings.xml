@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Study Agent</string>
+    <string name="channel_name">Active Study Session</string>
+    <string name="channel_description">Displays ongoing voice study loop status and controls</string>
+</resources>
