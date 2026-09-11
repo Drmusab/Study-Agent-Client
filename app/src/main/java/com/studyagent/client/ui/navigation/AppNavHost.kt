@@ -54,7 +54,7 @@ fun AppNavHost(
                     connectionRepository = container.connectionRepository,
                     audioRouteManager = container.audioRouteManager,
                     speechRecognitionManager = container.sttManager,
-                    textToSpeechManager = container.ttsManager,
+                    speechOrchestrator = container.speechOrchestrator,
                     preferencesDataStore = container.preferencesDataStore
                 )
             }
@@ -82,7 +82,8 @@ fun AppNavHost(
         composable(Screen.Settings.route) {
             val settingsViewModel: SettingsViewModel = viewModel {
                 SettingsViewModel(
-                    preferencesDataStore = container.preferencesDataStore
+                    preferencesDataStore = container.preferencesDataStore,
+                    speechOrchestrator = container.speechOrchestrator
                 )
             }
             SettingsScreen(

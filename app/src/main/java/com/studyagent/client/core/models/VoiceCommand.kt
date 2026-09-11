@@ -17,6 +17,9 @@ sealed interface VoiceCommand {
     data object Stop : VoiceCommand
     data object EndSession : VoiceCommand
 
+    /** "Stop speaking" — cancels speech output WITHOUT ending the study session (§63). */
+    data object StopSpeaking : VoiceCommand
+
     data class StartStudy(val deck: String? = null) : VoiceCommand
     data object StatusQuestion : VoiceCommand // "How many cards left?"
 

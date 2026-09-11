@@ -20,10 +20,10 @@
 - [x] Support for all Client -> Server messages (`start_session`, `submit_answer`, `rate_card`, `repeat_question`, `request_hint`, `request_explanation`, `request_answer`, `skip_card`, `pause_session`, `resume_session`, `end_session`, `ping`).
 - [x] Support for all Server -> Client messages (`session_started`, `question`, `evaluation`, `hint`, `explanation`, `answer`, `rating_saved`, `session_paused`, `session_resumed`, `session_finished`, `session_stats`, `error`, `pong`).
 
-### Phase 4 & 5 — Voice Engine (TTS + STT) ✅
-- [x] `AndroidTextToSpeechManager` with utterance completion listeners, pitch, rate, and locale selection.
+### Phase 4 & 5 — Voice Engine (TTS + STT) ✅ (TTS rebuilt 2026-09-11)
 - [x] `AndroidSpeechRecognitionManager` wrapping `SpeechRecognizer`, handling permissions, partial results, and silence timeouts.
-- [x] `VoiceCommandManager` with English and Arabic normalized voice matching.
+- [x] `VoiceCommandManager` with English and Arabic normalized voice matching, incl. "stop speaking".
+- [x] **TTS overhaul:** structured `SpeechOrchestrator` (purposes/priorities/queue policies), coroutine-first `TtsEngineAdapter` with init queueing, callback-lifetime guarantees, watchdog timeouts and bounded recovery; installed-voice discovery with deterministic offline-preferring ranking and previews; speech-only HTML/medical preprocessing; Arabic/English segmentation with per-language voices; platform-limit semantic chunking; spoken-audio focus policy; explicit TTS→STT handoff controller; TTS health in Diagnostics. See `docs/TTS_ARCHITECTURE.md` and `docs/TTS_AUDIT.md`.
 
 ### Phase 6 & 7 — Full Hands-Free Study Loop ✅
 - [x] Unidirectional study state machine:
@@ -40,7 +40,8 @@
 - [x] Standalone Python Mock PC Agent (`mock_pc_agent.py`) simulating Anki sessions.
 - [x] Automated integration test client (`test_client.py`).
 - [x] In-app real-time diagnostic log inspector and copy-to-clipboard export.
-- [x] 100% passing unit & integration test suite.
+- [x] TTS health card (engine/voices/focus/queue/last-error/metrics) in Diagnostics.
+- [x] Expanded unit test suite: speech pipeline component tests + deterministic fake-engine orchestrator tests (see `app/src/test/.../tts/`).
 
 ---
 

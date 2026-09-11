@@ -17,6 +17,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -27,7 +28,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.studyagent.client.core.voice.tts.HeadsetDisconnectBehavior
+import com.studyagent.client.core.voice.tts.SegmentLanguage
+import com.studyagent.client.core.voice.tts.TtsSettings
+import com.studyagent.client.core.voice.tts.TtsVoiceInfo
+import com.studyagent.client.core.voice.tts.VoiceLatency
+import com.studyagent.client.core.voice.tts.VoiceQuality
 import com.studyagent.client.ui.theme.AccentTeal
 import com.studyagent.client.ui.theme.DarkBackground
 import com.studyagent.client.ui.theme.DarkSurface
@@ -43,6 +52,9 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val settings by viewModel.settings.collectAsState()
+    val englishVoices by viewModel.englishVoices.collectAsState()
+    val arabicVoices by viewModel.arabicVoices.collectAsState()
+    val previewing by viewModel.previewing.collectAsState()
 
     Scaffold(
         containerColor = DarkBackground,
@@ -71,171 +83,319 @@ fun SettingsScreen(
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Voice / STT Language Section
-            item {
-                Text(
-                    text = "VOICE RECOGNITION (STT)",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = AccentTeal
-                )
-            }
+            // ------------------------------------------------ Voice recognition (STT)
+            item { SectionHeader("VOICE RECOGNITION (STT)") }
 
             item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        LanguageRadioItem(
-                            title = "English (United States)",
-                            selected = settings.sttLanguage == "en-US",
-                            onClick = { viewModel.updateSettings { it.copy(sttLanguage = "en-US") } }
-                        )
-                        LanguageRadioItem(
-                            title = "Arabic (العربية)",
-                            selected = settings.sttLanguage == "ar-SA",
-                            onClick = { viewModel.updateSettings { it.copy(sttLanguage = "ar-SA") } }
-                        )
+            SettingsCard {
+                    LanguageRadioItem(
+                        title = "English (United States)",
+                        selected = settings.sttLanguage == "en-US",
+                        onClick = { viewModel.updateSettings { it.copy(sttLanguage = "en-US") } }
+                    )
+                    LanguageRadioItem(
+                        title = "Arabic (العربية)",
+                        selected = settings.sttLanguage == "ar-SA",
+                        onClick = { viewModel.updateSettings { it.copy(sttLanguage = "ar-SA") } }
+                    )
+                }
+            }
+
+            // ------------------------------------------------ Voice output (TTS)
+            item { SectionHeader("VOICE OUTPUT (TTS)") }
+
+            // Voice pickers: real installed voices + Auto recommended.
+            item {
+            SettingsCard {
+                    VoicePicker(
+                        title = "English Voice",
+                        voices = englishVoices,
+                        selectedVoiceId = settings.englishVoiceId,
+                        onSelect = { id -> viewModel.updateSettings { it.copy(englishVoiceId = id) } }
+                    )
+                    Spacer(modifier = Modifier.height(14.dp))
+                    VoicePicker(
+                        title = "Arabic Voice (الصوت العربي)",
+                        voices = arabicVoices,
+                        selectedVoiceId = settings.arabicVoiceId,
+                        onSelect = { id -> viewModel.updateSettings { it.copy(arabicVoiceId = id) } }
+                    )
+                }
+            }
+
+            // Offline preference + previews.
+            item {
+            SettingsCard {
+                    SettingToggleItem(
+                        title = "Prefer Offline Voices",
+                        description = "Use on-device voices first; studying keeps working without Internet",
+                        checked = settings.preferOfflineVoices,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(preferOfflineVoices = v) } }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { viewModel.previewVoice(SegmentLanguage.ENGLISH) },
+                            enabled = previewing == null,
+                            modifier = Modifier
+                                .weight(1f)
+                                .semantics { contentDescription = "Preview English voice" }
+                        ) {
+                            Text(if (previewing == SegmentLanguage.ENGLISH) "Playing..." else "Preview English")
+                        }
+                        OutlinedButton(
+                            onClick = { viewModel.previewVoice(SegmentLanguage.ARABIC) },
+                            enabled = previewing == null,
+                            modifier = Modifier
+                                .weight(1f)
+                                .semantics { contentDescription = "Preview Arabic voice" }
+                        ) {
+                            Text(if (previewing == SegmentLanguage.ARABIC) "جارٍ التشغيل..." else "Preview Arabic")
+                        }
                     }
                 }
             }
 
-            // Text to Speech Section
+            // Per-purpose rates + pitch.
             item {
-                Text(
-                    text = "TEXT TO SPEECH (TTS)",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = AccentTeal
-                )
-            }
-
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        LanguageRadioItem(
-                            title = "English Voice",
-                            selected = settings.ttsLanguage == "en-US",
-                            onClick = { viewModel.updateSettings { it.copy(ttsLanguage = "en-US") } }
-                        )
-                        LanguageRadioItem(
-                            title = "Arabic Voice (صوت عربي)",
-                            selected = settings.ttsLanguage == "ar-SA",
-                            onClick = { viewModel.updateSettings { it.copy(ttsLanguage = "ar-SA") } }
-                        )
-
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Text(
-                            text = "Speech Speed: ${(settings.speechRate * 100).roundToInt()}%",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = TextPrimary
-                        )
-                        Slider(
-                            value = settings.speechRate,
-                            onValueChange = { viewModel.updateSettings { s -> s.copy(speechRate = it) } },
-                            valueRange = 0.6f..1.8f
-                        )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = "Pitch: ${(settings.speechPitch * 100).roundToInt()}%",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = TextPrimary
-                        )
-                        Slider(
-                            value = settings.speechPitch,
-                            onValueChange = { viewModel.updateSettings { s -> s.copy(speechPitch = it) } },
-                            valueRange = 0.7f..1.4f
-                        )
-                    }
+            SettingsCard {
+                    RateSlider(
+                        label = "Question Speed",
+                        value = settings.questionRate,
+                        onChange = { v -> viewModel.updateSettings { it.copy(questionRate = v) } }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    RateSlider(
+                        label = "Feedback Speed",
+                        value = settings.feedbackRate,
+                        onChange = { v -> viewModel.updateSettings { it.copy(feedbackRate = v) } }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    RateSlider(
+                        label = "Explanation Speed",
+                        value = settings.explanationRate,
+                        onChange = { v -> viewModel.updateSettings { it.copy(explanationRate = v) } }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Pitch: ${(settings.speechPitch * 100).roundToInt()}%",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary
+                    )
+                    Slider(
+                        value = settings.speechPitch,
+                        onValueChange = { viewModel.updateSettings { s -> s.copy(speechPitch = it) } },
+                        valueRange = 0.7f..1.4f
+                    )
                 }
             }
 
-            // Study Experience Section
-            item {
-                Text(
-                    text = "STUDY EXPERIENCE",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = AccentTeal
-                )
-            }
+            // ------------------------------------------------ Advanced speech behavior
+            item { SectionHeader("ADVANCED SPEECH") }
 
             item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        SettingToggleItem(
-                            title = "Hands-Free Automatic Mode",
-                            description = "Cycle automatically through question -> answer -> feedback -> rating",
-                            checked = settings.handsFreeMode,
-                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(handsFreeMode = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Auto-play Question",
-                            description = "Read new questions aloud immediately upon arrival",
-                            checked = settings.autoPlayQuestion,
-                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoPlayQuestion = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Auto-play Feedback",
-                            description = "Read AI evaluation and comments aloud",
-                            checked = settings.autoPlayFeedback,
-                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoPlayFeedback = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Show Live Transcript",
-                            description = "Display speech-to-text words on screen in real time",
-                            checked = settings.showTranscriptOnScreen,
-                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(showTranscriptOnScreen = v) } }
-                        )
-                    }
+            SettingsCard {
+                    SettingToggleItem(
+                        title = "Automatic Language Detection",
+                        description = "Switch voices inside mixed Arabic/English cards",
+                        checked = settings.ttsAutoLanguageDetection,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(ttsAutoLanguageDetection = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Medical Pronunciation",
+                        description = "Spell abbreviations (G C S), verbalize units (milliliters) and ranges",
+                        checked = settings.ttsMedicalPronunciation,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(ttsMedicalPronunciation = v) } }
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(text = "On Headset Disconnect", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+                    Text(
+                        text = "What happens to speech when Bluetooth disconnects mid-question",
+                        style = MaterialTheme.typography.bodySmall, color = TextSecondary
+                    )
+                    LanguageRadioItem(
+                        title = "Pause speech (recommended)",
+                        selected = settings.headsetDisconnectBehavior == HeadsetDisconnectBehavior.PAUSE_SPEECH,
+                        onClick = {
+                            viewModel.updateSettings {
+                                it.copy(headsetDisconnectBehavior = HeadsetDisconnectBehavior.PAUSE_SPEECH)
+                            }
+                        }
+                    )
+                    LanguageRadioItem(
+                        title = "Continue on phone speaker",
+                        selected = settings.headsetDisconnectBehavior == HeadsetDisconnectBehavior.CONTINUE_ON_PHONE,
+                        onClick = {
+                            viewModel.updateSettings {
+                                it.copy(headsetDisconnectBehavior = HeadsetDisconnectBehavior.CONTINUE_ON_PHONE)
+                            }
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Mic handoff gap: ${settings.ttsAcousticGapMs} ms",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Pause between speech end and microphone activation (echo protection)",
+                        style = MaterialTheme.typography.bodySmall, color = TextSecondary
+                    )
+                    Slider(
+                        value = settings.ttsAcousticGapMs.toFloat(),
+                        onValueChange = { v ->
+                            viewModel.updateSettings {
+                                it.copy(
+                                    ttsAcousticGapMs = v.roundToInt().coerceIn(
+                                        TtsSettings.MIN_ACOUSTIC_GAP_MS,
+                                        TtsSettings.MAX_ACOUSTIC_GAP_MS
+                                    )
+                                )
+                            }
+                        },
+                        valueRange = TtsSettings.MIN_ACOUSTIC_GAP_MS.toFloat()..TtsSettings.MAX_ACOUSTIC_GAP_MS.toFloat()
+                    )
                 }
             }
 
-            // Advanced / Diagnostics Section
-            item {
-                Text(
-                    text = "NETWORK & ADVANCED",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = AccentTeal
-                )
-            }
+            // ------------------------------------------------ Study experience
+            item { SectionHeader("STUDY EXPERIENCE") }
 
             item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        SettingToggleItem(
-                            title = "Auto Reconnect",
-                            description = "Automatically reconnect with exponential backoff if network drops",
-                            checked = settings.autoReconnect,
-                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoReconnect = v) } }
-                        )
-                        SettingToggleItem(
-                            title = "Diagnostics Logging",
-                            description = "Store sanitized session logs for troubleshooting",
-                            checked = settings.debugLogging,
-                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(debugLogging = v) } }
-                        )
-                    }
+            SettingsCard {
+                    SettingToggleItem(
+                        title = "Hands-Free Automatic Mode",
+                        description = "Cycle automatically through question -> answer -> feedback -> rating",
+                        checked = settings.handsFreeMode,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(handsFreeMode = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Auto-play Question",
+                        description = "Read new questions aloud immediately upon arrival",
+                        checked = settings.autoPlayQuestion,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoPlayQuestion = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Auto-play Feedback",
+                        description = "Read AI evaluation and comments aloud",
+                        checked = settings.autoPlayFeedback,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoPlayFeedback = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Show Live Transcript",
+                        description = "Display speech-to-text words on screen in real time",
+                        checked = settings.showTranscriptOnScreen,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(showTranscriptOnScreen = v) } }
+                    )
                 }
             }
 
+            // ------------------------------------------------ Network & advanced
+            item { SectionHeader("NETWORK & ADVANCED") }
+
             item {
-                Spacer(modifier = Modifier.height(24.dp))
+            SettingsCard {
+                    SettingToggleItem(
+                        title = "Auto Reconnect",
+                        description = "Automatically reconnect with exponential backoff if network drops",
+                        checked = settings.autoReconnect,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoReconnect = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Diagnostics Logging",
+                        description = "Store sanitized session logs for troubleshooting",
+                        checked = settings.debugLogging,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(debugLogging = v) } }
+                    )
+                }
             }
+
+            item { Spacer(modifier = Modifier.height(24.dp)) }
         }
     }
+}
+
+// ---------------------------------------------------------------- composables
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.labelMedium,
+        color = AccentTeal
+    )
+}
+
+@Composable
+private fun SettingsCard(content: @Composable () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun VoicePicker(
+    title: String,
+    voices: List<TtsVoiceInfo>,
+    selectedVoiceId: String?,
+    onSelect: (String?) -> Unit
+) {
+    Text(text = title, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+    Spacer(modifier = Modifier.height(4.dp))
+    LanguageRadioItem(
+        title = "Auto — Recommended",
+        selected = selectedVoiceId == null,
+        onClick = { onSelect(null) }
+    )
+    if (voices.isEmpty()) {
+        Text(
+            text = "Installed voices appear here once the speech engine is ready.",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted,
+            modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 4.dp)
+        )
+    }
+    voices.forEach { voice ->
+        LanguageRadioItem(
+            title = voiceLabel(voice),
+            selected = selectedVoiceId == voice.id,
+            onClick = { onSelect(voice.id) }
+        )
+    }
+}
+
+private fun voiceLabel(voice: TtsVoiceInfo): String {
+    val badges = buildList {
+        if (!voice.networkRequired) add("offline") else add("network")
+        if (voice.quality >= VoiceQuality.HIGH) add("HQ")
+        if (voice.latency <= VoiceLatency.LOW) add("fast")
+    }.joinToString(", ")
+    return "${voice.displayName} [$badges]"
+}
+
+@Composable
+private fun RateSlider(label: String, value: Float, onChange: (Float) -> Unit) {
+    Text(
+        text = "$label: ${(value * 100).roundToInt()}%",
+        style = MaterialTheme.typography.bodyMedium,
+        color = TextPrimary
+    )
+    Slider(
+        value = value.coerceIn(0.6f, 1.8f),
+        onValueChange = onChange,
+        valueRange = 0.6f..1.8f
+    )
 }
 
 @Composable

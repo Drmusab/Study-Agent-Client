@@ -10,7 +10,7 @@ import com.studyagent.client.core.models.StudySession
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.models.VoiceCommand
 import com.studyagent.client.core.voice.SpeechRecognitionManager
-import com.studyagent.client.core.voice.TextToSpeechManager
+import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import com.studyagent.client.data.repository.ConnectionRepository
 import com.studyagent.client.data.repository.StudySessionRepository
@@ -24,7 +24,7 @@ class StudyViewModel(
     private val connectionRepository: ConnectionRepository,
     private val audioRouteManager: AudioRouteManager,
     private val speechRecognitionManager: SpeechRecognitionManager,
-    private val textToSpeechManager: TextToSpeechManager,
+    private val speechOrchestrator: SpeechOrchestrator,
     private val preferencesDataStore: PreferencesDataStore
 ) : ViewModel() {
 
@@ -35,7 +35,7 @@ class StudyViewModel(
     val isHeadsetConnected: StateFlow<Boolean> = audioRouteManager.isHeadsetConnected
 
     val isListening: StateFlow<Boolean> = speechRecognitionManager.isListening
-    val isSpeaking: StateFlow<Boolean> = textToSpeechManager.isSpeaking
+    val isSpeaking: StateFlow<Boolean> = speechOrchestrator.isSpeaking
 
     val appSettings = preferencesDataStore.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
@@ -108,6 +108,10 @@ class StudyViewModel(
         } else {
             studySessionRepository.startManualPushToTalk()
         }
+    }
+
+    fun onStopSpeaking() {
+        studySessionRepository.requestStopSpeaking()
     }
 
     fun onSubmitTextAnswer(cardId: String, text: String) {

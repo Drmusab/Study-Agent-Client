@@ -15,10 +15,10 @@ To achieve this, the entire study loop is orchestrated by a state machine that c
                        └────────────┬────────────┘
                                     │ Tap Start Study or Voice "Start"
                        ┌────────────▼────────────┐
-                       │    SPEAKING_QUESTION    │ ◄──────────────────────┐
+                       │ SPEAKING_QUESTION    │ ◄──────────────────────┐
                        │   (TTS reads aloud)     │                        │
                        └────────────┬────────────┘                        │
-                                    │ Utterance OnDone + 200ms Acoustic Gap
+                                    │ SpeechResult.Completed + Handoff Gap
                        ┌────────────▼────────────┐                        │
                        │        LISTENING        │                        │
                        │  (STT active / PTT)     │                        │
@@ -51,6 +51,8 @@ To achieve this, the entire study loop is orchestrated by a state machine that c
 
 The client includes local, low-latency command parsing that operates before sending data to the server, supporting both **English** and **Arabic** natural voice patterns.
 
+> **"Stop speaking"** ("stop speaking", "quiet", "enough" / "اسكت", "توقف عن الكلام") cancels speech output **without** ending the session; plain "stop" still ends it. Checked before EndSession during parsing.
+
 | Action | English Voice Commands | Arabic Voice Commands (الأوامر الصوتية بالعربية) |
 | :--- | :--- | :--- |
 | **Rate: Again** | "Again", "Repeat card", "Forgot", "Zero" | "مرة أخرى", "مرة اخرى", "اعد", "أعد", "نسيت", "من جديد" |
@@ -79,10 +81,16 @@ The client includes local, low-latency command parsing that operates before send
   - **Built-in Speaker** (`TYPE_BUILTIN_SPEAKER`)
 
 ### 4.2 Disconnection Resilience
-* If Bluetooth headphones disconnect during a study session, the app:
-  1. Immediately pauses TTS audio and Speech recognition.
-  2. Transitions to fallback phone speaker and microphone safely.
-  3. When headphones reconnect, normal headset operation resumes automatically without session termination.
+* `AudioRouteManager` reports *device presence* via `AudioDeviceCallback`; the speech pipeline treats a drop while speaking per the user setting (default **Pause speech**):
+  1. In-flight and queued speech requests are cancelled with a typed `ROUTE_LOST` failure — nothing continues over the loudspeaker by surprise.
+  2. The session remains alive; the study state machine is untouched.
+  3. On reconnect, the interrupted question is repeated once (deterministic), only when hands-free mode is on.
+* `CONTINUE_ON_PHONE` restores the legacy "Android reroutes everything" behavior for users who want it.
+
+### 4.3 Speech Pipeline Notes (see docs/TTS_ARCHITECTURE.md for the full model)
+* All speech goes through `SpeechOrchestrator` as structured `SpeechRequest`s with purposes, priorities and queue policies; results are `Completed / Cancelled / Failed` delivered exactly once.
+* The TTS→STT transition is governed by `VoiceHandoffController`: Completed-confirmed end + acoustic gap (default 350 ms, settings-tunable 150–1200 ms) before the microphone opens. There is no fixed sleep anywhere in the loop.
+* Mixed Arabic/English cards are segmented per-language and spoken by the matching installed voice; medical numbers/units/abbreviations are normalized for speech only.
 
 ---
 

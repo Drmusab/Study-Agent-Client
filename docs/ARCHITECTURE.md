@@ -84,7 +84,8 @@ The Android app follows Clean Architecture principles with unidirectional data f
 ┌──────────────────────────────▼──────────────────────────────┐
 │                    CORE PLATFORM LAYER                      │
 │  • Android SpeechRecognizer (Locale-aware STT)              │
-│  • Android TextToSpeech (Utterance listener queue)          │
+│  • TtsEngineAdapter → single Android TextToSpeech instance  │
+│  • AudioFocusController (transient spoken-audio focus)      │
 │  • AudioManager & AudioDeviceCallback (Route Manager)       │
 │  • Foreground Service with Media Actions Notification       │
 └─────────────────────────────────────────────────────────────┘
@@ -124,9 +125,22 @@ com.studyagent.client/
 │   │   ├── SpeechRecognitionManager.kt # STT abstraction
 │   │   ├── AndroidSpeechRecognitionManager.kt # Android SpeechRecognizer wrapper
 │   │   ├── SpeechRecognitionResult.kt  # Partial, Final, NoSpeech, Error
-│   │   ├── TextToSpeechManager.kt   # TTS abstraction with utterance callbacks
-│   │   ├── AndroidTextToSpeechManager.kt # Android TextToSpeech engine
-│   │   └── VoiceCommandManager.kt   # English + Arabic fuzzy regex command matcher
+│   │   ├── VoiceCommandManager.kt   # English + Arabic fuzzy regex command matcher
+│   │   └── tts/                     # Speech-output subsystem (docs/TTS_ARCHITECTURE.md)
+│   │       ├── SpeechModels.kt      # SpeechRequest/Result/Purpose/Priority/QueuePolicy/TtsState
+│   │       ├── SpeechOrchestrator.kt# The single speech API (interface + health/metrics)
+│   │       ├── DefaultSpeechOrchestrator.kt # Pure-Kotlin conductor (unit-tested)
+│   │       ├── TtsEngineAdapter.kt  # Coroutine-first engine abstraction
+│   │       ├── AndroidTtsEngineAdapter.kt # Hardened TextToSpeech wrapper (single engine)
+│   │       ├── SpeechQueue.kt       # Bounded priority queue with policies
+│   │       ├── TtsVoiceSelector.kt  # Deterministic offline-preferring voice ranking
+│   │       ├── SpeechTextPreprocessor.kt # HTML/Anki markup cleanup (speech-only)
+│   │       ├── MedicalPronunciationProcessor.kt # Abbreviations/units/numbers
+│   │       ├── MixedLanguageSegmenter.kt # Arabic/English run segmentation
+│   │       ├── SpeechChunker.kt     # Semantic chunking via getMaxSpeechInputLength
+│   │       ├── AudioFocusController.kt # Spoken-audio focus policy
+│   │       ├── SpeechFormatting.kt  # Centralized spoken labels & preview text
+│   │       └── VoiceHandoffController.kt # TTS→STT acoustic-handoff policy
 │   │
 │   ├── audio/                       # Hardware audio routing
 │   │   ├── AudioRouteManager.kt     # Modern AudioDeviceInfo routing manager
@@ -189,3 +203,6 @@ com.studyagent.client/
 3. **Default Computation Thread (`Dispatchers.Default`):**
    - Voice command regex normalization and string matching.
    - State machine transition computations.
+   - Speech pipeline: markup cleanup, pronunciation, segmentation, chunking
+     (the `SpeechOrchestrator` actor + pump run here; engine calls are posted
+     to the main thread by the engine adapter).
