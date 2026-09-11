@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
+import java.util.concurrent.Executor
 
 /**
  * The only place in the app that touches [SpeechRecognizer] (§54/§55).
@@ -212,7 +213,12 @@ class AndroidSpeechRecognitionBackend(
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appContext.packageName)
             }
             runCatching {
-                rec.checkRecognitionSupport(probe, object : RecognitionSupportCallback {
+                // The platform exposes only the three-argument form
+                // `checkRecognitionSupport(Intent, Executor, RecognitionSupportCallback)`;
+                // there is no two-argument overload. A direct executor runs the callback on
+                // the calling thread, which is already the main thread here (postToMain), so
+                // the capability StateFlow is updated on the same thread as every other write.
+                rec.checkRecognitionSupport(probe, Executor { it.run() }, object : RecognitionSupportCallback {
                     override fun onSupportResult(support: RecognitionSupport) {
                         val supported = support.supportedOnDeviceLanguages.toSet()
                         val installed = support.installedOnDeviceLanguages.toSet()
@@ -238,24 +244,38 @@ class AndroidSpeechRecognitionBackend(
         }
     }
 
+    /**
+     * Returns `true` only when a download request was actually handed to a recognizer.
+     *
+     * `SpeechRecognizer` calls must happen on the main thread, so the work is posted. When
+     * this is called from the main thread — the normal case, since the caller is the Settings
+     * button — `postToMain` runs the block inline and the result below is exact. Called from a
+     * background thread the block is merely queued and cannot have run yet, so the fallback
+     * reports only whether a recognizer exists for it to reach. It never claims the download
+     * started.
+     */
     override fun requestModelDownload(languageTag: String): Boolean {
         if (Build.VERSION.SDK_INT < 33) return false
-        var requested = false
-        // Posted rather than run inline: SpeechRecognizer calls must happen on the main thread.
+        var issued = false
         postToMain {
             val rec = recognizer ?: ensureRecognizer(RecognitionBackendKind.SYSTEM)
-            if (rec == null) return@postToMain
+            if (rec == null) {
+                AppLogger.w(tag, "requestModelDownload($languageTag): no recognizer available")
+                return@postToMain
+            }
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageTag)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, appContext.packageName)
             }
             runCatching { rec.triggerModelDownload(intent) }
-                .onSuccess { AppLogger.i(tag, "Model download requested for $languageTag") }
+                .onSuccess {
+                    issued = true
+                    AppLogger.i(tag, "Model download requested for $languageTag")
+                }
                 .onFailure { AppLogger.w(tag, "triggerModelDownload failed: ${it.message}") }
         }
-        requested = true
-        return requested
+        return issued || recognizer != null
     }
 
     // ------------------------------------------------------------------ recognizer

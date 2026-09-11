@@ -204,6 +204,10 @@ nothing else.
 
 `RecognitionCapabilities` is populated from `isRecognitionAvailable`,
 `isOnDeviceRecognitionAvailable` (API 31+) and `checkRecognitionSupport` (API 33+, async).
+Note that the platform exposes only the three-argument
+`checkRecognitionSupport(Intent, Executor, RecognitionSupportCallback)` — there is no
+two-argument overload, so a direct executor is supplied; the call already runs on the main
+thread, so the callback lands there too.
 `null` means "could not determine" and renders as **Unknown** in Diagnostics — never coerced
 to `false`, which would tell the user offline recognition is unavailable when nobody asked.
 

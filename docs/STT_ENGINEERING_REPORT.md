@@ -38,19 +38,30 @@ so `@Serializable` graphs are **not** validated.
 $ kotlinc -no-stdlib -cp <stdlib:coroutines-core-jvm:stubs> -d out <16 files>
 errors: 0     warnings: 0     class files: 124
 
+$ kotlinc -no-stdlib -cp <android-34.jar:stdlib:coroutines-core-jvm:main> -d out \
+        AndroidSpeechRecognitionBackend.kt
+errors: 0     warnings: 0     class files: 15
+
+$ kotlinc -no-stdlib -cp <android-34.jar:stdlib:coroutines-core-jvm:main> -d out \
+        AudioRouteManager.kt AudioDeviceInfoModel.kt
+errors: 0     warnings: 0     class files: 8
+
 $ java -cp <tests:main:junit:hamcrest> org.junit.runner.JUnitCore \
       com.studyagent.client.stt.VoiceCommandInterpreterTest \
       com.studyagent.client.stt.RecognitionPolicyAndVocabularyTest
 JUnit version 4.13.2-SNAPSHOT
 ................................
-Time: 0.182
+Time: 0.171
 
 OK (32 tests)
 ```
 
-**Compiled:** 11 of the 12 files in `core/voice/stt/` (everything except
-`AndroidSpeechRecognitionBackend.kt`), plus `AppSettings.kt`, `VoiceCommand.kt`,
-`TtsSettings.kt`, `AppLogger.kt`.
+**Compiled:** all 12 files in `core/voice/stt/`, plus `AppSettings.kt`, `VoiceCommand.kt`,
+`TtsSettings.kt`, `AppLogger.kt`, `AudioRouteManager.kt` and `AudioDeviceInfoModel.kt`.
+
+`android.jar` for API 34 (26,361,808 bytes) was obtained from the `Sable/android-platforms`
+repository through the GitHub blob API, which is what made the platform-dependent files
+compilable at all. Verifying against it paid for itself immediately — see §4.16 item 8.
 
 **Executed:** 32 of the 53 new tests — `VoiceCommandInterpreterTest` (20) and
 `RecognitionPolicyAndVocabularyTest` (12). These cover command safety, answer safety,
@@ -62,13 +73,15 @@ confidence gates, Arabic normalization, bias-list bounds, and the settings bridg
 |---|---|
 | `./gradlew testDebugUnitTest` | Gradle distribution is on `services.gradle.org` — blocked |
 | `./gradlew assembleDebug` / `assembleRelease` | Android Gradle Plugin and AndroidX are on `dl.google.com` / Maven Central — blocked |
-| `AndroidSpeechRecognitionBackend.kt` (694 lines) | needs `android.jar` (Android SDK platform 34) — `dl.google.com` blocked |
 | `SpeechRecognitionOrchestratorTest.kt` (21 tests) | needs `kotlinx-coroutines-test`, only on Maven Central |
 | All UI, repository, datastore, navigation code | needs AndroidX / Compose artifacts |
+| Resource linking, manifest merging, R8/ProGuard, lint | Gradle-only steps |
 | `@Serializable` model graphs | serialization compiler plugin not run |
 
-The reachable hosts were `registry.npmjs.org`, `pypi.org` / `files.pythonhosted.org`,
-`github.com` and (for part of the session) `codeload.github.com` and `api.github.com`.
+Reachability was unstable and changed several times during the work; `codeload.github.com`
+and `api.github.com` were each unavailable at one point and had to be retried. The reachable
+hosts were `registry.npmjs.org`, `pypi.org` / `files.pythonhosted.org`, `github.com`,
+`codeload.github.com` and `api.github.com`.
 Everything Maven- or Google-hosted returned connection failures, and the GitHub
 credential expired partway through, closing off the source-archive route before
 `kotlinx-coroutines-test` and `android.jar` could be fetched.
@@ -318,6 +331,22 @@ the build before trusting any of it.
 Items 5 and 6 are the ones that matter: both are user-visible behavioural bugs in
 safety-relevant paths, and neither was reachable by reading the code.
 
+Once `android.jar` for API 34 became available, compiling `AndroidSpeechRecognitionBackend.kt`
+added two more:
+
+| # | Defect | How it was caught | Fix |
+|---|---|---|---|
+| 8 | **`checkRecognitionSupport` was called with two arguments.** The platform exposes only `checkRecognitionSupport(Intent, Executor, RecognitionSupportCallback)` — there is no two-argument overload, contrary to what the documentation read at design time suggested. | kotlinc against `android-34.jar`: `inferred type is <no name provided> but Executor was expected` + `no value passed for parameter 'p2'` | pass a direct `Executor { it.run() }`; the call is already inside `postToMain`, so the callback still lands on the main thread |
+| 9 | `requestModelDownload` assigned `requested = true` unconditionally after posting, so it returned `true` even when no recognizer existed or `triggerModelDownload` threw. The local variable was dead — kotlinc flagged it as a redundant initializer. | kotlinc warning, then reading the body | returns the real outcome; documented as exact on the main thread and best-effort when queued |
+
+Every other API-33/34 symbol used in that file was verified present in `android-34.jar` with
+`javap`: `triggerModelDownload(Intent)`, `isOnDeviceRecognitionAvailable`,
+`createOnDeviceSpeechRecognizer`, `DETECTED_LANGUAGE`, `LANGUAGE_DETECTION_CONFIDENCE_LEVEL`,
+`LANGUAGE_SWITCH_RESULT`, `TOP_LOCALE_ALTERNATIVES`, `EXTRA_BIASING_STRINGS`,
+`EXTRA_ENABLE_LANGUAGE_DETECTION`, `EXTRA_ENABLE_LANGUAGE_SWITCH`,
+`EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES`, `EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES`,
+`LANGUAGE_SWITCH_BALANCED`, and the four `RecognitionSupport` getters.
+
 ---
 
 ## 5. API 26–33 vs. 34+ compatibility
@@ -421,10 +450,10 @@ rather than to hide them:
    recognizer reports a switch error.
 6. **Bluetooth SCO quality** materially affects recognition accuracy; this is a hardware
    constraint, not a software one.
-7. **`AndroidSpeechRecognitionBackend.kt` (694 lines) has never been compiled.** It is the one
-   file in the new subsystem that needs `android.jar`. It is also the file that touches every
-   API-level-guarded platform call, so it carries the highest residual compile risk in the
-   change. §4.16 shows what a real compiler found in its siblings.
+7. **Compiling is not the same as running.** `AndroidSpeechRecognitionBackend.kt` now compiles
+   cleanly against `android-34.jar`, but `android.jar` is a stub — every method body throws.
+   The recogniser has never executed on a device or emulator, so callback ordering, timing and
+   OEM variation are all untested.
 
 ---
 
@@ -433,9 +462,7 @@ rather than to hide them:
 Items 1–2 were found by review and are **not fixed**. Items 7–8 are verification gaps rather
 than code defects.
 
-1. **`AndroidSpeechRecognitionBackend.requestModelDownload` returns `true` optimistically**
-   before the main-thread post actually runs. The boolean reflects "a request was scheduled",
-   not "the download started". Should return the posted result instead.
+1. ~~`requestModelDownload` returned `true` optimistically.~~ **Fixed** — see §4.16 item 9.
 2. **`StudySessionRepository.handleRecognitionFailure` re-listen path** calls
    `beginStt(purposeForState(state), card)` where `state` may not be a `Listening` or
    `WaitingForRating` variant. `purposeForState` handles this, but the re-listen should be
@@ -450,7 +477,8 @@ than code defects.
    benefit at flashcard answer length.
 6. **Recognition is turn-based by design.** There is no continuous open-microphone mode, and
    none should be added without an explicit power/privacy decision.
-7. **`AndroidSpeechRecognitionBackend.kt` is uncompiled** — see §0.
+7. **Nothing has been run on a device or emulator.** `android.jar` is a stub, so compiling
+   against it proves types and signatures, not behaviour.
 8. **21 of the 53 new tests are unexecuted** (`SpeechRecognitionOrchestratorTest`), because
    `kotlinx-coroutines-test` could not be obtained. The orchestrator itself compiles.
 
