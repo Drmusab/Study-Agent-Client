@@ -51,7 +51,17 @@ To achieve this, the entire study loop is orchestrated by a state machine that c
 
 The client includes local, low-latency command parsing that operates before sending data to the server, supporting both **English** and **Arabic** natural voice patterns.
 
-> **"Stop speaking"** ("stop speaking", "quiet", "enough" / "اسكت", "توقف عن الكلام") cancels speech output **without** ending the session; plain "stop" still ends it. Checked before EndSession during parsing.
+> **Context decides whether speech is a command at all.** The table below lists the full
+> vocabulary, but a phrase is only *executed* when the study state expects it. While the app
+> is listening for a **medical answer**, only the explicit multi-word phrases ("repeat
+> question", "show answer", "end session", …) may fire. A lone word — "good", "stop", "next",
+> "easy" — is submitted as the answer, never executed. See `docs/STT_ARCHITECTURE.md` §7.
+
+> **Ratings are held to a higher bar.** A spoken rating is applied only on a verbatim grammar
+> match, and a low-confidence rating is never allowed to silently reschedule an Anki card —
+> it is either confirmed with the user or re-listened for.
+
+> **"Stop speaking"** ("stop speaking", "quiet", "enough" / "اسكت", "توقف عن الكلام") cancels speech output **without** ending the session; plain "stop" still ends it. Both are matched as whole phrases — never as a prefix — so an answer containing the word "stop" does not end the session.
 
 | Action | English Voice Commands | Arabic Voice Commands (الأوامر الصوتية بالعربية) |
 | :--- | :--- | :--- |
@@ -74,11 +84,20 @@ The client includes local, low-latency command parsing that operates before send
 ## 4. Audio Routing & Bluetooth Subsystem
 
 ### 4.1 Route Detection
-* `AudioRouteManager` registers Android's `AudioDeviceCallback` and monitors `AudioManager.GET_DEVICES_OUTPUTS`.
-* Distinguishes between:
+* `AudioRouteManager` registers Android's `AudioDeviceCallback` and monitors **both** `AudioManager.GET_DEVICES_OUTPUTS` and `GET_DEVICES_INPUTS`.
+* **Output** routes distinguish:
   - **Bluetooth Headsets** (`TYPE_BLUETOOTH_SCO`, `TYPE_BLUETOOTH_A2DP`, `TYPE_BLE_HEADSET`)
   - **Wired Headsets** (`TYPE_WIRED_HEADSET`, `TYPE_WIRED_HEADPHONES`, `TYPE_USB_HEADSET`)
   - **Built-in Speaker** (`TYPE_BUILTIN_SPEAKER`)
+* **Input** routes are tracked separately, because an output device says nothing about the
+  microphone. `TYPE_BLUETOOTH_A2DP` is playback-only and never appears in the input list,
+  whereas `TYPE_BLUETOOTH_SCO` appearing there means the communication profile — and so a
+  usable headset microphone — is actually available.
+* The app never claims a Bluetooth microphone is active merely because Bluetooth headphones
+  are connected. Where the route is inferred rather than known, `InputRouteInfo.isCertain` is
+  `false` and Diagnostics render it as *"… (system-selected)"*.
+* Losing the microphone route during recognition cancels the turn; a half-recognised answer
+  is never submitted.
 
 ### 4.2 Disconnection Resilience
 * `AudioRouteManager` reports *device presence* via `AudioDeviceCallback`; the speech pipeline treats a drop while speaking per the user setting (default **Pause speech**):
@@ -91,6 +110,19 @@ The client includes local, low-latency command parsing that operates before send
 * All speech goes through `SpeechOrchestrator` as structured `SpeechRequest`s with purposes, priorities and queue policies; results are `Completed / Cancelled / Failed` delivered exactly once.
 * The TTS→STT transition is governed by `VoiceHandoffController`: Completed-confirmed end + acoustic gap (default 350 ms, settings-tunable 150–1200 ms) before the microphone opens. There is no fixed sleep anywhere in the loop.
 * Mixed Arabic/English cards are segmented per-language and spoken by the matching installed voice; medical numbers/units/abbreviations are normalized for speech only.
+
+### 4.4 Speech Recognition (STT)
+* Recognition is **turn-based**, never continuous: the microphone is open only inside an
+  explicit answer or rating window.
+* Every turn carries a purpose (`ANSWER`, `RATING`, `COMMAND`, `PUSH_TO_TALK_ANSWER`, …) which
+  determines endpointing, watchdog budget, vocabulary biasing and acceptance thresholds.
+* A turn ends only on a terminal recognizer callback, so a second turn can never start while
+  the recognizer is still working (the `ERROR_RECOGNIZER_BUSY` race).
+* Results are stamped with a request id and card id; a late callback from a cancelled turn is
+  dropped rather than applied to the next card.
+* Push-to-talk release calls `stopListening()` and **waits** for the final result — it never
+  submits at the moment of release.
+* Full model: `docs/STT_ARCHITECTURE.md`.
 
 ---
 

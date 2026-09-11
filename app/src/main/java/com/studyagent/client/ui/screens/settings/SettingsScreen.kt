@@ -31,6 +31,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.studyagent.client.core.models.AppSettings
+import com.studyagent.client.core.voice.stt.AnswerEndpointProfile
+import com.studyagent.client.core.voice.stt.RecognitionCapabilities
 import com.studyagent.client.core.voice.tts.HeadsetDisconnectBehavior
 import com.studyagent.client.core.voice.tts.SegmentLanguage
 import com.studyagent.client.core.voice.tts.TtsSettings
@@ -55,6 +58,7 @@ fun SettingsScreen(
     val englishVoices by viewModel.englishVoices.collectAsState()
     val arabicVoices by viewModel.arabicVoices.collectAsState()
     val previewing by viewModel.previewing.collectAsState()
+    val recognitionCapabilities by viewModel.recognitionCapabilities.collectAsState()
 
     Scaffold(
         containerColor = DarkBackground,
@@ -83,20 +87,168 @@ fun SettingsScreen(
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // ------------------------------------------------ Voice recognition (STT)
-            item { SectionHeader("VOICE RECOGNITION (STT)") }
+            // ------------------------------------------------ Speech recognition (STT)
+            item { SectionHeader("SPEECH RECOGNITION") }
 
             item {
-            SettingsCard {
-                    LanguageRadioItem(
-                        title = "English (United States)",
-                        selected = settings.sttLanguage == "en-US",
-                        onClick = { viewModel.updateSettings { it.copy(sttLanguage = "en-US") } }
+                SettingsCard {
+                    Text(
+                        text = "Language",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary
                     )
                     LanguageRadioItem(
-                        title = "Arabic (العربية)",
-                        selected = settings.sttLanguage == "ar-SA",
-                        onClick = { viewModel.updateSettings { it.copy(sttLanguage = "ar-SA") } }
+                        title = "Auto — English + Arabic",
+                        selected = settings.sttLanguageMode == "AUTO_EN_AR",
+                        onClick = { viewModel.updateSettings { it.copy(sttLanguageMode = "AUTO_EN_AR") } }
+                    )
+                    LanguageRadioItem(
+                        title = "English only",
+                        selected = settings.sttLanguageMode == "ENGLISH",
+                        onClick = { viewModel.updateSettings { it.copy(sttLanguageMode = "ENGLISH") } }
+                    )
+                    LanguageRadioItem(
+                        title = "Arabic only (العربية)",
+                        selected = settings.sttLanguageMode == "ARABIC",
+                        onClick = { viewModel.updateSettings { it.copy(sttLanguageMode = "ARABIC") } }
+                    )
+                    Text(
+                        text = "Auto uses on-device language detection where the recognizer " +
+                            "supports it, and otherwise falls back to English.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted,
+                        modifier = Modifier.padding(start = 8.dp, top = 2.dp)
+                    )
+                }
+            }
+
+            item {
+                SettingsCard {
+                    Text(
+                        text = "Recognition",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary
+                    )
+                    // Vendor-neutral labels: the app never claims a specific provider,
+                    // because it does not control which one is installed.
+                    LanguageRadioItem(
+                        title = "Auto",
+                        selected = settings.sttRecognitionMode == "AUTO",
+                        onClick = { viewModel.updateSettings { it.copy(sttRecognitionMode = "AUTO") } }
+                    )
+                    LanguageRadioItem(
+                        title = "Prefer on-device (offline)",
+                        selected = settings.sttRecognitionMode == "PREFER_ON_DEVICE",
+                        onClick = {
+                            viewModel.updateSettings {
+                                it.copy(sttRecognitionMode = "PREFER_ON_DEVICE", sttPreferOnDevice = true)
+                            }
+                        }
+                    )
+                    LanguageRadioItem(
+                        title = "System default",
+                        selected = settings.sttRecognitionMode == "SYSTEM_DEFAULT",
+                        onClick = {
+                            viewModel.updateSettings { it.copy(sttRecognitionMode = "SYSTEM_DEFAULT") }
+                        }
+                    )
+                }
+            }
+
+            item {
+                SettingsCard {
+                    SettingToggleItem(
+                        title = "Prefer Offline Recognition",
+                        description = offlinePreferenceDescription(recognitionCapabilities),
+                        checked = settings.sttPreferOnDevice,
+                        onCheckedChange = { v ->
+                            viewModel.updateSettings { it.copy(sttPreferOnDevice = v) }
+                        }
+                    )
+                    SettingToggleItem(
+                        title = "Auto-submit Answers",
+                        description = "Send the transcript to the evaluator as soon as recognition " +
+                            "finishes. Off: review, edit or retry before sending.",
+                        checked = settings.autoSubmitTranscript,
+                        onCheckedChange = { v ->
+                            viewModel.updateSettings { it.copy(autoSubmitTranscript = v) }
+                        }
+                    )
+                    SettingToggleItem(
+                        title = "Spoken Ratings",
+                        description = "Listen for \u0022Again / Hard / Good / Easy\u0022 after feedback. " +
+                            "Off: the microphone stays closed and the on-screen buttons are used.",
+                        checked = settings.listenForSpokenRating,
+                        onCheckedChange = { v ->
+                            viewModel.updateSettings { it.copy(listenForSpokenRating = v) }
+                        }
+                    )
+                    SettingToggleItem(
+                        title = "Confirm Ambiguous Ratings",
+                        description = "Ask before applying a rating the recognizer was not confident " +
+                            "about, instead of silently changing the card's schedule.",
+                        checked = settings.confirmRating,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(confirmRating = v) } }
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Answer Length",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary
+                    )
+                    AnswerEndpointProfile.entries.forEach { profile ->
+                        LanguageRadioItem(
+                            title = profile.label,
+                            selected = settings.sttAnswerLength == profile.name,
+                            onClick = {
+                                viewModel.updateSettings { it.copy(sttAnswerLength = profile.name) }
+                            }
+                        )
+                    }
+                }
+            }
+
+            item {
+                SettingsCard {
+                    Text(
+                        text = "Advanced",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary
+                    )
+                    SettingToggleItem(
+                        title = "Live Partial Transcript",
+                        description = "Show words as they are recognised, before the final result",
+                        checked = settings.sttShowPartialTranscript,
+                        onCheckedChange = { v ->
+                            viewModel.updateSettings { it.copy(sttShowPartialTranscript = v) }
+                        }
+                    )
+                    SettingToggleItem(
+                        title = "Medical Vocabulary Biasing",
+                        description = "Hint the recognizer with terms from the current question " +
+                            "(epidural hematoma, midline shift, GCS, ICP...)",
+                        checked = settings.sttMedicalBiasing,
+                        onCheckedChange = { v ->
+                            viewModel.updateSettings { it.copy(sttMedicalBiasing = v) }
+                        }
+                    )
+                    SettingToggleItem(
+                        title = "Log Full Transcripts (developer)",
+                        description = "Writes recognised answer text to the log. Leave off: study " +
+                            "answers can contain personal or clinical detail.",
+                        checked = settings.sttDebugTranscriptLogging,
+                        onCheckedChange = { v ->
+                            viewModel.updateSettings { it.copy(sttDebugTranscriptLogging = v) }
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+                    CapabilitySummary(
+                        capabilities = recognitionCapabilities,
+                        settings = settings,
+                        onDownload = { locale -> viewModel.requestSpeechModelDownload(locale) },
+                        onRefresh = { viewModel.refreshRecognitionCapabilities() }
                     )
                 }
             }
@@ -442,5 +594,101 @@ private fun SettingToggleItem(
             Text(text = description, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+/**
+ * Honest wording for the offline toggle (§23).
+ *
+ * The app never claims offline recognition is working unless it has actually established that
+ * an on-device recognizer exists — a green toggle over a device with no on-device service is
+ * worse than no toggle at all.
+ */
+private fun offlinePreferenceDescription(capabilities: RecognitionCapabilities): String = when {
+    !capabilities.recognitionAvailable ->
+        "No speech recognition service was found on this device."
+
+    capabilities.onDeviceAvailable == true ->
+        "Use the on-device recognizer when the language model is installed. Works without Internet."
+
+    capabilities.onDeviceAvailable == false ->
+        "This device has no on-device recognizer; recognition will use the network."
+
+    else ->
+        "Ask for the on-device recognizer when one is available. Whether it is honoured " +
+            "depends on the installed recognition service."
+}
+
+/**
+ * Capability facts plus a model-download affordance (§24/§26/§88).
+ *
+ * Everything the platform did not tell us renders as "Unknown" — the UI must not lie about
+ * offline support, and it must not start a large download without the user asking.
+ */
+@Composable
+private fun CapabilitySummary(
+    capabilities: RecognitionCapabilities,
+    settings: AppSettings,
+    onDownload: (String) -> Unit,
+    onRefresh: () -> Unit
+) {
+    CapabilityRow("Recognizer available", if (capabilities.recognitionAvailable) "Yes" else "No")
+    CapabilityRow("On-device recognizer", maybe(capabilities.onDeviceAvailable))
+    CapabilityRow("Language detection", maybe(capabilities.languageDetectionSupported))
+    CapabilityRow("Language switching", maybe(capabilities.languageSwitchSupported))
+    CapabilityRow("Vocabulary biasing", maybe(capabilities.vocabularyBiasingSupported))
+
+    val englishState = languageModelLabel(capabilities, "en")
+    val arabicState = languageModelLabel(capabilities, "ar")
+    CapabilityRow("English model", englishState)
+    CapabilityRow("Arabic model", arabicState)
+
+    if (englishState == NEEDS_DOWNLOAD) {
+        OutlinedButton(onClick = { onDownload(settings.sttEnglishLocale) }) {
+            Text("Download English model", color = TextPrimary)
+        }
+    }
+    if (arabicState == NEEDS_DOWNLOAD) {
+        OutlinedButton(onClick = { onDownload(settings.sttArabicLocale) }) {
+            Text("Download Arabic model", color = TextPrimary)
+        }
+    }
+
+    Spacer(modifier = Modifier.height(8.dp))
+    OutlinedButton(onClick = onRefresh) {
+        Text("Re-check capabilities", color = TextPrimary)
+    }
+}
+
+private const val NEEDS_DOWNLOAD = "Supported, not installed"
+
+private fun languageModelLabel(capabilities: RecognitionCapabilities, primary: String): String {
+    if (capabilities.installedLanguages.isEmpty() && capabilities.supportedLanguages.isEmpty()) {
+        return "Unknown"
+    }
+    if (capabilities.installedLanguages.any { it.lowercase().startsWith(primary) }) return "Installed"
+    return if (capabilities.supportedLanguages.any { it.lowercase().startsWith(primary) }) {
+        NEEDS_DOWNLOAD
+    } else {
+        "Not supported"
+    }
+}
+
+private fun maybe(value: Boolean?): String = when (value) {
+    true -> "Yes"
+    false -> "No"
+    null -> "Unknown"
+}
+
+@Composable
+private fun CapabilityRow(label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = label, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+        Text(text = value, style = MaterialTheme.typography.bodySmall, color = TextPrimary)
     }
 }

@@ -6,7 +6,32 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class AppSettings(
     val selectedProfileId: String? = null,
+
+    // ---- Speech recognition (STT) ----
+    /**
+     * Legacy single-locale STT language. Still read (so an existing install keeps its
+     * choice) but superseded by [sttLanguageMode]; see `PreferencesDataStore.readSettings`
+     * for the migration.
+     */
     val sttLanguage: String = "en-US",
+    /** `AUTO_EN_AR` | `ENGLISH` | `ARABIC` — the user no longer switches locale per card. */
+    val sttLanguageMode: String = "AUTO_EN_AR",
+    val sttEnglishLocale: String = "en-US",
+    val sttArabicLocale: String = "ar-IQ",
+    /** Locale AUTO falls back to when language detection/switching is unavailable. */
+    val sttAutoFallbackLocale: String = "en-US",
+    /** `AUTO` | `PREFER_ON_DEVICE` | `SYSTEM_DEFAULT`. */
+    val sttRecognitionMode: String = "AUTO",
+    val sttPreferOnDevice: Boolean = true,
+    val sttShowPartialTranscript: Boolean = true,
+    val sttMedicalBiasing: Boolean = true,
+    /** `SHORT` | `NORMAL` | `LONG` — the only answer-length knob exposed to users. */
+    val sttAnswerLength: String = "NORMAL",
+    /**
+     * Logs full transcript text. Developer opt-in only; medical answers are never logged
+     * by default.
+     */
+    val sttDebugTranscriptLogging: Boolean = false,
 
     // ---- Legacy voice locale (kept for migration compatibility; voices are now per-language) ----
     val ttsLanguage: String = "en-US",

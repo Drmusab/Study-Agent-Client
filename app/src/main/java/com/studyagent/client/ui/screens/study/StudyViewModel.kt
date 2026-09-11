@@ -9,7 +9,7 @@ import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudySession
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.models.VoiceCommand
-import com.studyagent.client.core.voice.SpeechRecognitionManager
+import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import com.studyagent.client.data.repository.ConnectionRepository
@@ -23,7 +23,7 @@ class StudyViewModel(
     private val studySessionRepository: StudySessionRepository,
     private val connectionRepository: ConnectionRepository,
     private val audioRouteManager: AudioRouteManager,
-    private val speechRecognitionManager: SpeechRecognitionManager,
+    private val recognitionOrchestrator: SpeechRecognitionOrchestrator,
     private val speechOrchestrator: SpeechOrchestrator,
     private val preferencesDataStore: PreferencesDataStore
 ) : ViewModel() {
@@ -34,7 +34,14 @@ class StudyViewModel(
     val activeAudioDevice: StateFlow<AudioDeviceInfoModel> = audioRouteManager.activeOutputDevice
     val isHeadsetConnected: StateFlow<Boolean> = audioRouteManager.isHeadsetConnected
 
-    val isListening: StateFlow<Boolean> = speechRecognitionManager.isListening
+    /** Full recognition lifecycle — the study screen renders this, not a bare boolean. */
+    val recognitionState = recognitionOrchestrator.state
+
+    /** Sampled microphone level for the waveform; a separate channel from results (§123). */
+    val audioLevel: StateFlow<Float> = recognitionOrchestrator.audioLevel
+
+    /** Derived convenience kept for existing call sites. */
+    val isListening: StateFlow<Boolean> = recognitionOrchestrator.isListening
     val isSpeaking: StateFlow<Boolean> = speechOrchestrator.isSpeaking
 
     val appSettings = preferencesDataStore.settingsFlow
@@ -98,16 +105,30 @@ class StudyViewModel(
         studySessionRepository.startManualPushToTalk()
     }
 
+    /**
+     * Release push-to-talk. Submits nothing itself: the repository finishes the recognition
+     * turn and submits when the recognizer's final result arrives (§18/§105).
+     */
     fun onPushToTalkUp() {
-        studySessionRepository.stopManualPushToTalk(submitIfTranscriptPresent = true)
+        studySessionRepository.stopManualPushToTalk()
     }
 
     fun onPushToTalkToggle() {
         if (isListening.value) {
-            studySessionRepository.stopManualPushToTalk(submitIfTranscriptPresent = true)
+            studySessionRepository.stopManualPushToTalk()
         } else {
             studySessionRepository.startManualPushToTalk()
         }
+    }
+
+    /** Auto-submit off: send the transcript the user has just reviewed. */
+    fun onSubmitPendingTranscript() {
+        studySessionRepository.submitPendingTranscript()
+    }
+
+    /** Auto-submit off: throw the transcript away and listen again. */
+    fun onDiscardPendingTranscript() {
+        studySessionRepository.discardPendingTranscript()
     }
 
     fun onStopSpeaking() {

@@ -2,225 +2,98 @@ package com.studyagent.client.core.voice
 
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.models.VoiceCommand
+import com.studyagent.client.core.voice.stt.CommandContext
+import com.studyagent.client.core.voice.stt.CommandDecision
+import com.studyagent.client.core.voice.stt.CommandNormalizer
+import com.studyagent.client.core.voice.stt.RecognitionHypothesis
+import com.studyagent.client.core.voice.stt.RecognitionOutcome
+import com.studyagent.client.core.voice.stt.RecognitionPurpose
+import com.studyagent.client.core.voice.stt.SttSettings
+import com.studyagent.client.core.voice.stt.VoiceCommandGrammar
+import com.studyagent.client.core.voice.stt.VoiceCommandInterpreter
 
-class VoiceCommandManager {
+/**
+ * Voice command facade.
+ *
+ * Parsing now lives in [VoiceCommandGrammar] (one explicit phrase table) and
+ * context/confidence gating in [VoiceCommandInterpreter]. This class remains the
+ * compatibility entry point used by tests and by callers that only have a plain string.
+ *
+ * ## What changed, and why
+ *
+ * The previous implementation had two defects that could alter Anki scheduling by accident:
+ *
+ *  1. **Prefix matching.** `matchesAgain` used `t.startsWith("again")`, so the perfectly
+ *     ordinary answer *"again, there is a midline shift"* was parsed as the `Again` rating.
+ *     All phrases are now matched whole.
+ *  2. **`parseInStudyContext` did not actually constrain anything.** Every branch ended in
+ *     `else -> cmd`, so while the app was listening for a *medical answer*, a one-word
+ *     transcript such as "good", "stop", "next" or "easy" was executed as a command instead
+ *     of being submitted as the answer. Context is now authoritative: during an answer only
+ *     explicit multi-word control phrases ("repeat question", "end session") may fire.
+ */
+class VoiceCommandManager(
+    private val grammar: VoiceCommandGrammar = VoiceCommandGrammar(),
+    private val interpreter: VoiceCommandInterpreter = VoiceCommandInterpreter()
+) {
 
+    /**
+     * Parse a single utterance against the controlled grammar, with no study context.
+     *
+     * Uncontextualised on purpose: it answers "what command does this phrase name?", not
+     * "should this phrase be executed right now?". Use [parseInStudyContext] — or better,
+     * the interpreter directly — for the second question.
+     */
     fun parseCommand(input: String): VoiceCommand {
-        val normalized = normalizeText(input)
+        val normalized = CommandNormalizer.forCommand(input)
         if (normalized.isBlank()) return VoiceCommand.Unknown("")
-
-        // 1. Exact / High-confidence rating commands
-        when {
-            matchesAgain(normalized) -> return VoiceCommand.Again
-            matchesHard(normalized) -> return VoiceCommand.Hard
-            matchesGood(normalized) -> return VoiceCommand.Good
-            matchesEasy(normalized) -> return VoiceCommand.Easy
-
-            matchesRepeat(normalized) -> return VoiceCommand.Repeat
-            matchesHint(normalized) -> return VoiceCommand.Hint
-            matchesExplain(normalized) -> return VoiceCommand.Explain
-            matchesShowAnswer(normalized) -> return VoiceCommand.ShowAnswer
-            matchesSkip(normalized) -> return VoiceCommand.Skip
-
-            matchesPause(normalized) -> return VoiceCommand.Pause
-            matchesResume(normalized) -> return VoiceCommand.Resume
-            matchesStopSpeaking(normalized) -> return VoiceCommand.StopSpeaking
-            matchesEnd(normalized) -> return VoiceCommand.EndSession
-            matchesStatus(normalized) -> return VoiceCommand.StatusQuestion
-
-            matchesStart(normalized) -> {
-                val deck = extractDeckFromStartCommand(normalized)
-                return VoiceCommand.StartStudy(deck)
-            }
-        }
-
-        return VoiceCommand.Unknown(input)
+        return grammar.parse(normalized, input)?.command ?: VoiceCommand.Unknown(input)
     }
 
+    /**
+     * Context-aware parse retained for callers that only have a raw string.
+     *
+     * New code should go through [VoiceCommandInterpreter.interpret] so that recognizer
+     * alternatives and confidence scores can inform the decision — a single string cannot
+     * express "rank 0 was 'could' but rank 1 was 'good' at 0.9".
+     */
     fun parseInStudyContext(input: String, currentState: StudyState): VoiceCommand {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return VoiceCommand.Unknown("")
 
-        val cmd = parseCommand(trimmed)
+        val hypothesis = RecognitionHypothesis(text = trimmed, confidence = null, rank = 0)
+        val outcome = RecognitionOutcome(
+            requestId = "uncontextualized",
+            purpose = if (currentState is StudyState.WaitingForRating) {
+                RecognitionPurpose.RATING
+            } else {
+                RecognitionPurpose.ANSWER
+            },
+            cardId = currentState.currentCardOrNull?.id,
+            hypotheses = listOf(hypothesis),
+            selectedText = trimmed,
+            selectedHypothesis = hypothesis
+        )
 
-        return when (currentState) {
-            is StudyState.WaitingForRating -> {
-                when (cmd) {
-                    is VoiceCommand.Again,
-                    is VoiceCommand.Hard,
-                    is VoiceCommand.Good,
-                    is VoiceCommand.Easy,
-                    is VoiceCommand.Repeat,
-                    is VoiceCommand.Hint,
-                    is VoiceCommand.Explain,
-                    is VoiceCommand.ShowAnswer,
-                    is VoiceCommand.Skip,
-                    is VoiceCommand.Pause,
-                    is VoiceCommand.EndSession -> cmd
-                    else -> cmd // Return the recognized command or Unknown
-                }
-            }
-
-            is StudyState.Listening,
-            is StudyState.SpeakingQuestion -> {
-                // If the user spoke a short navigation/session command
-                when (cmd) {
-                    is VoiceCommand.Repeat,
-                    is VoiceCommand.Hint,
-                    is VoiceCommand.Explain,
-                    is VoiceCommand.ShowAnswer,
-                    is VoiceCommand.Skip,
-                    is VoiceCommand.Pause,
-                    is VoiceCommand.StopSpeaking,
-                    is VoiceCommand.EndSession,
-                    is VoiceCommand.StatusQuestion -> cmd
-                    else -> VoiceCommand.SubmitAnswer(trimmed)
-                }
-            }
-
-            is StudyState.ShowingFeedback,
-            is StudyState.HintShowing,
-            is StudyState.ExplanationShowing -> {
-                when (cmd) {
-                    is VoiceCommand.Again,
-                    is VoiceCommand.Hard,
-                    is VoiceCommand.Good,
-                    is VoiceCommand.Easy,
-                    is VoiceCommand.Repeat,
-                    is VoiceCommand.Explain,
-                    is VoiceCommand.Skip,
-                    is VoiceCommand.Pause,
-                    is VoiceCommand.StopSpeaking,
-                    is VoiceCommand.EndSession -> cmd
-                    else -> cmd
-                }
-            }
-
-            is StudyState.Idle,
-            is StudyState.SessionFinished,
-            is StudyState.Error -> {
-                when (cmd) {
-                    is VoiceCommand.StartStudy,
-                    is VoiceCommand.Resume -> cmd
-                    else -> cmd
-                }
-            }
-
-            is StudyState.Paused -> {
-                when (cmd) {
-                    is VoiceCommand.Resume,
-                    is VoiceCommand.EndSession -> cmd
-                    else -> cmd
-                }
-            }
-
-            else -> cmd
+        return when (val decision = interpreter.interpret(outcome, contextFor(currentState), SttSettings())) {
+            is CommandDecision.Execute -> decision.parsed.command
+            is CommandDecision.SubmitAnswer -> VoiceCommand.SubmitAnswer(decision.text)
+            // No confident command and no usable answer: report nothing rather than letting
+            // a retry prompt or a guess flow back into study logic.
+            is CommandDecision.NeedsConfirmation,
+            is CommandDecision.Retry,
+            is CommandDecision.Ignore -> VoiceCommand.Unknown("")
         }
     }
 
-    private fun normalizeText(text: String): String {
-        return text.lowercase()
-            .replace(Regex("[.,!?;:\"'\\[\\]()]"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    private fun matchesAgain(t: String): Boolean {
-        return t in setOf("again", "repeat card", "forgot", "zero", "مرة اخرى", "مرة أخرى", "اعد", "أعد", "نسيت", "من جديد") ||
-                t.startsWith("again") || t.startsWith("مرة اخرى")
-    }
-
-    private fun matchesHard(t: String): Boolean {
-        return t in setOf("hard", "difficult", "tough", "صعب", "شاق", "مش سهل") ||
-                t == "hard card" || t == "صعب جدا"
-    }
-
-    private fun matchesGood(t: String): Boolean {
-        return t in setOf("good", "correct", "got it", "nice", "جيد", "تمام", "صحيح", "ممتاز", "مقبول") ||
-                t == "it was good" || t == "جيد جدا"
-    }
-
-    private fun matchesEasy(t: String): Boolean {
-        return t in setOf("easy", "simple", "piece of cake", "trivial", "سهل", "بسيط", "واضح", "سهل جدا") ||
-                t == "very easy"
-    }
-
-    private fun matchesRepeat(t: String): Boolean {
-        return t in setOf(
-            "repeat", "repeat question", "say again", "what was the question", "one more time", "pardon",
-            "أعد", "اعد", "أعد السؤال", "اعد السؤال", "كرر", "كرر السؤال", "ما هو السؤال", "مرة ثانية"
-        ) || t.startsWith("repeat question") || t.startsWith("اعد السؤال")
-    }
-
-    private fun matchesHint(t: String): Boolean {
-        return t in setOf("hint", "give me a hint", "need a hint", "give hint", "تلميح", "اعطني تلميح", "أعطني تلميح", "ساعدني", "تلميحة") ||
-                t.startsWith("hint") || t.startsWith("تلميح")
-    }
-
-    private fun matchesExplain(t: String): Boolean {
-        return t in setOf("explain", "explanation", "why", "tell me more", "elaborate", "اشرح", "شرح", "وضح", "توضيح", "لماذا", "علل") ||
-                t.startsWith("explain") || t.startsWith("اشرح")
-    }
-
-    private fun matchesShowAnswer(t: String): Boolean {
-        return t in setOf(
-            "show answer", "give answer", "what is the answer", "what's the answer", "reveal answer", "answer",
-            "اظهر الجواب", "أظهر الجواب", "ما هو الجواب", "الجواب", "الحل", "اظهر الحل"
-        )
-    }
-
-    private fun matchesSkip(t: String): Boolean {
-        return t in setOf("skip", "next", "next card", "pass", "skip card", "التالي", "تخطي", "تجاوز", "البطاقة التالية", "عدي")
-    }
-
-    private fun matchesPause(t: String): Boolean {
-        return t in setOf("pause", "pause study", "pause session", "hold on", "wait", "توقف", "توقف مؤقت", "انتظر", "استراحة")
-    }
-
-    private fun matchesResume(t: String): Boolean {
-        return t in setOf("resume", "continue", "resume study", "resume session", "keep going", "اكمل", "استمر", "تابع", "واصل")
-    }
-
-    /**
-     * "Stop talking" commands (§63) cancel speech but keep the session alive.
-     * Checked BEFORE [matchesEnd] so "stop speaking" never ends the session,
-     * while plain "stop" still maps to EndSession for backward compatibility.
-     */
-    private fun matchesStopSpeaking(t: String): Boolean {
-        return t in setOf(
-            "stop speaking", "stop talking", "be quiet", "quiet", "enough", "shut up", "silence", "hush",
-            "توقف عن الكلام", "اكتف", "اكتفي", "اسكت", "اسكتي", "كفى", "كلام كفاية"
-        )
-    }
-
-    private fun matchesEnd(t: String): Boolean {
-        return t in setOf("stop", "end", "end session", "stop session", "finish", "quit", "انهاء", "إنهاء", "وقف", "خروج", "انهي الجلسة")
-    }
-
-    private fun matchesStatus(t: String): Boolean {
-        return t in setOf(
-            "how many cards left", "remaining cards", "cards remaining", "status", "how many left",
-            "كم بطاقة متبقية", "كم باقي", "العدد المتبقي", "كم تبقى", "الحالة"
-        )
-    }
-
-    private fun matchesStart(t: String): Boolean {
-        return t in setOf("start", "start study", "start studying", "start session", "let's study", "ابدأ", "ابدأ الدراسة", "ابدأ الجلسة", "يلا ندرس") ||
-                t.startsWith("start ") || t.startsWith("ابدأ ")
-    }
-
-    private fun extractDeckFromStartCommand(text: String): String? {
-        val prefixes = listOf("start study on ", "start studying ", "start session ", "start ", "ابدأ دراسة ", "ابدأ ")
-        for (prefix in prefixes) {
-            if (text.startsWith(prefix)) {
-                val rem = text.substring(prefix.length).trim()
-                if (rem.isNotEmpty() && rem != "study" && rem != "session" && rem != "الدراسة" && rem != "الجلسة") {
-                    return rem.split(" ").filter { it.isNotBlank() }.joinToString(" ") { word ->
-                        word.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-                    }
-                }
-            }
-        }
-        return null
+    /** `StudyState` → the interpreter's framework-free notion of "what is expected now". */
+    fun contextFor(state: StudyState): CommandContext = when (state) {
+        is StudyState.Listening -> CommandContext.ANSWER_EXPECTED
+        is StudyState.WaitingForRating -> CommandContext.RATING_EXPECTED
+        is StudyState.ShowingFeedback,
+        is StudyState.HintShowing,
+        is StudyState.ExplanationShowing -> CommandContext.FEEDBACK_SHOWING
+        is StudyState.Paused -> CommandContext.PAUSED
+        else -> CommandContext.IDLE
     }
 }
