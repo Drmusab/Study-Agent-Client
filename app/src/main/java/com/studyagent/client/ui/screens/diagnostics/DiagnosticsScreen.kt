@@ -63,6 +63,7 @@ fun DiagnosticsScreen(
     val connectionState by viewModel.connectionState.collectAsState()
     val audioDevice by viewModel.activeOutputDevice.collectAsState()
     val isHeadset by viewModel.isHeadsetConnected.collectAsState()
+    val ttsHealth by viewModel.ttsHealth.collectAsState()
 
     Scaffold(
         containerColor = DarkBackground,
@@ -121,6 +122,50 @@ fun DiagnosticsScreen(
                         Text(text = "Connection: ${connectionState.label}", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
                         Text(text = "Audio Route: ${audioDevice.name} (${audioDevice.typeName})", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
                         Text(text = "Headset Active: ${if (isHeadset) "Yes" else "No"}", style = MaterialTheme.typography.bodyMedium, color = AccentTeal)
+                    }
+                }
+            }
+
+            // TTS health card (§50): live engine/voice/queue/metrics state.
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(text = "TTS HEALTH", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Engine: ${ttsHealth.enginePackage ?: "unknown"} — ${ttsHealth.engineStatus}",
+                            style = MaterialTheme.typography.bodyMedium, color = TextPrimary
+                        )
+                        Text(
+                            text = "English Voice: ${ttsHealth.englishVoiceDisplay ?: "auto (unresolved)"}",
+                            style = MaterialTheme.typography.bodyMedium, color = TextSecondary
+                        )
+                        Text(
+                            text = "Arabic Voice: ${ttsHealth.arabicVoiceDisplay ?: "auto (unresolved)"}",
+                            style = MaterialTheme.typography.bodyMedium, color = TextSecondary
+                        )
+                        Text(
+                            text = "Offline Ready: en=${ttsHealth.englishVoiceOffline?.let { if (it) "Yes" else "No" } ?: "?"} / ar=${ttsHealth.arabicVoiceOffline?.let { if (it) "Yes" else "No" } ?: "?"}",
+                            style = MaterialTheme.typography.bodyMedium, color = TextSecondary
+                        )
+                        Text(
+                            text = "Audio Focus: ${if (ttsHealth.audioFocusHeld) "Held" else "Released"}   Queue: ${ttsHealth.queueDepth}",
+                            style = MaterialTheme.typography.bodyMedium, color = TextSecondary
+                        )
+                        Text(
+                            text = "Metrics: ready=${ttsHealth.metrics.timeToReadyMs}ms, start=${ttsHealth.metrics.lastRequestToStartMs}ms, " +
+                                "ok=${ttsHealth.metrics.completedRequests}, fail=${ttsHealth.metrics.failedRequests}, cancel=${ttsHealth.metrics.cancelledRequests}",
+                            style = MaterialTheme.typography.bodySmall, color = TextMuted
+                        )
+                        Text(
+                            text = "Last Error: ${ttsHealth.lastError?.let { "${it.code}: ${it.message}" } ?: "none"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (ttsHealth.lastError != null) StatusRed else StatusGreen
+                        )
                     }
                 }
             }

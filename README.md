@@ -167,6 +167,7 @@ The voice engine recognizes both English and Arabic commands locally for rapid r
 | **Pause Study** | "Pause", "Pause study", "Hold on" | "توقف", "توقف مؤقت", "انتظر" |
 | **Resume Study** | "Resume", "Continue", "Keep going" | "اكمل", "استمر", "تابع" |
 | **End Session** | "Stop", "End session", "Quit" | "انهاء", "إنهاء", "وقف", "خروج" |
+| **Stop Speaking** *(cancels speech only, keeps session)* | "Stop speaking", "Quiet", "Enough" | "اسكت", "توقف عن الكلام", "اكتف" |
 | **Remaining Cards** | "How many cards left?", "Status" | "كم بطاقة متبقية", "كم باقي" |
 
 ---
@@ -175,7 +176,11 @@ The voice engine recognizes both English and Arabic commands locally for rapid r
 
 From the **Settings** screen:
 * **Voice Recognition (STT):** Choose between English (`en-US`) and Arabic (`ar-SA`).
-* **Text-to-Speech (TTS):** Choose English or Arabic synthesized voice, speech speed slider (0.6x - 1.8x), and pitch slider.
+* **Voice Output (TTS):**
+  * **Per-language voices:** pick any installed engine voice for English and Arabic, or keep Auto (offline-preferring recommended ranking); buttons play a voice **preview**.
+  * **Prefer Offline Voices:** on-device voices are ranked first so studying keeps working without Internet.
+  * **Per-purpose speeds:** separate sliders for questions, feedback, and explanations (0.6x – 1.8x), plus pitch.
+* **Advanced Speech:** automatic Arabic/English language detection for mixed cards, medical pronunciation (G C S, milliliters, "15 out of 15"), headset-disconnect behavior (pause speech vs. continue on speaker), and the mic handoff gap (150–1200 ms).
 * **Hands-Free Mode:** Enable/disable automatic question reading and listening cycles.
 * **Show Live Transcript:** Toggle real-time speech transcription display on the study card.
 * **Auto Reconnect:** Enable exponential backoff reconnection when switching Wi-Fi networks.
@@ -211,7 +216,7 @@ StudyAgentClient/
 │   ├── src/main/java/com/studyagent/client/
 │   │   ├── core/models/              # Domain models & protocol messages
 │   │   ├── core/network/             # WebSocket connection & reconnect controller
-│   │   ├── core/voice/               # SpeechRecognizer & TextToSpeech managers
+│   │   ├── core/voice/               # STT manager, command parser & tts/ speech pipeline
 │   │   ├── core/audio/               # AudioDevice routing & Bluetooth manager
 │   │   ├── core/security/            # Encrypted token storage & log sanitizer
 │   │   ├── data/                     # Repositories & Jetpack DataStore
@@ -224,6 +229,8 @@ StudyAgentClient/
 │   └── test_client.py                # Automated protocol integration tester
 ├── docs/                             # Full Architectural Documentation
 │   ├── ARCHITECTURE.md               # Deep architectural specification
+│   ├── TTS_ARCHITECTURE.md           # Speech pipeline: engine, voices, queueing, handoff
+│   ├── TTS_AUDIT.md                  # Pre-refactor audit (confirmed bugs → fixes)
 │   ├── PROTOCOL.md                   # Complete Study Agent Protocol v1
 │   ├── SECURITY.md                   # Security & threat model
 │   ├── VOICE_FLOW.md                 # Voice UX, state machine & audio routing

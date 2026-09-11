@@ -24,6 +24,7 @@ class VoiceCommandManager {
 
             matchesPause(normalized) -> return VoiceCommand.Pause
             matchesResume(normalized) -> return VoiceCommand.Resume
+            matchesStopSpeaking(normalized) -> return VoiceCommand.StopSpeaking
             matchesEnd(normalized) -> return VoiceCommand.EndSession
             matchesStatus(normalized) -> return VoiceCommand.StatusQuestion
 
@@ -70,6 +71,7 @@ class VoiceCommandManager {
                     is VoiceCommand.ShowAnswer,
                     is VoiceCommand.Skip,
                     is VoiceCommand.Pause,
+                    is VoiceCommand.StopSpeaking,
                     is VoiceCommand.EndSession,
                     is VoiceCommand.StatusQuestion -> cmd
                     else -> VoiceCommand.SubmitAnswer(trimmed)
@@ -88,6 +90,7 @@ class VoiceCommandManager {
                     is VoiceCommand.Explain,
                     is VoiceCommand.Skip,
                     is VoiceCommand.Pause,
+                    is VoiceCommand.StopSpeaking,
                     is VoiceCommand.EndSession -> cmd
                     else -> cmd
                 }
@@ -176,6 +179,18 @@ class VoiceCommandManager {
 
     private fun matchesResume(t: String): Boolean {
         return t in setOf("resume", "continue", "resume study", "resume session", "keep going", "اكمل", "استمر", "تابع", "واصل")
+    }
+
+    /**
+     * "Stop talking" commands (§63) cancel speech but keep the session alive.
+     * Checked BEFORE [matchesEnd] so "stop speaking" never ends the session,
+     * while plain "stop" still maps to EndSession for backward compatibility.
+     */
+    private fun matchesStopSpeaking(t: String): Boolean {
+        return t in setOf(
+            "stop speaking", "stop talking", "be quiet", "quiet", "enough", "shut up", "silence", "hush",
+            "توقف عن الكلام", "اكتف", "اكتفي", "اسكت", "اسكتي", "كفى", "كلام كفاية"
+        )
     }
 
     private fun matchesEnd(t: String): Boolean {

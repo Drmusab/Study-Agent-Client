@@ -72,6 +72,17 @@ class VoiceCommandManagerTest {
     }
 
     @Test
+    fun testStopSpeakingCommands() {
+        // "stop speaking" cancels speech only — plain "stop" still ends the session.
+        assertEquals(VoiceCommand.StopSpeaking, manager.parseCommand("stop speaking"))
+        assertEquals(VoiceCommand.StopSpeaking, manager.parseCommand("quiet"))
+        assertEquals(VoiceCommand.StopSpeaking, manager.parseCommand("enough"))
+        assertEquals(VoiceCommand.StopSpeaking, manager.parseCommand("اسكت"))
+        assertEquals(VoiceCommand.EndSession, manager.parseCommand("stop"))
+        assertEquals(VoiceCommand.EndSession, manager.parseCommand("end session"))
+    }
+
+    @Test
     fun testContextAwareStudyParsing() {
         val dummyCard = StudyCard("c1", "Test Question")
 
