@@ -39,6 +39,19 @@ class PreferencesDataStore(
     private object Keys {
         val SELECTED_PROFILE_ID = stringPreferencesKey("selected_profile_id")
         val STT_LANGUAGE = stringPreferencesKey("stt_language")
+
+        // Speech recognition (STT)
+        val STT_LANGUAGE_MODE = stringPreferencesKey("stt_language_mode")
+        val STT_ENGLISH_LOCALE = stringPreferencesKey("stt_english_locale")
+        val STT_ARABIC_LOCALE = stringPreferencesKey("stt_arabic_locale")
+        val STT_AUTO_FALLBACK_LOCALE = stringPreferencesKey("stt_auto_fallback_locale")
+        val STT_RECOGNITION_MODE = stringPreferencesKey("stt_recognition_mode")
+        val STT_PREFER_ON_DEVICE = booleanPreferencesKey("stt_prefer_on_device")
+        val STT_SHOW_PARTIAL = booleanPreferencesKey("stt_show_partial_transcript")
+        val STT_MEDICAL_BIASING = booleanPreferencesKey("stt_medical_biasing")
+        val STT_ANSWER_LENGTH = stringPreferencesKey("stt_answer_length")
+        val STT_DEBUG_TRANSCRIPT_LOGGING = booleanPreferencesKey("stt_debug_transcript_logging")
+        val LISTEN_FOR_SPOKEN_RATING = booleanPreferencesKey("listen_for_spoken_rating")
         val TTS_LANGUAGE = stringPreferencesKey("tts_language")
         val SPEECH_RATE = floatPreferencesKey("speech_rate")
         val SPEECH_PITCH = floatPreferencesKey("speech_pitch")
@@ -76,9 +89,48 @@ class PreferencesDataStore(
 
     private fun readSettings(prefs: Preferences): AppSettings {
         val legacyRate = prefs[Keys.SPEECH_RATE] ?: 1.0f
+
+        // ---- STT language migration (§126) ----
+        // Installs from before language modes existed only have a single `stt_language`.
+        // Honour it: an Arabic user must not be silently switched to Auto-English on upgrade.
+        val legacySttLanguage = prefs[Keys.STT_LANGUAGE]
+        val storedMode = prefs[Keys.STT_LANGUAGE_MODE]
+        val languageMode: String
+        val englishLocale: String
+        val arabicLocale: String
+        val autoFallback: String
+        if (storedMode != null) {
+            languageMode = storedMode
+            englishLocale = prefs[Keys.STT_ENGLISH_LOCALE] ?: "en-US"
+            arabicLocale = prefs[Keys.STT_ARABIC_LOCALE] ?: "ar-IQ"
+            autoFallback = prefs[Keys.STT_AUTO_FALLBACK_LOCALE] ?: "en-US"
+        } else if (legacySttLanguage != null) {
+            val isArabic = legacySttLanguage.lowercase().startsWith("ar")
+            languageMode = if (isArabic) "ARABIC" else "ENGLISH"
+            englishLocale = if (isArabic) "en-US" else legacySttLanguage
+            arabicLocale = if (isArabic) legacySttLanguage else "ar-IQ"
+            autoFallback = if (isArabic) legacySttLanguage else "en-US"
+        } else {
+            // Fresh install: Auto English + Arabic is the intended default experience.
+            languageMode = "AUTO_EN_AR"
+            englishLocale = "en-US"
+            arabicLocale = "ar-IQ"
+            autoFallback = "en-US"
+        }
+
         return AppSettings(
             selectedProfileId = prefs[Keys.SELECTED_PROFILE_ID],
-            sttLanguage = prefs[Keys.STT_LANGUAGE] ?: "en-US",
+            sttLanguage = legacySttLanguage ?: englishLocale,
+            sttLanguageMode = languageMode,
+            sttEnglishLocale = englishLocale,
+            sttArabicLocale = arabicLocale,
+            sttAutoFallbackLocale = autoFallback,
+            sttRecognitionMode = prefs[Keys.STT_RECOGNITION_MODE] ?: "AUTO",
+            sttPreferOnDevice = prefs[Keys.STT_PREFER_ON_DEVICE] ?: true,
+            sttShowPartialTranscript = prefs[Keys.STT_SHOW_PARTIAL] ?: true,
+            sttMedicalBiasing = prefs[Keys.STT_MEDICAL_BIASING] ?: true,
+            sttAnswerLength = prefs[Keys.STT_ANSWER_LENGTH] ?: "NORMAL",
+            sttDebugTranscriptLogging = prefs[Keys.STT_DEBUG_TRANSCRIPT_LOGGING] ?: false,
             ttsLanguage = prefs[Keys.TTS_LANGUAGE] ?: "en-US",
             speechRate = legacyRate,
             speechPitch = prefs[Keys.SPEECH_PITCH] ?: 1.0f,
@@ -102,6 +154,9 @@ class PreferencesDataStore(
             autoPlayFeedback = prefs[Keys.AUTO_PLAY_FEEDBACK] ?: true,
             autoSubmitTranscript = prefs[Keys.AUTO_SUBMIT_TRANSCRIPT] ?: true,
             confirmRating = prefs[Keys.CONFIRM_RATING] ?: false,
+            // Previously model-only: this key did not exist, so the spoken-rating toggle
+            // silently reset to its default on every launch.
+            listenForSpokenRating = prefs[Keys.LISTEN_FOR_SPOKEN_RATING] ?: true,
             showTranscriptOnScreen = prefs[Keys.SHOW_TRANSCRIPT] ?: true,
             useFakeAgent = prefs[Keys.USE_FAKE_AGENT] ?: false,
             debugLogging = prefs[Keys.DEBUG_LOGGING] ?: true,
@@ -114,6 +169,16 @@ class PreferencesDataStore(
     private fun writeSettings(prefs: androidx.datastore.preferences.core.MutablePreferences, s: AppSettings) {
         s.selectedProfileId?.let { prefs[Keys.SELECTED_PROFILE_ID] = it }
         prefs[Keys.STT_LANGUAGE] = s.sttLanguage
+        prefs[Keys.STT_LANGUAGE_MODE] = s.sttLanguageMode
+        prefs[Keys.STT_ENGLISH_LOCALE] = s.sttEnglishLocale
+        prefs[Keys.STT_ARABIC_LOCALE] = s.sttArabicLocale
+        prefs[Keys.STT_AUTO_FALLBACK_LOCALE] = s.sttAutoFallbackLocale
+        prefs[Keys.STT_RECOGNITION_MODE] = s.sttRecognitionMode
+        prefs[Keys.STT_PREFER_ON_DEVICE] = s.sttPreferOnDevice
+        prefs[Keys.STT_SHOW_PARTIAL] = s.sttShowPartialTranscript
+        prefs[Keys.STT_MEDICAL_BIASING] = s.sttMedicalBiasing
+        prefs[Keys.STT_ANSWER_LENGTH] = s.sttAnswerLength
+        prefs[Keys.STT_DEBUG_TRANSCRIPT_LOGGING] = s.sttDebugTranscriptLogging
         prefs[Keys.TTS_LANGUAGE] = s.ttsLanguage
         prefs[Keys.SPEECH_RATE] = s.questionRate // legacy key mirrors question rate
         prefs[Keys.SPEECH_PITCH] = s.speechPitch
@@ -133,6 +198,7 @@ class PreferencesDataStore(
         prefs[Keys.AUTO_PLAY_FEEDBACK] = s.autoPlayFeedback
         prefs[Keys.AUTO_SUBMIT_TRANSCRIPT] = s.autoSubmitTranscript
         prefs[Keys.CONFIRM_RATING] = s.confirmRating
+        prefs[Keys.LISTEN_FOR_SPOKEN_RATING] = s.listenForSpokenRating
         prefs[Keys.SHOW_TRANSCRIPT] = s.showTranscriptOnScreen
         prefs[Keys.USE_FAKE_AGENT] = s.useFakeAgent
         prefs[Keys.DEBUG_LOGGING] = s.debugLogging

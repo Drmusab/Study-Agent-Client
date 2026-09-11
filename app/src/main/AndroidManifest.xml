@@ -23,6 +23,23 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+        Package visibility for the speech recognition service.
+
+        targetSdk is 34, so package-visibility filtering applies: without this <queries>
+        element `SpeechRecognizer.isRecognitionAvailable()` resolves against an empty set and
+        returns false on a device that does have a recognizer. The AOSP javadoc for
+        SpeechRecognizer states this explicitly for apps targeting API 30+.
+
+        Only the service action is declared — no recognizer package is named, because the app
+        must never depend on a specific vendor being installed (§84/§86).
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
     <application
         android:name=".StudyAgentApp"
         android:allowBackup="true"

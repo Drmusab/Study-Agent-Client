@@ -64,6 +64,7 @@ fun DiagnosticsScreen(
     val audioDevice by viewModel.activeOutputDevice.collectAsState()
     val isHeadset by viewModel.isHeadsetConnected.collectAsState()
     val ttsHealth by viewModel.ttsHealth.collectAsState()
+    val recognitionHealth by viewModel.recognitionHealth.collectAsState()
 
     Scaffold(
         containerColor = DarkBackground,
@@ -120,7 +121,8 @@ fun DiagnosticsScreen(
                         Text(text = "SYSTEM STATUS", style = MaterialTheme.typography.labelSmall, color = TextMuted)
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(text = "Connection: ${connectionState.label}", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
-                        Text(text = "Audio Route: ${audioDevice.name} (${audioDevice.typeName})", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                        Text(text = "Audio Output: ${audioDevice.name} (${audioDevice.typeName})", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                        Text(text = "Audio Input: ${recognitionHealth.inputRouteLabel}", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
                         Text(text = "Headset Active: ${if (isHeadset) "Yes" else "No"}", style = MaterialTheme.typography.bodyMedium, color = AccentTeal)
                     }
                 }
@@ -165,6 +167,54 @@ fun DiagnosticsScreen(
                             text = "Last Error: ${ttsHealth.lastError?.let { "${it.code}: ${it.message}" } ?: "none"}",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (ttsHealth.lastError != null) StatusRed else StatusGreen
+                        )
+                    }
+                }
+            }
+
+            // Recognition health card: real recognizer status, including what could NOT be
+            // determined. "Unknown" is reported as Unknown rather than coerced to "No".
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = "SPEECH RECOGNITION", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                            Text(
+                                text = recognitionHealth.state.label.uppercase(),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (recognitionHealth.state.isActive) StatusAmber else StatusGreen
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        viewModel.recognitionRows().forEach { (label, value) ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextMuted
+                                )
+                                Text(
+                                    text = value,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = TextPrimary
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Last Error: ${recognitionHealth.lastError?.let { "${it.code.name}: ${it.message}" } ?: "none"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (recognitionHealth.lastError != null) StatusRed else StatusGreen
                         )
                     }
                 }

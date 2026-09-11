@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
@@ -182,6 +183,48 @@ fun StudyScreen(
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = TextPrimary
                             )
+                        }
+                    }
+                }
+
+                // Transcript review (§19/§73): shown only when auto-submit is off and a
+                // recognition turn has completed. Deliberately lightweight — submit or retry,
+                // not a text editor.
+                val pendingTranscript = (studyState as? StudyState.Listening)?.pendingTranscript.orEmpty()
+                AnimatedVisibility(visible = pendingTranscript.isNotBlank()) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Text(
+                                text = "REVIEW YOUR ANSWER",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "\"$pendingTranscript\"",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = TextPrimary
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { viewModel.onDiscardPendingTranscript() },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("Listen again") }
+                                Button(
+                                    onClick = { viewModel.onSubmitPendingTranscript() },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("Submit") }
+                            }
                         }
                     }
                 }

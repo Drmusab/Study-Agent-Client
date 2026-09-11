@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.voice.tts.SegmentLanguage
+import com.studyagent.client.core.voice.stt.RecognitionCapabilities
+import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.core.voice.tts.TtsEngineInfo
 import com.studyagent.client.core.voice.tts.TtsVoiceInfo
@@ -17,7 +19,8 @@ import kotlinx.coroutines.launch
 
 class SettingsViewModel(
     private val preferencesDataStore: PreferencesDataStore,
-    private val speechOrchestrator: SpeechOrchestrator
+    private val speechOrchestrator: SpeechOrchestrator,
+    private val recognitionOrchestrator: SpeechRecognitionOrchestrator
 ) : ViewModel() {
 
     val settings: StateFlow<AppSettings> = preferencesDataStore.settingsFlow
@@ -35,6 +38,30 @@ class SettingsViewModel(
     private val _previewing = MutableStateFlow<SegmentLanguage?>(null)
     val previewing: StateFlow<SegmentLanguage?> = _previewing.asStateFlow()
 
+    /**
+     * Live recognizer capabilities (§21/§25). Settings shows "On-device available: Yes/No"
+     * from this rather than promising offline recognition the device may not have.
+     */
+    val recognitionCapabilities: StateFlow<RecognitionCapabilities> =
+        recognitionOrchestrator.capabilities
+
+    fun refreshRecognitionCapabilities() {
+        viewModelScope.launch {
+            recognitionOrchestrator.refreshCapabilities()
+        }
+    }
+
+    /**
+     * Ask the platform to fetch the on-device model for [languageTag] (§26). Never fired
+     * automatically — model downloads are large and the user has to choose.
+     */
+    fun requestSpeechModelDownload(languageTag: String) {
+        viewModelScope.launch {
+            recognitionOrchestrator.requestModelDownload(languageTag)
+            recognitionOrchestrator.refreshCapabilities()
+        }
+    }
+
     init {
         // Load once, and reload whenever the engine becomes READY (covers delayed init
         // and engine switches — voice lists are engine-specific).
@@ -44,6 +71,7 @@ class SettingsViewModel(
             }
         }
         refreshVoiceData()
+        refreshRecognitionCapabilities()
     }
 
     fun refreshVoiceData() {

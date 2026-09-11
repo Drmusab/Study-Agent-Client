@@ -14,8 +14,15 @@ sealed interface StudyState {
     data class Listening(
         val card: StudyCard,
         val partialTranscript: String = "",
-        val isHandsFree: Boolean = true
-    ) : StudyState
+        val isHandsFree: Boolean = true,
+        /**
+         * A completed transcript awaiting the user's decision when auto-submit is disabled.
+         * Non-blank means the microphone is closed and the user may submit, edit or retry.
+         */
+        val pendingTranscript: String = ""
+    ) : StudyState {
+        val hasPendingTranscript: Boolean get() = pendingTranscript.isNotBlank()
+    }
 
     data class Evaluating(
         val card: StudyCard,

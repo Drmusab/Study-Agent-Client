@@ -7,9 +7,11 @@ import com.studyagent.client.core.common.DefaultDispatcherProvider
 import com.studyagent.client.core.common.DispatcherProvider
 import com.studyagent.client.core.security.AndroidSecureTokenStorage
 import com.studyagent.client.core.security.SecureTokenStorage
-import com.studyagent.client.core.voice.AndroidSpeechRecognitionManager
-import com.studyagent.client.core.voice.SpeechRecognitionManager
 import com.studyagent.client.core.voice.VoiceCommandManager
+import com.studyagent.client.core.voice.stt.AndroidSpeechRecognitionBackend
+import com.studyagent.client.core.voice.stt.DefaultSpeechRecognitionOrchestrator
+import com.studyagent.client.core.voice.stt.SpeechRecognitionBackend
+import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.AndroidTtsEngineAdapter
 import com.studyagent.client.core.voice.tts.AudioFocusController
 import com.studyagent.client.core.voice.tts.DefaultSpeechOrchestrator
@@ -34,7 +36,8 @@ interface AppContainer {
     val audioRouteManager: AudioRouteManager
     val ttsEngineAdapter: TtsEngineAdapter
     val speechOrchestrator: SpeechOrchestrator
-    val sttManager: SpeechRecognitionManager
+    val speechRecognitionBackend: SpeechRecognitionBackend
+    val recognitionOrchestrator: SpeechRecognitionOrchestrator
     val voiceCommandManager: VoiceCommandManager
     val studySessionRepository: StudySessionRepository
     val diagnosticsRepository: DiagnosticsRepository
@@ -69,20 +72,43 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         )
     }
 
-    override val sttManager: SpeechRecognitionManager by lazy { AndroidSpeechRecognitionManager(context) }
+    override val speechRecognitionBackend: SpeechRecognitionBackend by lazy {
+        AndroidSpeechRecognitionBackend(context)
+    }
+
+    /**
+     * Single owner of the microphone's recognition session (§53). The TTS gate is wired to
+     * the same "nothing playing, nothing queued" predicate the repository uses for handoff,
+     * so the microphone cannot open while the app is still speaking (§57/§58).
+     */
+    override val recognitionOrchestrator: SpeechRecognitionOrchestrator by lazy {
+        DefaultSpeechRecognitionOrchestrator(
+            backend = speechRecognitionBackend,
+            canOpenMicrophone = {
+                !speechOrchestrator.isSpeaking.value &&
+                    speechOrchestrator.health.value.queueDepth == 0
+            },
+            inputRouteLabel = { audioRouteManager.likelyInputRoute.value.displayLabel }
+        )
+    }
+
     override val voiceCommandManager: VoiceCommandManager by lazy { VoiceCommandManager() }
     override val studySessionRepository: StudySessionRepository by lazy {
         DefaultStudySessionRepository(
             connectionRepository = connectionRepository,
             speechOrchestrator = speechOrchestrator,
-            sttManager = sttManager,
-            voiceCommandManager = voiceCommandManager,
+            recognitionOrchestrator = recognitionOrchestrator,
             preferencesDataStore = preferencesDataStore,
             audioRouteManager = audioRouteManager,
             dispatchers = dispatchers
         )
     }
     override val diagnosticsRepository: DiagnosticsRepository by lazy {
-        DefaultDiagnosticsRepository(connectionRepository, audioRouteManager, speechOrchestrator)
+        DefaultDiagnosticsRepository(
+            connectionRepository,
+            audioRouteManager,
+            speechOrchestrator,
+            recognitionOrchestrator
+        )
     }
 }

@@ -13,9 +13,21 @@ import com.studyagent.client.core.models.StudyCard
 import com.studyagent.client.core.models.StudySession
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.models.VoiceCommand
-import com.studyagent.client.core.voice.SpeechRecognitionManager
-import com.studyagent.client.core.voice.SpeechRecognitionResult
-import com.studyagent.client.core.voice.VoiceCommandManager
+import com.studyagent.client.core.voice.stt.CommandContext
+import com.studyagent.client.core.voice.stt.CommandDecision
+import com.studyagent.client.core.voice.stt.MedicalVocabularyProvider
+import com.studyagent.client.core.voice.stt.RecognitionError
+import com.studyagent.client.core.voice.stt.RecognitionErrorCode
+import com.studyagent.client.core.voice.stt.RecognitionLanguageMode
+import com.studyagent.client.core.voice.stt.RecognitionOutcome
+import com.studyagent.client.core.voice.stt.RecognitionPolicyFactory
+import com.studyagent.client.core.voice.stt.RecognitionPurpose
+import com.studyagent.client.core.voice.stt.RecognitionStartResult
+import com.studyagent.client.core.voice.stt.RecognitionTurnResult
+import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
+import com.studyagent.client.core.voice.stt.SttSettings
+import com.studyagent.client.core.voice.stt.VoiceCommandInterpreter
+import com.studyagent.client.core.voice.stt.toSttSettings
 import com.studyagent.client.core.voice.tts.QueuePolicy
 import com.studyagent.client.core.voice.tts.SpeechError
 import com.studyagent.client.core.voice.tts.SpeechErrorCode
@@ -38,6 +50,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -62,7 +75,19 @@ interface StudySessionRepository {
     fun requestStopSpeaking()
 
     fun startManualPushToTalk()
-    fun stopManualPushToTalk(submitIfTranscriptPresent: Boolean = true)
+
+    /**
+     * Release push-to-talk. Finishes the recognition turn; the transcript is submitted when
+     * the recognizer returns its final result — never at the moment of release (§18/§105).
+     */
+    fun stopManualPushToTalk()
+
+    /** Auto-submit is off and a transcript is pending review: send it as the answer. */
+    fun submitPendingTranscript()
+
+    /** Discard the pending transcript and listen again. */
+    fun discardPendingTranscript()
+
     fun processVoiceCommandDirectly(command: VoiceCommand)
 }
 
@@ -86,8 +111,10 @@ interface StudySessionRepository {
 class DefaultStudySessionRepository(
     private val connectionRepository: ConnectionRepository,
     private val speechOrchestrator: SpeechOrchestrator,
-    private val sttManager: SpeechRecognitionManager,
-    private val voiceCommandManager: VoiceCommandManager,
+    private val recognitionOrchestrator: SpeechRecognitionOrchestrator,
+    private val recognitionPolicyFactory: RecognitionPolicyFactory = RecognitionPolicyFactory(),
+    private val commandInterpreter: VoiceCommandInterpreter = VoiceCommandInterpreter(),
+    private val vocabularyProvider: MedicalVocabularyProvider = MedicalVocabularyProvider.DEFAULT,
     private val preferencesDataStore: PreferencesDataStore,
     private val audioRouteManager: AudioRouteManager,
     private val dispatchers: DispatcherProvider,
@@ -107,8 +134,17 @@ class DefaultStudySessionRepository(
 
     private var currentSettings: AppSettings = AppSettings()
     private var currentTtsSettings: TtsSettings = TtsSettings()
+    private var currentSttSettings: SttSettings = SttSettings()
     private var isPushToTalkActive = false
     private var speechJob: Job? = null
+
+    /**
+     * Consecutive recognition failures without an intervening success. Recognition has its
+     * own bounded retry inside the orchestrator; this stops the *repository* from re-opening
+     * the microphone forever when the underlying problem is persistent (dead mic, revoked
+     * permission, no service) — which would otherwise loop for the whole session.
+     */
+    private var consecutiveRecognitionFailures = 0
 
     /** Card affected by a ROUTE_LOST mid-speech, used for deterministic reconnect recovery. */
     private var routeLostCardId: String? = null
@@ -127,7 +163,9 @@ class DefaultStudySessionRepository(
             preferencesDataStore.settingsFlow.distinctUntilChanged().collect { settings ->
                 currentSettings = settings
                 currentTtsSettings = settings.toTtsSettings()
+                currentSttSettings = settings.toSttSettings()
                 speechOrchestrator.updateSettings(currentTtsSettings)
+                recognitionOrchestrator.updateSettings(currentSttSettings)
             }
         }
 
@@ -150,7 +188,8 @@ class DefaultStudySessionRepository(
                         if (current !is StudyState.Idle && current !is StudyState.Error && current !is StudyState.SessionFinished) {
                             AppLogger.w(tag, "Connection dropped during active session: ${state.label}")
                             speechOrchestrator.stopSpeech(StopReason.SESSION_END)
-                            sttManager.stopListening()
+                            // §98: do not keep recording an answer that cannot be submitted.
+                            recognitionOrchestrator.cancelCurrentTurn("connection-lost")
                             _studyState.value = StudyState.Error(
                                 message = "Connection to Study Agent lost. Waiting for reconnect...",
                                 recoverable = true
@@ -182,10 +221,37 @@ class DefaultStudySessionRepository(
             }
         }
 
-        // Observe STT recognition events
+        // Terminal recognition results. This is the only place a transcript can become an
+        // answer or a rating — partials never do (§42).
         scope.launch {
-            sttManager.recognitionEvents.collect { event ->
-                handleSpeechRecognitionResult(event)
+            recognitionOrchestrator.turnResults.collect { result ->
+                handleTurnResult(result)
+            }
+        }
+
+        // Live partial transcript → UI only. Conflated upstream, so a chatty recognizer
+        // cannot drive unbounded recomposition (§43/§71).
+        scope.launch {
+            recognitionOrchestrator.partialTranscript.distinctUntilChanged().collect { partial ->
+                val current = _studyState.value
+                if (current is StudyState.Listening && current.partialTranscript != partial) {
+                    _studyState.value = current.copy(partialTranscript = partial)
+                }
+            }
+        }
+
+        // §63: losing the microphone route mid-turn must never let a half-recognised answer
+        // through. Cancel, keep the card, and let the reconnect handler recover.
+        scope.launch {
+            var wasConnected = audioRouteManager.isHeadsetConnected.value
+            audioRouteManager.isHeadsetConnected.collect { connected ->
+                val lost = wasConnected && !connected
+                wasConnected = connected
+                if (lost && recognitionOrchestrator.state.value.isActive) {
+                    AppLogger.w(tag, "Headset lost during recognition; cancelling turn")
+                    recognitionOrchestrator.cancelCurrentTurn("input-route-lost")
+                    routeLostCardId = _studyState.value.currentCardOrNull?.id
+                }
             }
         }
     }
@@ -227,6 +293,11 @@ class DefaultStudySessionRepository(
                     val s = _studyState.value
                     s is StudyState.SpeakingQuestion && s.card.id == card.id && s.card.question == card.question
                 }
+
+                // §97: a new question invalidates any recognition still running for the
+                // previous card. The orchestrator drops the late callback by request id, so
+                // a slow transcript can never land on the card that follows it.
+                recognitionOrchestrator.cancelCurrentTurn("new-question")
 
                 _studyState.value = StudyState.SpeakingQuestion(card)
 
@@ -335,7 +406,7 @@ class DefaultStudySessionRepository(
                 val current = _studyState.value
                 if (current !is StudyState.Paused) {
                     speechOrchestrator.stopSpeech(StopReason.PAUSE)
-                    sttManager.stopListening()
+                    recognitionOrchestrator.cancelCurrentTurn("session-paused")
                     _studyState.value = StudyState.Paused(current)
                 }
             }
@@ -357,7 +428,7 @@ class DefaultStudySessionRepository(
             is ServerMessage.SessionFinished -> {
                 // §60: cancel irrelevant queued speech FIRST, then speak the summary.
                 speechOrchestrator.stopSpeech(StopReason.SESSION_END)
-                sttManager.stopListening()
+                recognitionOrchestrator.cancelCurrentTurn("session-finished")
                 _studyState.value = StudyState.SessionFinished(
                     summary = message.summary,
                     cardsReviewed = message.totalReviewed
@@ -527,71 +598,289 @@ class DefaultStudySessionRepository(
      * starts when the queued speech finishes ([maybeResumeListeningAfterSpeech]).
      */
     private fun transitionToAnswerListening(card: StudyCard) {
-        _studyState.value = StudyState.Listening(card = card, partialTranscript = "", isHandsFree = currentSettings.handsFreeMode)
-        if (speechSettled()) beginStt()
+        _studyState.value = StudyState.Listening(
+            card = card,
+            partialTranscript = "",
+            isHandsFree = currentSettings.handsFreeMode
+        )
+        if (speechSettled()) beginStt(RecognitionPurpose.ANSWER, card)
     }
 
     private fun transitionToRatingListening(card: StudyCard, eval: Evaluation) {
         _studyState.value = StudyState.WaitingForRating(card = card, evaluation = eval, suggestedRating = eval.suggestedRating)
-        if (speechSettled()) beginStt()
+        // §20: the spoken-rating preference is now actually honoured. When it is off the
+        // rating window still exists — the on-screen buttons work — the microphone just
+        // stays closed.
+        if (!currentSettings.listenForSpokenRating) {
+            AppLogger.d(tag, "Spoken ratings disabled; rating window is manual only")
+            return
+        }
+        if (speechSettled()) beginStt(RecognitionPurpose.RATING, card)
     }
 
     /** The deterministic drain backstop — see class doc. */
     private fun maybeResumeListeningAfterSpeech() {
         if (!currentSettings.handsFreeMode || !speechSettled()) return
-        if (sttManager.isListening.value) return
-        when (_studyState.value) {
-            is StudyState.Listening,
-            is StudyState.WaitingForRating -> beginStt()
+        // Readiness comes from the recognition state machine, not a boolean: a turn that has
+        // ended speech but not yet finalised is still busy, and starting here used to produce
+        // ERROR_RECOGNIZER_BUSY.
+        if (!recognitionOrchestrator.state.value.isReadyForNewRequest) return
+        when (val state = _studyState.value) {
+            is StudyState.Listening ->
+                if (state.pendingTranscript.isBlank()) beginStt(RecognitionPurpose.ANSWER, state.card)
+
+            is StudyState.WaitingForRating ->
+                if (currentSettings.listenForSpokenRating) beginStt(RecognitionPurpose.RATING, state.card)
+
             else -> Unit
         }
     }
 
-    private fun beginStt() {
+    /**
+     * Open the microphone for one explicit purpose (§4/§54).
+     *
+     * The purpose drives everything downstream — endpoint profile, watchdog budget,
+     * vocabulary biasing, candidate selection and acceptance thresholds — so study code
+     * never has to configure a recognizer.
+     */
+    private fun beginStt(purpose: RecognitionPurpose, card: StudyCard?) {
         val now = System.currentTimeMillis()
         if (now - lastSttStartMs < STT_START_DEDUP_MS) return
         lastSttStartMs = now
-        sttManager.startListening(currentSettings.sttLanguage, isHandsFree = currentSettings.handsFreeMode)
+
+        val request = recognitionPolicyFactory.createRequest(
+            purpose = purpose,
+            settings = currentSttSettings,
+            cardId = card?.id,
+            // Bias on the question's own medical terms only. The expected answer never
+            // reaches the client, so it cannot leak into the bias list (§34).
+            contextTerms = vocabularyProvider.contextTermsFrom(card?.question)
+        )
+        when (val result = recognitionOrchestrator.startRecognition(request)) {
+            is RecognitionStartResult.Started ->
+                AppLogger.i(tag, "Listening for ${purpose.name} (id=${result.requestId})")
+
+            is RecognitionStartResult.Rejected ->
+                AppLogger.w(tag, "Recognition start rejected: ${result.error.code.name}")
+        }
     }
 
     // ------------------------------------------------------------------ STT results
 
-    private fun handleSpeechRecognitionResult(result: SpeechRecognitionResult) {
+    private fun handleTurnResult(result: RecognitionTurnResult) {
         when (result) {
-            is SpeechRecognitionResult.Partial -> {
-                val current = _studyState.value
-                if (current is StudyState.Listening) {
-                    _studyState.value = current.copy(partialTranscript = result.text)
+            is RecognitionTurnResult.Completed -> handleCompletedTurn(result.outcome)
+            is RecognitionTurnResult.Failed -> handleRecognitionFailure(result.error)
+        }
+    }
+
+    /**
+     * Turn a finished recognition turn into at most one study action.
+     *
+     * Ordering matters: the card check runs before interpretation, so a transcript that
+     * belongs to a card we have already moved on from is discarded instead of being applied
+     * to whatever is on screen now (§10/§97).
+     */
+    private fun handleCompletedTurn(outcome: RecognitionOutcome) {
+        consecutiveRecognitionFailures = 0
+
+        val state = _studyState.value
+        val activeCardId = state.currentCardOrNull?.id
+        val turnCardId = outcome.cardId
+        if (turnCardId != null && activeCardId != null && turnCardId != activeCardId) {
+            AppLogger.w(
+                tag,
+                "Discarding stale transcript: turn card=$turnCardId, active card=$activeCardId"
+            )
+            return
+        }
+
+        val context = when (state) {
+            is StudyState.Listening -> CommandContext.ANSWER_EXPECTED
+            is StudyState.WaitingForRating -> CommandContext.RATING_EXPECTED
+            is StudyState.ShowingFeedback,
+            is StudyState.HintShowing,
+            is StudyState.ExplanationShowing -> CommandContext.FEEDBACK_SHOWING
+            is StudyState.Paused -> CommandContext.PAUSED
+            else -> CommandContext.IDLE
+        }
+
+        // Privacy-safe: character count and confidence, never the transcript itself (§46).
+        AppLogger.i(
+            tag,
+            "Recognition turn complete purpose=${outcome.purpose.name} ${outcome.logSummary()}"
+        )
+
+        applyCommandDecision(commandInterpreter.interpret(outcome, context, currentSttSettings), state)
+    }
+
+    private fun applyCommandDecision(decision: CommandDecision, state: StudyState) {
+        when (decision) {
+            is CommandDecision.Execute -> {
+                AppLogger.i(tag, "Voice command accepted: ${decision.parsed.command.commandName}")
+                _lastRecognizedCommand.tryEmit(decision.parsed.command)
+                processVoiceCommandDirectly(decision.parsed.command)
+            }
+
+            is CommandDecision.SubmitAnswer -> submitOrHoldAnswer(decision.text, state)
+
+            is CommandDecision.NeedsConfirmation -> {
+                // A rating was heard but not confidently enough to reschedule a card. Ask,
+                // then listen for a short yes/no rather than guessing (§14/§140).
+                AppLogger.i(tag, "Rating needs confirmation; prompting")
+                promptAndListen(decision.prompt, RecognitionPurpose.SHORT_CONFIRMATION)
+            }
+
+            is CommandDecision.Retry -> {
+                AppLogger.d(tag, "Nothing actionable (${decision.reason}); re-listening")
+                if (currentSettings.handsFreeMode) {
+                    promptAndListen(decision.prompt, purposeForState(state))
                 }
             }
 
-            is SpeechRecognitionResult.Final -> {
-                val transcript = result.text.trim()
-                if (transcript.isEmpty()) return
+            is CommandDecision.Ignore ->
+                AppLogger.d(tag, "Ignoring utterance: ${decision.reason}")
+        }
+    }
 
-                AppLogger.i(tag, "Final transcript received (${transcript.length} chars)")
-                val currentState = _studyState.value
-                val recognizedCmd = voiceCommandManager.parseInStudyContext(transcript, currentState)
-                _lastRecognizedCommand.tryEmit(recognizedCmd)
+    /**
+     * §19: `autoSubmitTranscript` is finally load-bearing.
+     *
+     * On: the transcript goes straight to the evaluator. Off: it is parked on the study state
+     * so the user can review, edit, retry or submit it — the microphone closes and nothing is
+     * sent until the user acts.
+     */
+    private fun submitOrHoldAnswer(text: String, state: StudyState) {
+        val card = state.currentCardOrNull ?: _currentSession.value?.currentCard ?: return
+        if (currentSettings.autoSubmitTranscript) {
+            submitSpokenAnswer(card.id, text)
+        } else {
+            AppLogger.i(tag, "Auto-submit off; holding transcript for review (${text.length} chars)")
+            _studyState.value = StudyState.Listening(
+                card = card,
+                partialTranscript = "",
+                isHandsFree = currentSettings.handsFreeMode,
+                pendingTranscript = text
+            )
+        }
+    }
 
-                processVoiceCommandDirectly(recognizedCmd)
+    override fun submitPendingTranscript() {
+        val state = _studyState.value
+        if (state !is StudyState.Listening || state.pendingTranscript.isBlank()) return
+        submitSpokenAnswer(state.card.id, state.pendingTranscript)
+    }
+
+    override fun discardPendingTranscript() {
+        val state = _studyState.value
+        if (state !is StudyState.Listening) return
+        _studyState.value = state.copy(partialTranscript = "", pendingTranscript = "")
+        if (currentSettings.handsFreeMode && speechSettled()) {
+            beginStt(RecognitionPurpose.ANSWER, state.card)
+        }
+    }
+
+    private fun purposeForState(state: StudyState): RecognitionPurpose = when (state) {
+        is StudyState.WaitingForRating -> RecognitionPurpose.RATING
+        is StudyState.Paused, StudyState.Idle -> RecognitionPurpose.COMMAND
+        else -> RecognitionPurpose.ANSWER
+    }
+
+    /** Speak a short prompt, then re-open the microphone for [purpose]. */
+    private fun promptAndListen(prompt: String, purpose: RecognitionPurpose) {
+        val card = _studyState.value.currentCardOrNull
+        speakSpeechRequest(
+            SpeechRequest(
+                id = SpeechIds.forPurpose(SpeechPurpose.FEEDBACK, card?.id),
+                text = prompt,
+                purpose = SpeechPurpose.FEEDBACK,
+                priority = SpeechPriority.NORMAL,
+                queuePolicy = QueuePolicy.REPLACE
+            )
+        ) { result ->
+            // maybeResumeListeningAfterSpeech() re-opens the mic once speech drains, using the
+            // current study state — no separate start path to fall out of sync.
+            if (result is SpeechResult.Failed) handleSpeechFailure(result.error, card)
+        }
+    }
+
+    /**
+     * Errors the orchestrator's own bounded retry could not resolve.
+     *
+     * Each branch is deliberately different (§50): a permission problem shows actionable UI
+     * and never retries; a missing language model offers a download; transient audio problems
+     * re-listen, but only up to [MAX_CONSECUTIVE_RECOGNITION_FAILURES] so a dead microphone
+     * cannot spin for the rest of the session.
+     */
+    private fun handleRecognitionFailure(error: RecognitionError) {
+        AppLogger.w(
+            tag,
+            "Recognition failed code=${error.code.name} raw=${error.rawCode} detail=${error.detail}"
+        )
+
+        when (error.code) {
+            RecognitionErrorCode.CANCELLED -> return // Expected: we cancelled it.
+
+            RecognitionErrorCode.PERMISSION_DENIED -> {
+                _studyState.value = StudyState.Error(
+                    message = "Microphone permission is needed for voice study. " +
+                        "Grant it in system settings, or use the on-screen controls.",
+                    recoverable = true
+                )
+                return
             }
 
-            is SpeechRecognitionResult.NoSpeech -> {
-                AppLogger.d(tag, "STT reported NoSpeech")
+            RecognitionErrorCode.UNAVAILABLE -> {
+                _studyState.value = StudyState.Error(
+                    message = "No speech recognition service is available on this device. " +
+                        "You can still study using the on-screen controls.",
+                    recoverable = true
+                )
+                return
             }
 
-            is SpeechRecognitionResult.Error -> {
-                AppLogger.w(tag, "STT error: ${result.errorMessage} (code: ${result.errorCode})")
+            RecognitionErrorCode.LANGUAGE_UNSUPPORTED,
+            RecognitionErrorCode.LANGUAGE_MODEL_UNAVAILABLE -> {
+                val locale = if (currentSttSettings.languageMode == RecognitionLanguageMode.ARABIC) {
+                    currentSttSettings.arabicLocale
+                } else {
+                    currentSttSettings.englishLocale
+                }
+                recognitionOrchestrator.requestModelDownload(locale)
+                _studyState.value = StudyState.Error(
+                    message = "The speech model for $locale is not installed. " +
+                        "Download started, or switch recognition to network mode in Settings.",
+                    recoverable = true
+                )
+                return
             }
 
-            is SpeechRecognitionResult.ListeningStateChanged -> {
-                AppLogger.d(tag, "STT listening state changed: ${result.isListening}")
-            }
+            else -> Unit
+        }
 
-            is SpeechRecognitionResult.RmsChanged -> {
-                // Audio level meter
-            }
+        consecutiveRecognitionFailures++
+        if (consecutiveRecognitionFailures >= MAX_CONSECUTIVE_RECOGNITION_FAILURES) {
+            AppLogger.e(tag, "Recognition failing repeatedly; stopping hands-free listening")
+            _studyState.value = StudyState.Error(
+                message = "Voice recognition is not working (${error.code.label}). " +
+                    "You can continue with the on-screen controls.",
+                recoverable = true
+            )
+            return
+        }
+
+        if (!currentSettings.handsFreeMode || !speechSettled()) return
+        val state = _studyState.value
+        val card = state.currentCardOrNull ?: return
+        val prompt = when (error.code) {
+            RecognitionErrorCode.NO_SPEECH -> "Sorry, I didn't catch that. Please try again."
+            RecognitionErrorCode.NO_MATCH -> "Sorry, I didn't catch that. Please try again."
+            else -> null
+        }
+        if (prompt != null) {
+            promptAndListen(prompt, purposeForState(state))
+        } else {
+            beginStt(purposeForState(state), card)
         }
     }
 
@@ -687,7 +976,9 @@ class DefaultStudySessionRepository(
     }
 
     override suspend fun submitSpokenAnswer(cardId: String, transcript: String) {
-        sttManager.stopListening()
+        // Cancel rather than finish: the answer is already in hand, so there is nothing left
+        // to finalise — and cancelling invalidates the request id immediately (§97).
+        recognitionOrchestrator.cancelCurrentTurn("answer-submitted")
         val card = _studyState.value.currentCardOrNull ?: _currentSession.value?.currentCard ?: StudyCard(cardId, "Question")
         _studyState.value = StudyState.Evaluating(card = card, userTranscript = transcript)
 
@@ -700,7 +991,7 @@ class DefaultStudySessionRepository(
     }
 
     override suspend fun rateCurrentCard(rating: Rating) {
-        sttManager.stopListening()
+        recognitionOrchestrator.cancelCurrentTurn("rating-submitted")
         speechOrchestrator.stopSpeech(StopReason.USER) // rating dismisses spoken feedback
         val card = _studyState.value.currentCardOrNull ?: _currentSession.value?.currentCard ?: return
         _studyState.value = StudyState.Loading("Submitting rating: ${rating.displayName}...")
@@ -758,6 +1049,9 @@ class DefaultStudySessionRepository(
     }
 
     override suspend fun skipCard() {
+        // Skipping discards whatever was being recognised for this card; it must not be
+        // submitted after the card has gone.
+        recognitionOrchestrator.cancelCurrentTurn("card-skipped")
         val card = _studyState.value.currentCardOrNull ?: _currentSession.value?.currentCard
         connectionRepository.send(
             ClientMessage.SkipCard(
@@ -769,7 +1063,9 @@ class DefaultStudySessionRepository(
 
     override suspend fun pauseStudy() {
         speechOrchestrator.stopSpeech(StopReason.PAUSE)
-        sttManager.stopListening()
+        // §95: cancelling invalidates the request id, so a final callback that lands after
+        // the pause cannot submit an answer into a paused session.
+        recognitionOrchestrator.cancelCurrentTurn("user-paused")
         val current = _studyState.value
         _studyState.value = StudyState.Paused(current)
         connectionRepository.send(ClientMessage.PauseSession(sessionId = _currentSession.value?.sessionId))
@@ -792,7 +1088,7 @@ class DefaultStudySessionRepository(
 
     override suspend fun endStudy() {
         speechOrchestrator.stopSpeech(StopReason.SESSION_END)
-        sttManager.stopListening()
+        recognitionOrchestrator.cancelCurrentTurn("session-ended")
         val sess = _currentSession.value
         connectionRepository.send(ClientMessage.EndSession(sessionId = sess?.sessionId))
         _studyState.value = StudyState.SessionFinished(
@@ -802,24 +1098,55 @@ class DefaultStudySessionRepository(
         _currentSession.value = null
     }
 
+    /**
+     * Press push-to-talk (§18/§59).
+     *
+     * TTS is interrupted first, then the microphone opens after a short acoustic gap so the
+     * recognizer cannot capture the tail of the app's own speech. The user still controls
+     * when recognition ends.
+     */
     override fun startManualPushToTalk() {
         isPushToTalkActive = true
-        // Push-to-talk always wins over speech output, immediately.
         speechOrchestrator.stopSpeech(StopReason.USER)
-        val card = _studyState.value.currentCardOrNull ?: _currentSession.value?.currentCard
-        if (card != null) {
-            _studyState.value = StudyState.Listening(card = card, partialTranscript = "", isHandsFree = false)
-            beginStt()
+        val card = _studyState.value.currentCardOrNull ?: _currentSession.value?.currentCard ?: return
+        _studyState.value = StudyState.Listening(
+            card = card,
+            partialTranscript = "",
+            isHandsFree = false
+        )
+        val gapMs = handoffController.policy().failedGapMs.toLong()
+        scope.launch {
+            if (gapMs > 0) delay(gapMs)
+            // The user may already have released, or another transition may own the state.
+            if (!isPushToTalkActive) return@launch
+            if (!recognitionOrchestrator.state.value.isReadyForNewRequest) return@launch
+            beginStt(RecognitionPurpose.PUSH_TO_TALK_ANSWER, card)
         }
     }
 
-    override fun stopManualPushToTalk(submitIfTranscriptPresent: Boolean) {
+    /**
+     * Release push-to-talk.
+     *
+     * `stopListening`, not `cancel`, and **no submission here**: the turn stays active until
+     * the recognizer returns `onResults`, and [handleCompletedTurn] submits it. Submitting at
+     * release time used to lose the last words of every long medical answer.
+     */
+    override fun stopManualPushToTalk() {
+        if (!isPushToTalkActive) return
         isPushToTalkActive = false
-        sttManager.stopListening()
+        if (recognitionOrchestrator.state.value.isActive) {
+            recognitionOrchestrator.finishCurrentTurn()
+        }
     }
 
     companion object {
         /** Back-to-back STT starts within this window are deduplicated (handoff vs backstop). */
         const val STT_START_DEDUP_MS = 150L
+
+        /**
+         * Consecutive recognition failures tolerated before hands-free listening gives up and
+         * falls back to the on-screen controls.
+         */
+        const val MAX_CONSECUTIVE_RECOGNITION_FAILURES = 3
     }
 }

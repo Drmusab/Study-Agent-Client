@@ -53,7 +53,7 @@ fun AppNavHost(
                     studySessionRepository = container.studySessionRepository,
                     connectionRepository = container.connectionRepository,
                     audioRouteManager = container.audioRouteManager,
-                    speechRecognitionManager = container.sttManager,
+                    recognitionOrchestrator = container.recognitionOrchestrator,
                     speechOrchestrator = container.speechOrchestrator,
                     preferencesDataStore = container.preferencesDataStore
                 )
@@ -83,7 +83,8 @@ fun AppNavHost(
             val settingsViewModel: SettingsViewModel = viewModel {
                 SettingsViewModel(
                     preferencesDataStore = container.preferencesDataStore,
-                    speechOrchestrator = container.speechOrchestrator
+                    speechOrchestrator = container.speechOrchestrator,
+                    recognitionOrchestrator = container.recognitionOrchestrator
                 )
             }
             SettingsScreen(

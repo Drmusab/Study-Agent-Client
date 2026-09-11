@@ -8,8 +8,6 @@ data class StudySession(
     val remainingCards: Int = 0,
     val totalReviewedInSession: Int = 0,
     val lastEvaluation: Evaluation? = null,
-    val isPaused: Boolean = false
-)
     val isPaused: Boolean = false,
     /** Total cards queued for this session, when reported by the server. */
     val totalCardsInQueue: Int? = null,
@@ -25,4 +23,3 @@ data class StudySession(
     fun withRatingCounted(rating: Rating): StudySession =
         copy(ratingCounts = ratingCounts + (rating to (ratingCount(rating) + 1)))
 }
-)

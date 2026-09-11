@@ -24,7 +24,27 @@ The Study Agent system distributes work between a user's PC (server) and Android
 * Patterns matching `token=`, `authToken`, `Bearer`, or session tokens are automatically redacted to `***REDACTED***` before writing to in-memory buffers or Android Logcat.
 * Diagnostic log exports never reveal credentials.
 
-### 1.5 Protocol Validation & Defensive Parsing
+### 1.5 Speech Recognition Privacy
+* **No transcript logging by default.** Recognition completion logs only
+  `purpose`, character count, candidate count, confidence, language and latency. Full
+  transcript text reaches the log only through the explicit `sttDebugTranscriptLogging`
+  opt-in, which is surfaced in Settings as a developer option.
+* **No raw audio retention.** `RecognitionListener.onBufferReceived` is intentionally empty;
+  the app never records or stores microphone audio. Audio reaches the recognition service and
+  nowhere else.
+* **Privacy-safe metrics.** Local recognition metrics store timings, error categories,
+  confidences, purposes and languages — never answer text.
+* **Redacted diagnostics by construction.** Because the logger never receives transcript text
+  unless the user enabled it, the diagnostics export cannot leak study answers.
+* **No expected-answer leakage.** Vocabulary biasing is built from the current question and a
+  curated medical term list. The PC agent's expected answer never reaches the client, so it
+  cannot enter a bias list or a log.
+* **Study answers may contain personal or clinical detail.** Transcript lifetime is the
+  current study interaction, held in memory; there is no long-term transcript store.
+* **No mandatory cloud STT.** Recognition uses the platform recognizer; no third-party
+  speech API key is ever present in the APK.
+
+### 1.6 Protocol Validation & Defensive Parsing
 * Every incoming frame is parsed with Kotlinx Serialization in lenient mode with `ignoreUnknownKeys = true`.
 * Strict type verification prevents memory exhaustion from invalid or malicious payloads.
 * Session IDs and Message IDs ensure idempotency and prevent duplicate updates.
