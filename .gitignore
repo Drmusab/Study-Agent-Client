@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+app/build/
+!gradle/wrapper/gradle-wrapper.jar
+# Android / IntelliJ
+local.properties
+.idea/
+*.iml
+*.ipr
+*.iws
+captures/
+.cxx/
+*.keystore
+!debug.keystore
+# Kotlin
+.kotlin/
+# Python (mock server)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+# OS
+.DS_Store
+Thumbs.db
+# Logs / outputs
+*.log
+*.hprof
+app/release/
+app/debug/

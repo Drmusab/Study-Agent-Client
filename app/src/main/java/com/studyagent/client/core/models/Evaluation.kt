@@ -16,4 +16,7 @@ data class Evaluation(
     val incorrectPoints: List<String> = emptyList(),
     @SerialName("suggested_rating")
     val suggestedRating: Rating? = null
+    val suggestedRating: Rating? = null,
+    /** Evaluator confidence in percent (0..100), used for auto-rating decisions. */
+    val confidence: Double? = null
 )

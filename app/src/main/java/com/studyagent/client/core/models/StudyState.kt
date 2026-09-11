@@ -53,6 +53,9 @@ sealed interface StudyState {
     data class SessionFinished(
         val summary: String? = null,
         val cardsReviewed: Int = 0
+        val cardsReviewed: Int = 0,
+        /** Rich server-generated session summary (Protocol v2), when available. */
+        val details: SessionSummaryPayload? = null
     ) : StudyState
 
     data class Error(

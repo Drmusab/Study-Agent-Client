@@ -14,6 +14,8 @@ data class AppSettings(
     val autoPlayFeedback: Boolean = true,
     val autoSubmitTranscript: Boolean = true,
     val confirmRating: Boolean = false,
+/** Listen for a spoken rating after feedback (Control Center: Hands-Free Study). */
+    val listenForSpokenRating: Boolean = true,
     val showTranscriptOnScreen: Boolean = true,
     val useFakeAgent: Boolean = false,
     val debugLogging: Boolean = true,

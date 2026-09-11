@@ -41,6 +41,14 @@ sealed interface ClientMessage {
             is RequestAnswer -> "request_answer"
             is SkipCard -> "skip_card"
             is RequestSessionStatus -> "request_session_status"
+                        is RequestDashboard -> "request_dashboard"
+            is RequestDecks -> "request_decks"
+            is RequestComponentHealth -> "request_component_health"
+            is RequestStudyConfig -> "request_study_config"
+            is UpdateStudyConfig -> "update_study_config"
+            is RequestHistory -> "request_history"
+            is RequestLearningInsights -> "request_learning_insights"
+            is RequestAiUsage -> "request_ai_usage"
             is Ping -> "ping"
         }
 
@@ -52,8 +60,14 @@ sealed interface ClientMessage {
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
         @SerialName("client_name") val clientName: String = "StudyAgent-Android",
-        @SerialName("client_version") val clientVersion: String = "1.0.0"
+                @SerialName("client_version") val clientVersion: String = "1.0.0"
+        @SerialName("client_version") val clientVersion: String = "2.0.0",
+        /** Protocol versions this client understands. v1 servers ignore this field. */
+        @SerialName("supported_versions") val supportedVersions: List<String> = listOf("1", "2"),
+        /** Optional client-side capabilities advertised to the agent. */
+        @SerialName("client_capabilities") val clientCapabilities: List<String> = listOf("dashboard", "study_control")
     ) : ClientMessage
+
 
     @Serializable
     @SerialName("authenticate")
@@ -74,6 +88,12 @@ sealed interface ClientMessage {
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
         @SerialName("deck") val deck: String? = null,
         @SerialName("mode") val mode: String = "review_due"
+        @SerialName("mode") val mode: String = "review_due",
+        /**
+         * Optional structured session configuration (Protocol v2).
+         * v1 servers ignore this field; behavior stays backward compatible.
+         */
+        @SerialName("config") val config: SessionStartConfig? = null
     ) : ClientMessage
 
     @Serializable
@@ -184,6 +204,93 @@ sealed interface ClientMessage {
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp()
     ) : ClientMessage
 
+    /** Requests a consolidated dashboard snapshot (requires `dashboard` capability). */
+    @Serializable
+    @SerialName("request_dashboard")
+    data class RequestDashboard(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp()
+    ) : ClientMessage
+
+    /** Requests the deck list with live due/new/learning counts (requires `deck_list`). */
+    @Serializable
+    @SerialName("request_decks")
+    data class RequestDecks(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp()
+    ) : ClientMessage
+
+    /** Requests explicit component health (Anki/LLM) — never inferred client-side. */
+    @Serializable
+    @SerialName("request_component_health")
+    data class RequestComponentHealth(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp()
+    ) : ClientMessage
+
+    /** Requests the authoritative study configuration stored by the PC agent. */
+    @Serializable
+    @SerialName("request_study_config")
+    data class RequestStudyConfig(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp()
+    ) : ClientMessage
+
+    /**
+     * Sends a validated configuration change. The server must answer with
+     * `study_config_updated` (ACK, echoing [messageId]) or an `error` frame;
+     * the client rolls back on rejection/timeout.
+     */
+    @Serializable
+    @SerialName("update_study_config")
+    data class UpdateStudyConfig(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
+        @SerialName("config") val config: StudyControlConfig
+    ) : ClientMessage
+
+    /** Requests study history for a range: "today", "7d", "30d". */
+    @Serializable
+    @SerialName("request_history")
+    data class RequestHistory(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
+        @SerialName("range") val range: String = "7d"
+    ) : ClientMessage
+
+    /** Requests the latest server-generated learning insight (no on-open LLM calls). */
+    @Serializable
+    @SerialName("request_learning_insights")
+    data class RequestLearningInsights(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp()
+    ) : ClientMessage
+
+    /** Requests AI usage/cost statistics for a range: "today", "month", "all_time". */
+    @Serializable
+    @SerialName("request_ai_usage")
+    data class RequestAiUsage(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
+        @SerialName("range") val range: String = "month"
+    ) : ClientMessage
+
     @Serializable
     @SerialName("ping")
     data class Ping(
@@ -216,8 +323,20 @@ sealed interface ServerMessage {
             is SessionResumed -> "session_resumed"
             is SessionFinished -> "session_finished"
             is SessionStats -> "session_stats"
+                        is SessionProgress -> "session_progress"
+            is Capabilities -> "capabilities"
+            is DashboardSnapshotResponse -> "dashboard_snapshot"
+            is DeckListResponse -> "deck_list"
+            is ComponentHealthResponse -> "component_health"
+            is StudyConfigResponse -> "study_config"
+            is StudyConfigUpdated -> "study_config_updated"
+            is StudyHistoryResponse -> "study_history"
+            is LearningInsightResponse -> "learning_insight"
+            is AiUsageResponse -> "ai_usage_stats"
             is ErrorMessage -> "error"
             is Pong -> "pong"
+            is Unknown -> "unknown"
+
         }
 
     @Serializable
@@ -259,6 +378,8 @@ sealed interface ServerMessage {
         @SerialName("incorrect_points") val incorrectPoints: List<String> = emptyList(),
         @SerialName("short_feedback") val shortFeedback: String = "",
         @SerialName("suggested_rating") val suggestedRating: Rating? = null,
+        /** Evaluator confidence in percent (0..100); drives auto-rating decisions. */
+        @SerialName("confidence") val confidence: Double? = null,
         @SerialName("speak") val speak: Boolean = true
     ) : ServerMessage
 
@@ -336,6 +457,10 @@ sealed interface ServerMessage {
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("total_reviewed") val totalReviewed: Int = 0,
+        @SerialName("summary") val summary: String? = null
+        @SerialName("summary") val summary: String? = null,
+        /** Rich server-generated session summary (Protocol v2), when available. */
+        @SerialName("details") val details: SessionSummaryPayload? = null
         @SerialName("summary") val summary: String? = null
     ) : ServerMessage
 
