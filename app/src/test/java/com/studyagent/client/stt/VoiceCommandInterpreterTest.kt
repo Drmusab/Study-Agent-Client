@@ -294,4 +294,72 @@ class VoiceCommandInterpreterTest {
         assertEquals("good", CommandNormalizer.forCommand("Good!"))
         assertEquals("Good!", CommandNormalizer.forAnswer("Good!"))
     }
+
+    // ------------------------------------------------------------------ §14/§140 confirmation
+
+    private fun parsedGood(): com.studyagent.client.core.voice.stt.ParsedVoiceCommand =
+        com.studyagent.client.core.voice.stt.ParsedVoiceCommand(
+            command = VoiceCommand.Good,
+            confidence = com.studyagent.client.core.voice.stt.CommandConfidence.HIGH,
+            matchedPhrase = "good"
+        )
+
+    @Test
+    fun `a spoken yes resolves a pending rating confirmation`() {
+        val decision = interpreter.interpret(
+            outcome("yes" to 0.7f),
+            CommandContext.RATING_EXPECTED,
+            settings,
+            pendingConfirmation = parsedGood()
+        )
+        assertTrue(decision is CommandDecision.Execute)
+        assertEquals(VoiceCommand.Good, (decision as CommandDecision.Execute).parsed.command)
+    }
+
+    @Test
+    fun `a spoken no declines a pending rating and re-listens`() {
+        val decision = interpreter.interpret(
+            outcome("no" to 0.7f),
+            CommandContext.RATING_EXPECTED,
+            settings,
+            pendingConfirmation = parsedGood()
+        )
+        assertTrue(decision is CommandDecision.Retry)
+    }
+
+    @Test
+    fun `a fresh rating replaces a pending confirmation instead of confirming it`() {
+        val decision = interpreter.interpret(
+            outcome("hard" to 0.9f),
+            CommandContext.RATING_EXPECTED,
+            settings,
+            pendingConfirmation = parsedGood()
+        )
+        assertTrue(decision is CommandDecision.Execute)
+        assertEquals("the user's new rating wins", VoiceCommand.Hard, (decision as CommandDecision.Execute).parsed.command)
+    }
+
+    @Test
+    fun `arabic confirmation phrases resolve a pending rating`() {
+        val decision = interpreter.interpret(
+            outcome("نعم" to 0.8f),
+            CommandContext.RATING_EXPECTED,
+            settings,
+            pendingConfirmation = parsedGood()
+        )
+        assertTrue(decision is CommandDecision.Execute)
+        assertEquals(VoiceCommand.Good, (decision as CommandDecision.Execute).parsed.command)
+    }
+
+    @Test
+    fun `without a pending confirmation a yes is never a rating`() {
+        val decision = interpreter.interpret(
+            outcome("yes" to 0.7f),
+            CommandContext.RATING_EXPECTED,
+            settings
+        )
+        // Falls through to the answer fallback, which the repository's study-state gate
+        // refuses to send for an already-evaluated card. It must never execute a rating.
+        assertTrue(decision !is CommandDecision.Execute)
+    }
 }

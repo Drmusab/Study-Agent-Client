@@ -98,7 +98,7 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             connectionRepository = connectionRepository,
             speechOrchestrator = speechOrchestrator,
             recognitionOrchestrator = recognitionOrchestrator,
-            preferencesDataStore = preferencesDataStore,
+            settingsFlow = preferencesDataStore.settingsFlow,
             audioRouteManager = audioRouteManager,
             dispatchers = dispatchers
         )

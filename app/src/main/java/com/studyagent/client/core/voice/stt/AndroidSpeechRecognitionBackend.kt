@@ -206,6 +206,10 @@ class AndroidSpeechRecognitionBackend(
     private fun queryRecognitionSupport() {
         if (Build.VERSION.SDK_INT < 33) return
         postToMain {
+            // Never probe the recognizer while a turn owns it: checkRecognitionSupport on an
+            // active session has been observed to disturb in-flight recognition on some
+            // providers. The probe is deferred — refreshCapabilities() runs again later.
+            if (activeTurn != null) return@postToMain
             val rec = recognizer ?: ensureRecognizer(RecognitionBackendKind.SYSTEM) ?: return@postToMain
             val probe = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -257,6 +261,9 @@ class AndroidSpeechRecognitionBackend(
     override fun requestModelDownload(languageTag: String): Boolean {
         if (Build.VERSION.SDK_INT < 33) return false
         var issued = false
+        // Snapshot before posting: reading the field again after the post would race with
+        // the main thread and could report a recognizer that has since been destroyed.
+        val hadRecognizer = recognizer != null
         postToMain {
             val rec = recognizer ?: ensureRecognizer(RecognitionBackendKind.SYSTEM)
             if (rec == null) {
@@ -275,7 +282,7 @@ class AndroidSpeechRecognitionBackend(
                 }
                 .onFailure { AppLogger.w(tag, "triggerModelDownload failed: ${it.message}") }
         }
-        return issued || recognizer != null
+        return issued || hadRecognizer
     }
 
     // ------------------------------------------------------------------ recognizer

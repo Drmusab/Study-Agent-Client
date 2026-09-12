@@ -69,6 +69,21 @@ class DefaultSpeechRecognitionOrchestrator(
 
     private val tag = "SttOrchestrator"
 
+    /**
+     * Single-owner guard (§62/§77). Every state transition — start, finish, cancel,
+     * release, backend event, watchdog fire and the post-delay retry — runs inside this
+     * monitor, so check-then-act sequences (busy check → `backend.start`) are atomic with
+     * respect to each other even when callers arrive from different threads (UI thread,
+     * repository coroutines, the event collector, watchdog and retry jobs).
+     *
+     * Every critical section below is non-suspending (backend calls post or return
+     * synchronously; emissions use `tryEmit`; `scope.launch` does not suspend the caller),
+     * so the lock is held only for microseconds and cannot deadlock. `synchronized` is
+     * reentrant, which is what makes nested transitions (start → backend event → complete)
+     * safe on dispatchers that run inline, such as test schedulers.
+     */
+    private val transitionLock = Any()
+
     private val _state = MutableStateFlow<RecognitionState>(RecognitionState.Idle)
     override val state: StateFlow<RecognitionState> = _state.asStateFlow()
 
@@ -97,7 +112,12 @@ class DefaultSpeechRecognitionOrchestrator(
     private var activeBackendKind: RecognitionBackendKind = RecognitionBackendKind.UNKNOWN
     private var turnStartedAtMs = 0L
     private var retryAttempt = 0
-    private var lastStartAttemptMs = 0L
+
+    /**
+     * Starts at "the distant past", never at 0: the first turn after launch (and the first
+     * turn of a virtual-time test, where the clock starts at 0) must never be rate limited.
+     */
+    private var lastStartAttemptMs = Long.MIN_VALUE / 2
     private var watchdogJob: Job? = null
     private var metrics = RecognitionMetrics()
     private var released = false
@@ -110,42 +130,44 @@ class DefaultSpeechRecognitionOrchestrator(
     }
 
     override fun updateSettings(settings: SttSettings) {
-        this.settings = settings
+        synchronized(transitionLock) { this.settings = settings }
     }
 
     // ------------------------------------------------------------------ starting
 
     override fun startRecognition(request: RecognitionRequest): RecognitionStartResult {
-        if (released) {
-            return RecognitionStartResult.Rejected(
-                RecognitionError(RecognitionErrorCode.UNAVAILABLE, request.id)
-            )
+        synchronized(transitionLock) {
+            if (released) {
+                return RecognitionStartResult.Rejected(
+                    RecognitionError(RecognitionErrorCode.UNAVAILABLE, request.id)
+                )
+            }
+            if (_state.value.isActive) {
+                AppLogger.w(tag, "start rejected: a turn is already active (${_state.value.requestId})")
+                return RecognitionStartResult.Rejected(
+                    RecognitionError(RecognitionErrorCode.BUSY, request.id)
+                )
+            }
+            // Rate limit (§52): TTS completion, a UI tap and the hands-free loop can all try to
+            // open the microphone within the same few milliseconds. Only one wins.
+            val now = clock()
+            if (now - lastStartAttemptMs < settings.minTurnIntervalMs) {
+                metrics = metrics.copy(rateLimitRejections = metrics.rateLimitRejections + 1)
+                publishHealth()
+                AppLogger.d(tag, "start rejected: rate limited (${now - lastStartAttemptMs}ms since last)")
+                return RecognitionStartResult.Rejected(
+                    RecognitionError(RecognitionErrorCode.TOO_MANY_REQUESTS, request.id)
+                )
+            }
+            // TTS gate: never listen while the app is still speaking (§57).
+            if (!canOpenMicrophone()) {
+                AppLogger.d(tag, "start deferred: speech pipeline has not settled")
+                return RecognitionStartResult.Rejected(
+                    RecognitionError(RecognitionErrorCode.BUSY, request.id, detail = "speech-active")
+                )
+            }
+            return beginTurn(request, attempt = 0, rateLimited = true)
         }
-        if (_state.value.isActive) {
-            AppLogger.w(tag, "start rejected: a turn is already active (${_state.value.requestId})")
-            return RecognitionStartResult.Rejected(
-                RecognitionError(RecognitionErrorCode.BUSY, request.id)
-            )
-        }
-        // Rate limit (§52): TTS completion, a UI tap and the hands-free loop can all try to
-        // open the microphone within the same few milliseconds. Only one wins.
-        val now = clock()
-        if (now - lastStartAttemptMs < settings.minTurnIntervalMs) {
-            metrics = metrics.copy(rateLimitRejections = metrics.rateLimitRejections + 1)
-            publishHealth()
-            AppLogger.d(tag, "start rejected: rate limited (${now - lastStartAttemptMs}ms since last)")
-            return RecognitionStartResult.Rejected(
-                RecognitionError(RecognitionErrorCode.TOO_MANY_REQUESTS, request.id)
-            )
-        }
-        // TTS gate: never listen while the app is still speaking (§57).
-        if (!canOpenMicrophone()) {
-            AppLogger.d(tag, "start deferred: speech pipeline has not settled")
-            return RecognitionStartResult.Rejected(
-                RecognitionError(RecognitionErrorCode.BUSY, request.id, detail = "speech-active")
-            )
-        }
-        return beginTurn(request, attempt = 0, rateLimited = true)
     }
 
     /** Internal start: retries bypass the rate limiter but never the busy or TTS checks. */
@@ -187,29 +209,33 @@ class DefaultSpeechRecognitionOrchestrator(
     }
 
     override fun finishCurrentTurn() {
-        val request = activeRequest ?: return
-        // stopListening, not cancel: we want the speech already captured to be finalised.
-        // The turn stays active until the backend's terminal callback (§18/§94).
-        AppLogger.d(tag, "Finishing turn ${request.id}; waiting for final result")
-        _state.value = RecognitionState.Processing(request.id, request.purpose)
-        scheduleWatchdog(request.timeouts.finalResultMs, "final")
-        backend.stopListening()
-        publishHealth()
+        synchronized(transitionLock) {
+            val request = activeRequest ?: return
+            // stopListening, not cancel: we want the speech already captured to be finalised.
+            // The turn stays active until the backend's terminal callback (§18/§94).
+            AppLogger.d(tag, "Finishing turn ${request.id}; waiting for final result")
+            _state.value = RecognitionState.Processing(request.id, request.purpose)
+            scheduleWatchdog(request.timeouts.finalResultMs, "final")
+            backend.stopListening()
+            publishHealth()
+        }
     }
 
     override fun cancelCurrentTurn(reason: String) {
-        val request = activeRequest ?: return
-        AppLogger.i(tag, "Cancelling turn ${request.id} ($reason)")
-        // Invalidating the request id *before* cancelling means any in-flight callback is
-        // already stale by the time it arrives — the core of §95/§96/§97.
-        activeRequest = null
-        watchdogJob?.cancel()
-        watchdogJob = null
-        metrics = metrics.copy(cancelledTurns = metrics.cancelledTurns + 1)
-        _partialTranscript.value = ""
-        _state.value = RecognitionState.Idle
-        backend.cancel()
-        publishHealth()
+        synchronized(transitionLock) {
+            val request = activeRequest ?: return
+            AppLogger.i(tag, "Cancelling turn ${request.id} ($reason)")
+            // Invalidating the request id *before* cancelling means any in-flight callback is
+            // already stale by the time it arrives — the core of §95/§96/§97.
+            activeRequest = null
+            watchdogJob?.cancel()
+            watchdogJob = null
+            metrics = metrics.copy(cancelledTurns = metrics.cancelledTurns + 1)
+            _partialTranscript.value = ""
+            _state.value = RecognitionState.Idle
+            backend.cancel()
+            publishHealth()
+        }
     }
 
     override fun refreshCapabilities(): RecognitionCapabilities = backend.refreshCapabilities()
@@ -218,20 +244,27 @@ class DefaultSpeechRecognitionOrchestrator(
         backend.requestModelDownload(languageTag)
 
     override fun release() {
-        if (released) return
-        released = true
-        watchdogJob?.cancel()
-        watchdogJob = null
-        activeRequest = null
-        backend.release()
-        _state.value = RecognitionState.Released
-        _isListening.value = false
-        publishHealth()
+        synchronized(transitionLock) {
+            if (released) return
+            released = true
+            watchdogJob?.cancel()
+            watchdogJob = null
+            activeRequest = null
+            backend.release()
+            _state.value = RecognitionState.Released
+            _isListening.value = false
+            publishHealth()
+        }
     }
 
     // ------------------------------------------------------------------ backend events
 
     private fun handleBackendEvent(event: RecognitionBackendEvent) {
+        synchronized(transitionLock) { handleBackendEventLocked(event) }
+    }
+
+    /** Precondition: [transitionLock] is held by the caller. */
+    private fun handleBackendEventLocked(event: RecognitionBackendEvent) {
         val current = activeRequest
         // Stale-callback protection (§10). A callback for a turn we no longer own is dropped.
         if (current == null || current.id != event.requestId) {
@@ -411,16 +444,18 @@ class DefaultSpeechRecognitionOrchestrator(
         )
         scope.launch {
             if (delayMs > 0) delay(delayMs)
-            // Re-check: the study state may have moved on while we waited, and starting a
-            // turn nobody wants is how hands-free mode ends up spinning.
-            if (activeRequest != null || released || !canOpenMicrophone()) {
-                AppLogger.d(tag, "Retry abandoned for ${request.id}; state moved on")
-                _turnResults.tryEmit(RecognitionTurnResult.Failed(error))
-                return@launch
-            }
-            val outcome = beginTurn(retryRequest, attempt + 1, rateLimited = false)
-            if (outcome is RecognitionStartResult.Rejected) {
-                _turnResults.tryEmit(RecognitionTurnResult.Failed(outcome.error))
+            synchronized(transitionLock) {
+                // Re-check: the study state may have moved on while we waited, and starting a
+                // turn nobody wants is how hands-free mode ends up spinning.
+                if (activeRequest != null || released || !canOpenMicrophone()) {
+                    AppLogger.d(tag, "Retry abandoned for ${request.id}; state moved on")
+                    _turnResults.tryEmit(RecognitionTurnResult.Failed(error))
+                    return@launch
+                }
+                val outcome = beginTurn(retryRequest, attempt + 1, rateLimited = false)
+                if (outcome is RecognitionStartResult.Rejected) {
+                    _turnResults.tryEmit(RecognitionTurnResult.Failed(outcome.error))
+                }
             }
         }
     }
@@ -456,19 +491,21 @@ class DefaultSpeechRecognitionOrchestrator(
         val request = activeRequest ?: return
         watchdogJob = scope.launch {
             delay(durationMs)
-            if (activeRequest?.id != request.id) return@launch
-            AppLogger.w(tag, "Watchdog fired ($phase) for ${request.id} after ${durationMs}ms")
-            backend.cancel()
-            activeRequest = null
-            handleFailure(
-                request,
-                RecognitionError(
-                    RecognitionErrorCode.WATCHDOG_TIMEOUT,
-                    request.id,
-                    detail = "phase=$phase"
-                ),
-                retryAttempt
-            )
+            synchronized(transitionLock) {
+                if (activeRequest?.id != request.id) return@launch
+                AppLogger.w(tag, "Watchdog fired ($phase) for ${request.id} after ${durationMs}ms")
+                backend.cancel()
+                activeRequest = null
+                handleFailure(
+                    request,
+                    RecognitionError(
+                        RecognitionErrorCode.WATCHDOG_TIMEOUT,
+                        request.id,
+                        detail = "phase=$phase"
+                    ),
+                    retryAttempt
+                )
+            }
         }
     }
 

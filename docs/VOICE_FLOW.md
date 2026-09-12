@@ -123,6 +123,8 @@ The client includes local, low-latency command parsing that operates before send
 * Push-to-talk release calls `stopListening()` and **waits** for the final result — it never
   submits at the moment of release.
 * Full model: `docs/STT_ARCHITECTURE.md`.
+* **Reliability contract** (exactly-once submissions, stale-callback rejection, TTS/STT
+  interlock, bounded retry, interruption matrix, test map): `docs/STT_RELIABILITY.md`.
 
 ---
 

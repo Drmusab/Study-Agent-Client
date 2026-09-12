@@ -228,6 +228,50 @@ class FakeSpeechRecognitionBackend(
         )
     }
 
+    // ------------------------------------------------------------------ chaos injection
+    //
+    // The emit* helpers above model a well-behaved recognizer: one terminal per turn. The
+    // raw* helpers below deliberately bypass that contract — they emit a terminal event for
+    // an arbitrary request id without touching [activeId] — which is how the orchestrator's
+    // duplicate-final, final-then-error and cancel-then-final guards are exercised against
+    // the buggy services real devices sometimes ship.
+
+    /** Forge a terminal Results event for [requestId], regardless of the active turn. */
+    fun emitRawResults(
+        requestId: String,
+        hypotheses: List<RecognitionHypothesis>,
+        confidence: Float? = null
+    ) {
+        emit(
+            RecognitionBackendEvent.Results(
+                requestId = requestId,
+                hypotheses = hypotheses.ifEmpty { listOf(RecognitionHypothesis("", confidence, 0)) },
+                detectedLanguage = null,
+                source = RecognitionSource.UNKNOWN,
+                speechDurationMs = null,
+                finalizationLatencyMs = null
+            )
+        )
+    }
+
+    /** Forge a terminal Failed event for [requestId], regardless of the active turn. */
+    fun emitRawError(requestId: String, code: RecognitionErrorCode) {
+        emit(RecognitionBackendEvent.Failed(requestId, RecognitionError(code, requestId)))
+    }
+
+    /** Forge a partial for [requestId] — e.g. a late partial after the turn finished. */
+    fun emitRawPartial(requestId: String, text: String) {
+        emit(
+            RecognitionBackendEvent.Partial(
+                requestId,
+                listOf(RecognitionHypothesis(text, null, 0))
+            )
+        )
+    }
+
+    /** The request ids handed to [start], for forging callbacks against them. */
+    val lastStartedRequestId: String? get() = startedRequests.lastOrNull()?.id
+
     /** Convenience: the full happy path up to (but not including) the final result. */
     fun emitReadyAndSpeech() {
         emitReady()

@@ -206,3 +206,7 @@ com.studyagent.client/
    - Speech pipeline: markup cleanup, pronunciation, segmentation, chunking
      (the `SpeechOrchestrator` actor + pump run here; engine calls are posted
      to the main thread by the engine adapter).
+   - Recognition lifecycle: all `SpeechRecognitionOrchestrator` transitions (start, finish,
+     cancel, backend events, watchdog, retry) are serialized through one monitor, so the
+     study loop, the event collector, the watchdog and UI-triggered calls can never
+     interleave a check-then-act sequence.
