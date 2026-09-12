@@ -55,6 +55,11 @@ sealed interface CommandDecision {
  * [VoiceCommandGrammar.answerSafePhrases] may fire — so a medical answer that happens to
  * contain "good", "stop", "next" or "again" is submitted as an answer instead of silently
  * rating or ending the session.
+ *
+ * @param pendingConfirmation a rating awaiting the user's yes/no after
+ *   [CommandDecision.NeedsConfirmation]. While one is pending, a verbatim confirmation
+ *   phrase resolves it; without this, a spoken "yes" would fall through to answer
+ *   submission and send a useless transcript for an already-evaluated card (§11/§141).
  */
 class VoiceCommandInterpreter(
     private val selector: RecognitionCandidateSelector = RecognitionCandidateSelector(),
@@ -64,7 +69,8 @@ class VoiceCommandInterpreter(
     fun interpret(
         outcome: RecognitionOutcome,
         context: CommandContext,
-        settings: SttSettings
+        settings: SttSettings,
+        pendingConfirmation: ParsedVoiceCommand? = null
     ): CommandDecision {
         val hypotheses = outcome.hypotheses
         if (hypotheses.all { it.isBlank }) {
@@ -73,7 +79,7 @@ class VoiceCommandInterpreter(
 
         return when (context) {
             CommandContext.ANSWER_EXPECTED -> interpretAnswer(hypotheses, settings)
-            CommandContext.RATING_EXPECTED -> interpretRating(hypotheses, settings)
+            CommandContext.RATING_EXPECTED -> interpretRating(hypotheses, settings, pendingConfirmation)
             CommandContext.FEEDBACK_SHOWING -> interpretFeedback(hypotheses, settings)
             CommandContext.PAUSED -> interpretRestricted(
                 hypotheses, settings,
@@ -118,8 +124,16 @@ class VoiceCommandInterpreter(
 
     private fun interpretRating(
         hypotheses: List<RecognitionHypothesis>,
-        settings: SttSettings
+        settings: SttSettings,
+        pendingConfirmation: ParsedVoiceCommand? = null
     ): CommandDecision {
+        // A spoken yes/no first resolves an outstanding "I heard X — correct?" prompt.
+        // Anything the confirmation grammar cannot match verbatim continues below, where a
+        // fresh rating ("no — I said Hard") replaces the pending one.
+        if (pendingConfirmation != null) {
+            resolveConfirmation(hypotheses, pendingConfirmation)?.let { return it }
+        }
+
         val match = selector.selectForCommand(hypotheses, settings.ratingMinConfidence)
 
         if (match != null && match.command.commandName in RATING_COMMAND_NAMES) {
@@ -198,6 +212,31 @@ class VoiceCommandInterpreter(
     }
 
     // ------------------------------------------------------------------ gates
+
+    /**
+     * Resolve an outstanding rating confirmation with a verbatim yes/no (§14/§140).
+     *
+     * Returns `null` when no confirmation phrase matched, leaving the normal rating
+     * interpretation to run. Yes applies the *pending* rating — never a re-parsed
+     * hypothesis — so "yes" can only ever produce the one action the user was asked about.
+     * No declines and asks for the rating again; the pending rating is discarded.
+     */
+    private fun resolveConfirmation(
+        hypotheses: List<RecognitionHypothesis>,
+        pending: ParsedVoiceCommand
+    ): CommandDecision? {
+        for (hypothesis in hypotheses.sortedBy { it.rank }) {
+            if (CommandNormalizer.looksLikeLongUtterance(hypothesis.text)) continue
+            val normalized = CommandNormalizer.forCommand(hypothesis.text)
+            if (normalized in grammar.confirmationYesPhrases()) {
+                return CommandDecision.Execute(pending)
+            }
+            if (normalized in grammar.confirmationNoPhrases()) {
+                return CommandDecision.Retry("confirmation-declined", PROMPT_REPEAT_RATING)
+            }
+        }
+        return null
+    }
 
     /**
      * Destructive commands (Again / Skip / EndSession) require a **verbatim** grammar hit.

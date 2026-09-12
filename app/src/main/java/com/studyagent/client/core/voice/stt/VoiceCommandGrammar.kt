@@ -128,6 +128,16 @@ class VoiceCommandGrammar {
     fun destructiveCommands(): Set<String> =
         commandEntries.filter { it.destructive }.map { it.command.commandName }.toSet()
 
+    /**
+     * Verbatim-only answers to the "I heard X — is that correct?" prompt (§14/§140).
+     *
+     * Deliberately tiny and matched exactly (no fuzzy, no substring): a confirmation
+     * window's entire job is to resolve one yes/no, so anything it cannot match verbatim
+     * falls through to normal rating interpretation instead of being guessed at.
+     */
+    fun confirmationYesPhrases(): Set<String> = CONFIRMATION_YES
+    fun confirmationNoPhrases(): Set<String> = CONFIRMATION_NO
+
     private fun fuzzyMatch(normalized: String): ParsedVoiceCommand? {
         val words = normalized.split(' ')
         if (words.size != 1) return null
@@ -178,6 +188,24 @@ class VoiceCommandGrammar {
         private const val MIN_FUZZY_LENGTH = 4
 
         private val RATING_COMMAND_NAMES = setOf("Again", "Hard", "Good", "Easy")
+
+        /**
+         * Stored pre-normalized (§41): `أكيد` and `اكيد` collapse to one entry, so both
+         * orthographies answer the confirmation prompt. Checked verbatim only.
+         */
+        private val CONFIRMATION_YES: Set<String> by lazy {
+            setOf(
+                "yes", "yeah", "yep", "sure", "confirm", "that is correct",
+                "نعم", "ايوه", "أيوه", "ايوا", "اكيد", "أكيد", "موافق"
+            ).map { CommandNormalizer.forCommand(it) }.toSet()
+        }
+
+        private val CONFIRMATION_NO: Set<String> by lazy {
+            setOf(
+                "no", "nope", "cancel", "never mind", "wrong",
+                "لا", "الغاء", "الغي", "مش مظبوط"
+            ).map { CommandNormalizer.forCommand(it) }.toSet()
+        }
 
         private val RATING_COMMANDS: List<CommandEntry> by lazy {
             buildEntries().filter { it.command.commandName in RATING_COMMAND_NAMES }

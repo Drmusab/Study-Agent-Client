@@ -16,6 +16,7 @@ import com.studyagent.client.core.models.VoiceCommand
 import com.studyagent.client.core.voice.stt.CommandContext
 import com.studyagent.client.core.voice.stt.CommandDecision
 import com.studyagent.client.core.voice.stt.MedicalVocabularyProvider
+import com.studyagent.client.core.voice.stt.ParsedVoiceCommand
 import com.studyagent.client.core.voice.stt.RecognitionError
 import com.studyagent.client.core.voice.stt.RecognitionErrorCode
 import com.studyagent.client.core.voice.stt.RecognitionLanguageMode
@@ -41,7 +42,6 @@ import com.studyagent.client.core.voice.tts.StopReason
 import com.studyagent.client.core.voice.tts.TtsSettings
 import com.studyagent.client.core.voice.tts.VoiceHandoffController
 import com.studyagent.client.core.voice.tts.toTtsSettings
-import com.studyagent.client.data.preferences.PreferencesDataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -115,10 +115,13 @@ class DefaultStudySessionRepository(
     private val recognitionPolicyFactory: RecognitionPolicyFactory = RecognitionPolicyFactory(),
     private val commandInterpreter: VoiceCommandInterpreter = VoiceCommandInterpreter(),
     private val vocabularyProvider: MedicalVocabularyProvider = MedicalVocabularyProvider.DEFAULT,
-    private val preferencesDataStore: PreferencesDataStore,
+    /** Observed [AppSettings] stream. (A Flow, so tests can drive settings without Android.) */
+    settingsFlow: Flow<AppSettings>,
     private val audioRouteManager: AudioRouteManager,
     private val dispatchers: DispatcherProvider,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + dispatchers.default)
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + dispatchers.default),
+    /** Injectable clock for the STT start dedup window (tests use virtual time). */
+    private val clock: () -> Long = System::currentTimeMillis
 ) : StudySessionRepository {
 
     private val tag = "StudySessionRepo"
@@ -138,6 +141,77 @@ class DefaultStudySessionRepository(
     private var isPushToTalkActive = false
     private var speechJob: Job? = null
 
+    // ------------------------------------------------------------------ submission ledger
+    //
+    // Exactly-once study actions (§10/§11). The recognition layer already guarantees one
+    // terminal callback per request id; these guards extend the guarantee to the *study*
+    // layer, where duplicates can still reach the server through independent paths:
+    // a double-tapped rating button, a voice result racing a button tap, a transcript
+    // submitted twice from a pending-review state, or a stray utterance in the rating
+    // window being misread as a second answer for an already-evaluated card.
+
+    /** Serializes ledger check-and-set with the code that decides to reset it. */
+    private val submissionLock = Any()
+
+    /** Card whose answer has been sent to the evaluator. One answer per card. */
+    private var answerSubmittedForCardId: String? = null
+
+    /** Card whose rating has been sent to the server. One rating per card. */
+    private var ratingSubmittedForCardId: String? = null
+
+    /**
+     * A rating awaiting the user's yes/no after a NeedsConfirmation prompt. Cleared when
+     * any other decision resolves, when a non-confirmation turn starts, or when the card
+     * changes — a stale "yes" must never rate a card the prompt was not about.
+     */
+    private var pendingRatingConfirmation: ParsedVoiceCommand? = null
+
+    /** One answer per card: returns true when this caller owns the submission. */
+    private fun tryBeginAnswerSubmission(cardId: String): Boolean {
+        synchronized(submissionLock) {
+            if (answerSubmittedForCardId == cardId) return false
+            answerSubmittedForCardId = cardId
+        }
+        return true
+    }
+
+    /** One rating per card: returns true when this caller owns the submission. */
+    private fun tryBeginRatingSubmission(cardId: String): Boolean {
+        synchronized(submissionLock) {
+            if (ratingSubmittedForCardId == cardId) return false
+            ratingSubmittedForCardId = cardId
+        }
+        return true
+    }
+
+    /**
+     * A genuinely new card re-opens the submission window. A *re-delivered* Question for
+     * the same card (server re-send after reconnect) must NOT reset the guard — that is
+     * exactly the duplicate the ledger exists to absorb.
+     */
+    private fun onStudyTurnAdvanced(newCardId: String?) = synchronized(submissionLock) {
+        if (answerSubmittedForCardId != null && answerSubmittedForCardId != newCardId) {
+            answerSubmittedForCardId = null
+        }
+        if (ratingSubmittedForCardId != null && ratingSubmittedForCardId != newCardId) {
+            ratingSubmittedForCardId = null
+        }
+        pendingRatingConfirmation = null
+    }
+
+    private fun clearPendingRatingConfirmation() = synchronized(submissionLock) {
+        pendingRatingConfirmation = null
+    }
+
+    private fun setPendingRatingConfirmation(match: ParsedVoiceCommand?) = synchronized(submissionLock) {
+        pendingRatingConfirmation = match
+    }
+
+    private fun peekPendingRatingConfirmation(): ParsedVoiceCommand? = synchronized(submissionLock) {
+        pendingRatingConfirmation
+    }
+
+
     /**
      * Consecutive recognition failures without an intervening success. Recognition has its
      * own bounded retry inside the orchestrator; this stops the *repository* from re-opening
@@ -151,7 +225,7 @@ class DefaultStudySessionRepository(
 
     /** Prevents double recognizer starts within the handoff window. */
     @Volatile
-    private var lastSttStartMs: Long = 0L
+    private var lastSttStartMs: Long = Long.MIN_VALUE / 2
 
     private val handoffController = VoiceHandoffController(
         gapProvider = { currentTtsSettings.acousticGapMs }
@@ -160,7 +234,7 @@ class DefaultStudySessionRepository(
     init {
         // Observe settings → push structured TtsSettings into the speech pipeline.
         scope.launch {
-            preferencesDataStore.settingsFlow.distinctUntilChanged().collect { settings ->
+            settingsFlow.distinctUntilChanged().collect { settings ->
                 currentSettings = settings
                 currentTtsSettings = settings.toTtsSettings()
                 currentSttSettings = settings.toSttSettings()
@@ -187,6 +261,8 @@ class DefaultStudySessionRepository(
                         val current = _studyState.value
                         if (current !is StudyState.Idle && current !is StudyState.Error && current !is StudyState.SessionFinished) {
                             AppLogger.w(tag, "Connection dropped during active session: ${state.label}")
+                            // A pending PTT start must not fire into the connection-error state.
+                            isPushToTalkActive = false
                             speechOrchestrator.stopSpeech(StopReason.SESSION_END)
                             // §98: do not keep recording an answer that cannot be submitted.
                             recognitionOrchestrator.cancelCurrentTurn("connection-lost")
@@ -287,26 +363,33 @@ class DefaultStudySessionRepository(
                     remainingCards = message.remaining ?: _currentSession.value?.remainingCards ?: 0
                 )
 
+                // New study turn: previous card's submissions can no longer recur, a stale
+                // confirmation prompt is void, and (unless this is a duplicate re-delivery)
+                // any recognition still running for the previous card is invalidated — the
+                // orchestrator drops its late callback by request id, so a slow transcript
+                // can never land on the card that follows it (§27/§30/§97).
+                onStudyTurnAdvanced(card.id)
+
                 // Duplicate delivery guard (e.g. server re-send after reconnect): an identical
-                // question for the card already being spoken must not restart speech (§30).
-                val alreadySpeakingThis = run {
+                // question must not restart speech, and must not cancel an answer recognition
+                // the user is mid-way through for THIS card.
+                val duplicateDelivery = run {
                     val s = _studyState.value
-                    s is StudyState.SpeakingQuestion && s.card.id == card.id && s.card.question == card.question
+                    (s is StudyState.SpeakingQuestion && s.card.id == card.id && s.card.question == card.question) ||
+                        (s is StudyState.Listening && s.card.id == card.id)
                 }
 
-                // §97: a new question invalidates any recognition still running for the
-                // previous card. The orchestrator drops the late callback by request id, so
-                // a slow transcript can never land on the card that follows it.
-                recognitionOrchestrator.cancelCurrentTurn("new-question")
-
-                _studyState.value = StudyState.SpeakingQuestion(card)
-
-                if (alreadySpeakingThis) {
+                if (duplicateDelivery) {
                     AppLogger.w(tag, "Duplicate question delivery suppressed (card=${card.id})")
-                } else if (message.speak && currentSettings.autoPlayQuestion) {
-                    speakQuestionAndListen(card)
                 } else {
-                    transitionToAnswerListening(card)
+                    recognitionOrchestrator.cancelCurrentTurn("new-question")
+                    _studyState.value = StudyState.SpeakingQuestion(card)
+
+                    if (message.speak && currentSettings.autoPlayQuestion) {
+                        speakQuestionAndListen(card)
+                    } else {
+                        transitionToAnswerListening(card)
+                    }
                 }
             }
 
@@ -596,8 +679,16 @@ class DefaultStudySessionRepository(
     /**
      * Move to Listening state; start STT immediately if speech is drained, otherwise STT
      * starts when the queued speech finishes ([maybeResumeListeningAfterSpeech]).
+     *
+     * Turn-identity guard (§27): a speech terminal from a *previous* card (a question still
+     * being spoken when the server already moved on) must not drag the study state back to
+     * that card or open its microphone. Only the current card may transition.
      */
     private fun transitionToAnswerListening(card: StudyCard) {
+        if (_studyState.value.currentCardOrNull?.id != card.id) {
+            AppLogger.w(tag, "Listen transition skipped: card ${card.id} is no longer current")
+            return
+        }
         _studyState.value = StudyState.Listening(
             card = card,
             partialTranscript = "",
@@ -607,6 +698,10 @@ class DefaultStudySessionRepository(
     }
 
     private fun transitionToRatingListening(card: StudyCard, eval: Evaluation) {
+        if (_studyState.value.currentCardOrNull?.id != card.id) {
+            AppLogger.w(tag, "Rating transition skipped: card ${card.id} is no longer current")
+            return
+        }
         _studyState.value = StudyState.WaitingForRating(card = card, evaluation = eval, suggestedRating = eval.suggestedRating)
         // §20: the spoken-rating preference is now actually honoured. When it is off the
         // rating window still exists — the on-screen buttons work — the microphone just
@@ -630,7 +725,17 @@ class DefaultStudySessionRepository(
                 if (state.pendingTranscript.isBlank()) beginStt(RecognitionPurpose.ANSWER, state.card)
 
             is StudyState.WaitingForRating ->
-                if (currentSettings.listenForSpokenRating) beginStt(RecognitionPurpose.RATING, state.card)
+                if (currentSettings.listenForSpokenRating) {
+                    if (peekPendingRatingConfirmation() != null) {
+                        // A "I heard X — correct?" prompt is outstanding: re-open the SHORT
+                        // confirmation listener, not the rating one, so a spoken "yes" can
+                        // resolve the pending rating instead of falling through to answer
+                        // handling (§14/§140).
+                        beginStt(RecognitionPurpose.SHORT_CONFIRMATION, state.card)
+                    } else {
+                        beginStt(RecognitionPurpose.RATING, state.card)
+                    }
+                }
 
             else -> Unit
         }
@@ -644,9 +749,30 @@ class DefaultStudySessionRepository(
      * never has to configure a recognizer.
      */
     private fun beginStt(purpose: RecognitionPurpose, card: StudyCard?) {
-        val now = System.currentTimeMillis()
-        if (now - lastSttStartMs < STT_START_DEDUP_MS) return
+        val now = clock()
+        if (now - lastSttStartMs < STT_START_DEDUP_MS) {
+            // The handoff path and the drain backstop can race by design; whichever loses
+            // is dropped here. Logged so a swallowed start is never silent.
+            AppLogger.d(
+                tag,
+                "STT start deduplicated (${now - lastSttStartMs}ms since previous, purpose=${purpose.name})"
+            )
+            return
+        }
         lastSttStartMs = now
+
+        // Turn-identity guard (§27): never open the microphone for a card that is no longer
+        // current, whatever path asked for it.
+        if (card != null && _studyState.value.currentCardOrNull?.id != card.id) {
+            AppLogger.w(tag, "STT start skipped: card ${card.id} is no longer current")
+            return
+        }
+
+        // A new turn that is not the confirmation turn itself voids any outstanding
+        // "is that correct?" prompt — a stale yes must not rate a card retroactively.
+        if (purpose != RecognitionPurpose.SHORT_CONFIRMATION) {
+            clearPendingRatingConfirmation()
+        }
 
         val request = recognitionPolicyFactory.createRequest(
             purpose = purpose,
@@ -711,35 +837,56 @@ class DefaultStudySessionRepository(
             "Recognition turn complete purpose=${outcome.purpose.name} ${outcome.logSummary()}"
         )
 
-        applyCommandDecision(commandInterpreter.interpret(outcome, context, currentSttSettings), state)
+        // A pending rating confirmation is only ever resolvable in the rating window; it is
+        // also cleared by beginStt() when any non-confirmation turn starts.
+        val pendingConfirmation = if (context == CommandContext.RATING_EXPECTED) {
+            peekPendingRatingConfirmation()
+        } else {
+            clearPendingRatingConfirmation()
+            null
+        }
+
+        applyCommandDecision(
+            commandInterpreter.interpret(outcome, context, currentSttSettings, pendingConfirmation),
+            state
+        )
     }
 
     private fun applyCommandDecision(decision: CommandDecision, state: StudyState) {
         when (decision) {
             is CommandDecision.Execute -> {
                 AppLogger.i(tag, "Voice command accepted: ${decision.parsed.command.commandName}")
+                clearPendingRatingConfirmation()
                 _lastRecognizedCommand.tryEmit(decision.parsed.command)
                 processVoiceCommandDirectly(decision.parsed.command)
             }
 
-            is CommandDecision.SubmitAnswer -> submitOrHoldAnswer(decision.text, state)
+            is CommandDecision.SubmitAnswer -> {
+                clearPendingRatingConfirmation()
+                submitOrHoldAnswer(decision.text, state)
+            }
 
             is CommandDecision.NeedsConfirmation -> {
                 // A rating was heard but not confidently enough to reschedule a card. Ask,
                 // then listen for a short yes/no rather than guessing (§14/§140).
                 AppLogger.i(tag, "Rating needs confirmation; prompting")
+                setPendingRatingConfirmation(decision.options.firstOrNull())
                 promptAndListen(decision.prompt, RecognitionPurpose.SHORT_CONFIRMATION)
             }
 
             is CommandDecision.Retry -> {
+                // A declined or unresolved confirmation is void; the re-listen starts fresh.
+                clearPendingRatingConfirmation()
                 AppLogger.d(tag, "Nothing actionable (${decision.reason}); re-listening")
                 if (currentSettings.handsFreeMode) {
                     promptAndListen(decision.prompt, purposeForState(state))
                 }
             }
 
-            is CommandDecision.Ignore ->
+            is CommandDecision.Ignore -> {
+                clearPendingRatingConfirmation()
                 AppLogger.d(tag, "Ignoring utterance: ${decision.reason}")
+            }
         }
     }
 
@@ -749,18 +896,49 @@ class DefaultStudySessionRepository(
      * On: the transcript goes straight to the evaluator. Off: it is parked on the study state
      * so the user can review, edit, retry or submit it — the microphone closes and nothing is
      * sent until the user acts.
+     *
+     * Study-state gate (§10): an answer is only ever submitted while an answer is actually
+     * expected. A long utterance that lands in the *rating* window (the interpreter's
+     * "user may be answering again" fallback) is ignored here rather than sent — the card
+     * has already been answered and evaluated, and a second SubmitAnswer would make the PC
+     * evaluate the same card twice.
      */
     private fun submitOrHoldAnswer(text: String, state: StudyState) {
         val card = state.currentCardOrNull ?: _currentSession.value?.currentCard ?: return
-        if (currentSettings.autoSubmitTranscript) {
-            submitSpokenAnswer(card.id, text)
-        } else {
-            AppLogger.i(tag, "Auto-submit off; holding transcript for review (${text.length} chars)")
-            _studyState.value = StudyState.Listening(
-                card = card,
-                partialTranscript = "",
-                isHandsFree = currentSettings.handsFreeMode,
-                pendingTranscript = text
+        when (state) {
+            is StudyState.Listening ->
+                if (currentSettings.autoSubmitTranscript) {
+                    submitSpokenAnswer(card.id, text)
+                } else {
+                    AppLogger.i(tag, "Auto-submit off; holding transcript for review (${text.length} chars)")
+                    _studyState.value = StudyState.Listening(
+                        card = card,
+                        partialTranscript = "",
+                        isHandsFree = currentSettings.handsFreeMode,
+                        pendingTranscript = text
+                    )
+                }
+
+            is StudyState.WaitingForRating,
+            is StudyState.ShowingFeedback,
+            is StudyState.ExplanationShowing,
+            is StudyState.HintShowing -> {
+                AppLogger.w(
+                    tag,
+                    "Answer-like utterance ignored: card already answered (${text.length} chars); staying in rating window"
+                )
+                if (currentSettings.handsFreeMode &&
+                    currentSettings.listenForSpokenRating &&
+                    speechSettled()
+                ) {
+                    // Keep the rating window alive rather than stranding hands-free mode.
+                    beginStt(RecognitionPurpose.RATING, card)
+                }
+            }
+
+            else -> AppLogger.w(
+                tag,
+                "Answer-like utterance ignored in state ${state::class.simpleName} (${text.length} chars)"
             )
         }
     }
@@ -850,6 +1028,20 @@ class DefaultStudySessionRepository(
                 _studyState.value = StudyState.Error(
                     message = "The speech model for $locale is not installed. " +
                         "Download started, or switch recognition to network mode in Settings.",
+                    recoverable = true
+                )
+                return
+            }
+
+            RecognitionErrorCode.TOO_MANY_REQUESTS -> {
+                // The orchestrator deliberately does not auto-retry throttled starts (§52);
+                // immediately re-opening the mic here would recreate exactly the rapid
+                // start/timeout/restart cycle the rate limiter exists to prevent. Back off
+                // to the user instead — the study state is preserved and PTT/buttons work.
+                AppLogger.w(tag, "Recognition rate limited; handing control back to the user")
+                _studyState.value = StudyState.Error(
+                    message = "Speech recognition is rate limited. Wait a moment, then use " +
+                        "push-to-talk or the on-screen controls.",
                     recoverable = true
                 )
                 return
@@ -963,6 +1155,13 @@ class DefaultStudySessionRepository(
     override suspend fun startStudy(deckName: String?) {
         val targetDeck = deckName ?: "Toronto Notes"
         AppLogger.i(tag, "Starting study session for deck: $targetDeck")
+        // Fresh session: the per-card submission window reopens.
+        synchronized(submissionLock) {
+            pendingRatingConfirmation = null
+            answerSubmittedForCardId = null
+            ratingSubmittedForCardId = null
+        }
+        isPushToTalkActive = false
         _studyState.value = StudyState.Loading("Connecting to study session...")
 
         val startMsg = ClientMessage.StartSession(
@@ -976,6 +1175,16 @@ class DefaultStudySessionRepository(
     }
 
     override suspend fun submitSpokenAnswer(cardId: String, transcript: String) {
+        // Exactly-once answer submission (§10). The ledger wins the race regardless of how
+        // many paths converge here — voice final, pending-transcript confirm, button —
+        // because the check-and-set is atomic and happens before anything is sent.
+        if (!tryBeginAnswerSubmission(cardId)) {
+            AppLogger.w(
+                tag,
+                "Duplicate answer submission suppressed (card=$cardId chars=${transcript.length})"
+            )
+            return
+        }
         // Cancel rather than finish: the answer is already in hand, so there is nothing left
         // to finalise — and cancelling invalidates the request id immediately (§97).
         recognitionOrchestrator.cancelCurrentTurn("answer-submitted")
@@ -991,9 +1200,17 @@ class DefaultStudySessionRepository(
     }
 
     override suspend fun rateCurrentCard(rating: Rating) {
+        // Button-wins invariant (§70/§71): invalidate any rating recognition immediately, so
+        // a voice result in flight can never land after the explicit user action.
         recognitionOrchestrator.cancelCurrentTurn("rating-submitted")
-        speechOrchestrator.stopSpeech(StopReason.USER) // rating dismisses spoken feedback
         val card = _studyState.value.currentCardOrNull ?: _currentSession.value?.currentCard ?: return
+        // Exactly-once rating submission (§11): one rating per card, whoever calls first —
+        // voice command, rating button, or both racing each other.
+        if (!tryBeginRatingSubmission(card.id)) {
+            AppLogger.w(tag, "Duplicate rating suppressed (card=${card.id} rating=${rating.name})")
+            return
+        }
+        speechOrchestrator.stopSpeech(StopReason.USER) // rating dismisses spoken feedback
         _studyState.value = StudyState.Loading("Submitting rating: ${rating.displayName}...")
 
         val rateMsg = ClientMessage.RateCard(
@@ -1062,6 +1279,8 @@ class DefaultStudySessionRepository(
     }
 
     override suspend fun pauseStudy() {
+        // A pending PTT delayed-start must not fire after the pause cancelled everything.
+        isPushToTalkActive = false
         speechOrchestrator.stopSpeech(StopReason.PAUSE)
         // §95: cancelling invalidates the request id, so a final callback that lands after
         // the pause cannot submit an answer into a paused session.
@@ -1087,6 +1306,13 @@ class DefaultStudySessionRepository(
     }
 
     override suspend fun endStudy() {
+        // Kill any pending PTT delayed-start together with the session itself.
+        isPushToTalkActive = false
+        synchronized(submissionLock) {
+            pendingRatingConfirmation = null
+            answerSubmittedForCardId = null
+            ratingSubmittedForCardId = null
+        }
         speechOrchestrator.stopSpeech(StopReason.SESSION_END)
         recognitionOrchestrator.cancelCurrentTurn("session-ended")
         val sess = _currentSession.value
@@ -1104,23 +1330,54 @@ class DefaultStudySessionRepository(
      * TTS is interrupted first, then the microphone opens after a short acoustic gap so the
      * recognizer cannot capture the tail of the app's own speech. The user still controls
      * when recognition ends.
+     *
+     * Gating (§95): PTT is only meaningful inside an active study window. Outside one —
+     * paused, loading, errored out, finished — it is refused instead of silently dragging
+     * the study state to Listening. In the rating window PTT keeps the state and listens
+     * for a rating/command; in answer windows it opens the answer listener.
      */
     override fun startManualPushToTalk() {
+        val state = _studyState.value
+        val inStudyWindow = state is StudyState.SpeakingQuestion ||
+            state is StudyState.Listening ||
+            state is StudyState.ShowingFeedback ||
+            state is StudyState.WaitingForRating ||
+            state is StudyState.HintShowing ||
+            state is StudyState.ExplanationShowing
+        if (!inStudyWindow) {
+            AppLogger.d(tag, "PTT ignored: no active study window (${state::class.simpleName})")
+            return
+        }
+
         isPushToTalkActive = true
         speechOrchestrator.stopSpeech(StopReason.USER)
-        val card = _studyState.value.currentCardOrNull ?: _currentSession.value?.currentCard ?: return
-        _studyState.value = StudyState.Listening(
-            card = card,
-            partialTranscript = "",
-            isHandsFree = false
-        )
+        val card = state.currentCardOrNull ?: _currentSession.value?.currentCard ?: return
+
+        // The purpose must match the window: re-answering in the rating window is not a
+        // thing (the ledger would reject it), so there PTT captures a rating/command.
+        val purpose: RecognitionPurpose
+        when (state) {
+            is StudyState.WaitingForRating,
+            is StudyState.ShowingFeedback -> purpose = RecognitionPurpose.PUSH_TO_TALK_COMMAND
+            else -> {
+                purpose = RecognitionPurpose.PUSH_TO_TALK_ANSWER
+                _studyState.value = StudyState.Listening(
+                    card = card,
+                    partialTranscript = "",
+                    isHandsFree = false
+                )
+            }
+        }
+
         val gapMs = handoffController.policy().failedGapMs.toLong()
         scope.launch {
             if (gapMs > 0) delay(gapMs)
-            // The user may already have released, or another transition may own the state.
+            // The user may already have released, paused or ended the session while the
+            // acoustic gap elapsed; a stale delayed start would reopen the mic into a
+            // state that no longer expects it.
             if (!isPushToTalkActive) return@launch
             if (!recognitionOrchestrator.state.value.isReadyForNewRequest) return@launch
-            beginStt(RecognitionPurpose.PUSH_TO_TALK_ANSWER, card)
+            beginStt(purpose, card)
         }
     }
 
