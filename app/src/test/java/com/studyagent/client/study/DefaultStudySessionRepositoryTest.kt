@@ -112,7 +112,7 @@ class DefaultStudySessionRepositoryTest {
         val sent = mutableListOf<ClientMessage>()
         private val incomingFlow = MutableSharedFlow<ServerMessage>(extraBufferCapacity = 64)
         override val incomingMessages: Flow<ServerMessage> = incomingFlow
-        private val connectionStateFlow =
+        val connectionStateFlow =
             MutableStateFlow<ConnectionState>(ConnectionState.Connected("10.0.0.2", 8765))
         override val connectionState: StateFlow<ConnectionState> = connectionStateFlow.asStateFlow()
         override val activeProfile: Flow<ServerProfile?> = MutableStateFlow(null)
@@ -207,7 +207,7 @@ class DefaultStudySessionRepositoryTest {
         ServerMessage.EvaluationResponse(sessionId = "s1", cardId = cardId, score = 75, shortFeedback = feedback)
 
     /** Drives the question speech + acoustic-gap handoff so the answer window actually opens. */
-    private fun TestScope.openAnswerWindow(f: Fixture, cardId: String) {
+    private suspend fun TestScope.openAnswerWindow(f: Fixture, cardId: String) {
         f.connection.receive(ServerMessage.SessionStarted(sessionId = "s1", totalCards = 10))
         f.connection.receive(question(cardId))
         advanceTimeBy(HANDOFF_GAP_MS)
@@ -215,7 +215,7 @@ class DefaultStudySessionRepositoryTest {
     }
 
     /** Drives feedback speech + handoff so the rating window actually opens. */
-    private fun TestScope.openRatingWindow(f: Fixture, cardId: String) {
+    private suspend fun TestScope.openRatingWindow(f: Fixture, cardId: String) {
         f.connection.receive(evaluation(cardId))
         advanceTimeBy(HANDOFF_GAP_MS)
         runCurrent()
@@ -575,7 +575,7 @@ class DefaultStudySessionRepositoryTest {
 
         // Speech finishes; the stale card transition is refused and the drain backstop
         // opens the answer window for the CURRENT card only.
-        f.speech.gate.complete(SpeechResult.Completed)
+        f.speech.gate!!.complete(SpeechResult.Completed)
         advanceTimeBy(HANDOFF_GAP_MS)
         runCurrent()
 

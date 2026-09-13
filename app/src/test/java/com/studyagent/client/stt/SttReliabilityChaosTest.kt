@@ -67,8 +67,11 @@ class SttReliabilityChaosTest {
         return Fixture(backend, orchestrator, results, collector)
     }
 
+    /** Shared across turns so every turn in a session gets a distinct request id. */
+    private val idFactory = RecognitionPolicyFactory.counterIdFactory()
+
     private fun request(purpose: RecognitionPurpose = RecognitionPurpose.ANSWER): RecognitionRequest =
-        RecognitionPolicyFactory(idFactory = RecognitionPolicyFactory.counterIdFactory())
+        RecognitionPolicyFactory(idFactory = idFactory)
             .createRequest(purpose, baseSettings)
 
     private fun RecognitionStartResult.asRejected() = this as RecognitionStartResult.Rejected
@@ -250,7 +253,7 @@ class SttReliabilityChaosTest {
                 }.start()
             }
             latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
-            assertEquals("all hammer threads finished", 0, latch.count)
+            assertEquals("all hammer threads finished", 0L, latch.count.toLong())
 
             assertEquals("no start may slip past the busy gate", 0, accepted.get())
             assertEquals(threads * perThread, rejected.get())

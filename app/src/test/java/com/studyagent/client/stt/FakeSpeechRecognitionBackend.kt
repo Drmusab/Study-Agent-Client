@@ -9,6 +9,7 @@ import com.studyagent.client.core.voice.stt.RecognitionRequest
 import com.studyagent.client.core.voice.stt.RecognitionSource
 import com.studyagent.client.core.voice.stt.RecognitionStartResult
 import com.studyagent.client.core.voice.stt.SpeechRecognitionBackend
+import com.studyagent.client.core.voice.stt.primaryLocaleTag
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -278,12 +279,27 @@ class FakeSpeechRecognitionBackend(
         emitSpeechBegan()
     }
 
-    private fun backendKindFor(request: RecognitionRequest) =
-        if (request.preferOnDevice && _capabilities.value.onDeviceAvailable == true) {
-            com.studyagent.client.core.voice.stt.RecognitionBackendKind.ON_DEVICE
-        } else {
-            com.studyagent.client.core.voice.stt.RecognitionBackendKind.SYSTEM
+    /** Mirrors AndroidSpeechRecognitionBackend.selectBackendKind, including the
+     *  per-language model check (§23). */
+    private fun backendKindFor(request: RecognitionRequest):
+        com.studyagent.client.core.voice.stt.RecognitionBackendKind {
+        val caps = _capabilities.value
+        return when (request.backendPreference) {
+            com.studyagent.client.core.voice.stt.RecognitionBackendPreference.SYSTEM_DEFAULT ->
+                com.studyagent.client.core.voice.stt.RecognitionBackendKind.SYSTEM
+
+            com.studyagent.client.core.voice.stt.RecognitionBackendPreference.AUTO,
+            com.studyagent.client.core.voice.stt.RecognitionBackendPreference.PREFER_ON_DEVICE -> {
+                val onDeviceUsable = caps.onDeviceAvailable == true &&
+                    caps.isLanguageInstalled(request.primaryLocaleTag()) != false
+                if (onDeviceUsable && request.preferOnDevice) {
+                    com.studyagent.client.core.voice.stt.RecognitionBackendKind.ON_DEVICE
+                } else {
+                    com.studyagent.client.core.voice.stt.RecognitionBackendKind.SYSTEM
+                }
+            }
         }
+    }
 
     private fun emit(event: RecognitionBackendEvent) {
         _events.tryEmit(event)
@@ -293,5 +309,5 @@ class FakeSpeechRecognitionBackend(
     val nowMs: Long get() = clock()
 
     /** All terminal events observed by tests that prefer to assert on the raw stream. */
-    val eventsAsFlow: Flow<RecognitionBackendEvent> get() = events.asSharedFlow()
+    val eventsAsFlow: Flow<RecognitionBackendEvent> get() = events
 }

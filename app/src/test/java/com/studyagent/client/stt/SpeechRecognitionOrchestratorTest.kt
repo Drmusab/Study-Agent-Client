@@ -44,6 +44,9 @@ class SpeechRecognitionOrchestratorTest {
 
     private val baseSettings = SttSettings(minTurnIntervalMs = 0L, maxRetriesPerTurn = 0)
 
+    /** Shared across turns so consecutive starts get distinct request ids. */
+    private val idFactory = RecognitionPolicyFactory.counterIdFactory()
+
     private class Fixture(
         val backend: FakeSpeechRecognitionBackend,
         val orchestrator: DefaultSpeechRecognitionOrchestrator,
@@ -83,7 +86,7 @@ class SpeechRecognitionOrchestratorTest {
         settings: SttSettings = baseSettings,
         languageMode: RecognitionLanguageMode = RecognitionLanguageMode.AUTO_EN_AR
     ): RecognitionRequest = RecognitionPolicyFactory(
-        idFactory = RecognitionPolicyFactory.counterIdFactory()
+        idFactory = idFactory
     ).createRequest(
         purpose = purpose,
         settings = settings.copy(languageMode = languageMode)

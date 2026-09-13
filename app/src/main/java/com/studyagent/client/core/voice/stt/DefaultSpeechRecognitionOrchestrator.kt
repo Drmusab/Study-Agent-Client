@@ -494,8 +494,14 @@ class DefaultSpeechRecognitionOrchestrator(
             synchronized(transitionLock) {
                 if (activeRequest?.id != request.id) return@launch
                 AppLogger.w(tag, "Watchdog fired ($phase) for ${request.id} after ${durationMs}ms")
-                backend.cancel()
+                // Drop ownership BEFORE cancelling the backend: with Unconfined dispatch
+                // the backend's CANCELLED failure is delivered synchronously, and if the
+                // request were still active it would be treated as a terminal (no-retry)
+                // failure that resets retryAttempt — un-bounding the watchdog retry loop.
+                // As a stale (expected-bookkeeping) event it is dropped instead.
                 activeRequest = null
+                backend.cancel()
+                // handleFailure() below cancels and clears watchdogJob.
                 handleFailure(
                     request,
                     RecognitionError(

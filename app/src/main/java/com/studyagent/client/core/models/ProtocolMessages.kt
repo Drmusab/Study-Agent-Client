@@ -60,7 +60,6 @@ sealed interface ClientMessage {
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
         @SerialName("client_name") val clientName: String = "StudyAgent-Android",
-                @SerialName("client_version") val clientVersion: String = "1.0.0"
         @SerialName("client_version") val clientVersion: String = "2.0.0",
         /** Protocol versions this client understands. v1 servers ignore this field. */
         @SerialName("supported_versions") val supportedVersions: List<String> = listOf("1", "2"),
@@ -87,7 +86,6 @@ sealed interface ClientMessage {
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
         @SerialName("deck") val deck: String? = null,
-        @SerialName("mode") val mode: String = "review_due"
         @SerialName("mode") val mode: String = "review_due",
         /**
          * Optional structured session configuration (Protocol v2).
@@ -457,11 +455,9 @@ sealed interface ServerMessage {
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("total_reviewed") val totalReviewed: Int = 0,
-        @SerialName("summary") val summary: String? = null
         @SerialName("summary") val summary: String? = null,
         /** Rich server-generated session summary (Protocol v2), when available. */
         @SerialName("details") val details: SessionSummaryPayload? = null
-        @SerialName("summary") val summary: String? = null
     ) : ServerMessage
 
     @Serializable
@@ -491,6 +487,124 @@ sealed interface ServerMessage {
     @Serializable
     @SerialName("pong")
     data class Pong(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null
+    ) : ServerMessage
+
+    // ------------------------------------------------------------------
+    // Protocol v2 management/dashboard messages (capability-gated).
+    // v1 servers never emit these; they are ignored unless the agent
+    // advertises the matching capability.
+    // ------------------------------------------------------------------
+
+    @Serializable
+    @SerialName("session_progress")
+    data class SessionProgress(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("current_card_index") val currentCardIndex: Int? = null,
+        @SerialName("total_cards") val totalCards: Int? = null
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("capabilities")
+    data class Capabilities(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("capabilities") val capabilities: List<String> = emptyList(),
+        @SerialName("server_name") val serverName: String? = null,
+        @SerialName("server_version") val serverVersion: String? = null
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("dashboard_snapshot")
+    data class DashboardSnapshotResponse(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("snapshot") val snapshot: DashboardSnapshotPayload? = null
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("deck_list")
+    data class DeckListResponse(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("decks") val decks: List<DeckSummary> = emptyList()
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("component_health")
+    data class ComponentHealthResponse(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("components") val components: List<ComponentHealthEntry> = emptyList()
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("study_config")
+    data class StudyConfigResponse(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("config") val config: StudyControlConfig? = null
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("study_config_updated")
+    data class StudyConfigUpdated(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("config") val config: StudyControlConfig? = null
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("study_history")
+    data class StudyHistoryResponse(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("history") val history: StudyHistoryPayload? = null
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("learning_insight")
+    data class LearningInsightResponse(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("insights") val insights: List<LearningInsight> = emptyList()
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("ai_usage_stats")
+    data class AiUsageResponse(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("usage") val usage: AiUsageSummary? = null
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("unknown")
+    data class Unknown(
         @SerialName("protocol_version") override val protocolVersion: String? = null,
         @SerialName("message_id") override val messageId: String? = null,
         @SerialName("session_id") override val sessionId: String? = null,
