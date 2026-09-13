@@ -12,6 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.studyagent.client.core.models.Rating
@@ -20,6 +21,14 @@ import com.studyagent.client.ui.theme.RatingEasy
 import com.studyagent.client.ui.theme.RatingGood
 import com.studyagent.client.ui.theme.RatingHard
 import com.studyagent.client.ui.theme.TextPrimary
+
+/**
+ * Semantics tag for one rating button, e.g. `rating_good`.
+ *
+ * Exposed so the instrumented tests can assert per-rating identity and touch target size without
+ * depending on the visible label (§141).
+ */
+fun ratingTestTag(rating: Rating): String = "rating_${rating.name.lowercase()}"
 
 @Composable
 fun RatingButtonGroup(
@@ -46,7 +55,8 @@ fun RatingButtonGroup(
                 enabled = enabled,
                 modifier = Modifier
                     .weight(1f)
-                    .height(52.dp),
+                    .height(52.dp)
+                    .testTag(ratingTestTag(rating)),
                 shape = RoundedCornerShape(14.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = color,

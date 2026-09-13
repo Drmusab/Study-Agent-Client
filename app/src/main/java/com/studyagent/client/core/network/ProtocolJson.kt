@@ -24,7 +24,15 @@ object ProtocolJson {
         return try {
             json.decodeFromString(ServerMessage.serializer(), rawJson)
         } catch (e: Exception) {
-            AppLogger.e("ProtocolJson", "Failed to decode server message: ${e.message}. Raw JSON: $rawJson", e)
+            // §83: never log the raw frame. A protocol frame can legitimately contain study
+            // content, and a malformed one can contain a credential. Log the shape instead:
+            // frame type (best effort), size, and the decoder's own message.
+            AppLogger.e(
+                "ProtocolJson",
+                "Failed to decode server message: ${e.message} " +
+                    "(type=${peekType(rawJson)} bytes=${rawJson.length})",
+                e
+            )
             // Attempt to parse generic error if possible
             try {
                 val element = json.parseToJsonElement(rawJson).jsonObject
@@ -48,5 +56,18 @@ object ProtocolJson {
     fun isProtocolVersionCompatible(incomingVersion: String?): Boolean {
         if (incomingVersion == null) return true // Be lenient if omitted in V1
         return incomingVersion == "1" || incomingVersion == "2"
+    }
+
+    /**
+     * Best-effort `type` peek without a full deserialization (§83/§61).
+     *
+     * Used only for diagnostics on the failure path: it answers "what kind of frame was it?"
+     * without retaining or rendering the frame itself. Returns "unknown" when the payload is not
+     * even a JSON object, which is itself a useful fact.
+     */
+    fun peekType(rawJson: String): String = try {
+        json.parseToJsonElement(rawJson).jsonObject["type"]?.jsonPrimitive?.content ?: "missing"
+    } catch (_: Exception) {
+        "unparseable"
     }
 }

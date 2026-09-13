@@ -32,6 +32,40 @@ fun VoiceWaveVisualizer(
     color: Color = PrimaryBlue,
     modifier: Modifier = Modifier
 ) {
+    val heights = waveHeights(isActive)
+
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(36.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        for (heightFraction in heights) {
+            Box(
+                modifier = Modifier
+                    .padding(horizontal = 3.dp)
+                    .width(4.dp)
+                    .height((36 * heightFraction).dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(if (isActive) color else Color.Gray.copy(alpha = 0.3f))
+            )
+        }
+    }
+}
+
+/**
+ * Bar height fractions for the waveform.
+ *
+ * The animation is created **only while the voice loop is active** (§58/§144). A visualizer that
+ * kept animating on an idle Study screen would request a frame every 16 ms for as long as the
+ * screen is open — a battery cost that shows nothing — and would leave the window permanently
+ * non-idle for the instrumented tests (§177).
+ */
+@Composable
+private fun waveHeights(isActive: Boolean): List<Float> {
+    if (!isActive) return IDLE_WAVE_HEIGHTS
+
     val transition = rememberInfiniteTransition(label = "wave")
 
     val h1 by transition.animateFloat(
@@ -55,24 +89,8 @@ fun VoiceWaveVisualizer(
         animationSpec = infiniteRepeatable(tween(430, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "h5"
     )
 
-    val heights = if (isActive) listOf(h1, h2, h3, h4, h5, h2, h1) else listOf(0.15f, 0.15f, 0.15f, 0.15f, 0.15f, 0.15f, 0.15f)
-
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(36.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        for (heightFraction in heights) {
-            Box(
-                modifier = Modifier
-                    .padding(horizontal = 3.dp)
-                    .width(4.dp)
-                    .height((36 * heightFraction).dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(if (isActive) color else Color.Gray.copy(alpha = 0.3f))
-            )
-        }
-    }
+    return listOf(h1, h2, h3, h4, h5, h2, h1)
 }
+
+/** Flat bars: the visual state of an inactive voice loop. */
+private val IDLE_WAVE_HEIGHTS = List(7) { 0.15f }

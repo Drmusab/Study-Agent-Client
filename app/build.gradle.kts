@@ -51,6 +51,9 @@ android {
 
     buildFeatures {
         compose = true
+        // Generates BuildConfig.DEBUG / BUILD_TYPE / VERSION_NAME, which the logger and the
+        // diagnostics header use to distinguish a debug build from a release one (§80/§84).
+        buildConfig = true
     }
 
     composeOptions {
@@ -61,6 +64,45 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+
+    testOptions {
+        unitTests {
+            // The JVM test suite exercises pure logic; Android framework stubs must return
+            // default values instead of throwing so shared test utilities stay usable.
+            isReturnDefaultValues = true
+        }
+    }
+
+    lint {
+        // Reliability-relevant checks fail the build; noisy style rules do not.
+        warningsAsErrors = false
+        abortOnError = true
+    }
+}
+
+/**
+ * Test switches the suites read from system properties.
+ *
+ * A Gradle CLI `-D` flag belongs to the *Gradle* JVM, so a test that reads a system property sees
+ * nothing unless the build forwards it explicitly — which is why the nightly chaos sweep used to be
+ * unreachable from CI. Only known switches are forwarded: the test JVM must not inherit arbitrary
+ * build-JVM state.
+ */
+val forwardedTestProperties = listOf(
+    // Widens the seeded chaos sweep from 100-199 to 100-1000 (nightly / release candidate runs).
+    "studyagent.chaos.full"
+)
+
+tasks.withType<Test>().configureEach {
+    forwardedTestProperties.forEach { name ->
+        System.getProperty(name)?.let { systemProperty(name, it) }
+    }
+    // A failing assertion must be diagnosable from the uploaded report alone.
+    testLogging {
+        events("failed")
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStackTraces = true
     }
 }
 
@@ -103,10 +145,21 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
-    // Testing
+    // Testing — JVM unit tests (deterministic, no device): the bulk of the suite.
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     testImplementation("app.cash.turbine:turbine:1.1.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.json:json:20240303")
+
+    // Testing — instrumented tests (Android-specific behaviour only: Compose semantics,
+    // DataStore integration, platform services). Kept deliberately small: hardware behaviour is
+    // validated from the real-device matrix, not from fast CI (§6/§142).
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    testImplementation("androidx.test.ext:junit:1.2.1")
 }

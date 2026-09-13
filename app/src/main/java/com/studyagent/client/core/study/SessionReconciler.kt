@@ -1,6 +1,7 @@
 package com.studyagent.client.core.study
 
 import com.studyagent.client.core.models.StudyCard
+import com.studyagent.client.core.voice.stt.RecognitionPurpose
 
 /**
  * Authoritative reconciliation after reconnect (§39-§41).
@@ -28,6 +29,29 @@ object SessionReconciler {
                 error = null
             )
             return Reconciliation(finished, listOf(StudyEffect.Voice.CancelSpeech("session-finished-reconcile"), StudyEffect.Voice.CancelRecognition("session-finished-reconcile")))
+        }
+
+        // Reconciliation may never undo a terminal intent.
+        //
+        // The frame being reconciled here is normally a `request_session_status` reply, and that
+        // reply can be *stale by the time it is processed*: it may have been sent before the user
+        // ended the session, and its `awaiting` field still describes the turn that was open then.
+        //
+        // For a finished session the reducer's terminal rule already rejects such an event, so this
+        // is defence in depth. For a session that is still `Finishing` — EndSession sent, server
+        // confirmation outstanding, which is exactly what a flaky connection produces — nothing
+        // else would catch it: reconciliation would take the phase backwards, re-issue the
+        // question and reopen the voice loop for a user who has already walked away.
+        if ((local.phase is SessionPhase.Finished || local.phase is SessionPhase.Finishing) &&
+            !snapshot.isFinished
+        ) {
+            return Reconciliation(
+                local.copy(connection = SessionConnectionStatus.CONNECTED),
+                listOf(
+                    StudyEffect.Voice.CancelSpeech("ending-reconcile-stale"),
+                    StudyEffect.Voice.CancelRecognition("ending-reconcile-stale")
+                )
+            )
         }
 
         // No session but server says we exist -> rehydrate
@@ -106,6 +130,41 @@ object SessionReconciler {
                 phase = SessionPhase.Paused,
                 pauseContext = ResumeContext(local.epoch, localPhase, cardTurn, null, clockMs)
             )
+        }
+
+        // §38/§41/§96: a reconnect must never park the client in a phase that cannot progress.
+        //
+        // The server saying "awaiting answer" means the question is still the current turn, but
+        // it says nothing about whether the user *heard* it: the app may have been killed, or the
+        // drop may have happened mid-question. Opening the microphone immediately would ask the
+        // user to answer a question they never heard, so the question is re-issued and the normal
+        // speak → silence → listen path takes over from there.
+        //
+        // Before this, `AWAITING_ANSWER` mapped to `SpeakingQuestion` with *no* speech effect: the
+        // machine sat in a phase that only a `QuestionSpeechCompleted` event can leave, and the
+        // session was stuck until the user pressed push-to-talk.
+        if (!snapshot.isPaused && newState.phase is SessionPhase.SpeakingQuestion) {
+            val turn = newState.cardTurn
+            if (turn != null) {
+                val effectId = EffectIds.next("reconcile-question")
+                effects.add(StudyEffect.Voice.Speak(StudyReducer.speechRequestForQuestion(turn.card), effectId))
+                newState = newState.copy(
+                    phase = SessionPhase.SpeakingQuestion,
+                    activeSpeechEffectId = effectId
+                )
+            } else {
+                newState = newState.copy(phase = SessionPhase.WaitingForAnswer)
+                val cardId = newState.currentCardId
+                if (cardId != null) {
+                    effects.add(
+                        StudyEffect.Voice.StartRecognition(
+                            RecognitionPurpose.ANSWER,
+                            cardId,
+                            EffectIds.next("reconcile-stt")
+                        )
+                    )
+                }
+            }
         }
 
         return Reconciliation(newState, effects)

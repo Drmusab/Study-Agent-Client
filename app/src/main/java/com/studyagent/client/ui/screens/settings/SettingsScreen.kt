@@ -33,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -55,6 +56,26 @@ import com.studyagent.client.ui.theme.TextMuted
 import com.studyagent.client.ui.theme.TextPrimary
 import com.studyagent.client.ui.theme.TextSecondary
 import kotlin.math.roundToInt
+
+/** Semantics tag for the settings list, so a test can scroll to a row that is not composed yet. */
+const val SETTINGS_LIST_TEST_TAG = "settings_list"
+
+/**
+ * Semantics tag for one toggle row's switch, e.g. `settings_switch_auto_play_question`.
+ *
+ * Tags are derived from the row title so a test selects a specific setting by identity rather than
+ * by list position (§141).
+ */
+fun settingSwitchTestTag(title: String): String = "settings_switch_" + testTagSlug(title)
+
+private fun testTagSlug(text: String): String {
+    val sb = StringBuilder(text.length)
+    for (c in text.lowercase()) {
+        if (c.isLetterOrDigit()) sb.append(c) else if (sb.isNotEmpty() && sb.last() != '_') sb.append('_')
+    }
+    while (sb.isNotEmpty() && sb.last() == '_') sb.deleteCharAt(sb.length - 1)
+    return sb.toString()
+}
 
 @Composable
 fun SettingsScreen(
@@ -94,7 +115,8 @@ fun SettingsScreen(
             modifier = modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 18.dp),
+                .padding(horizontal = 18.dp)
+                .testTag(SETTINGS_LIST_TEST_TAG),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             if (persistenceError != null) {
@@ -818,7 +840,11 @@ private fun SettingToggleItem(
             Text(text = title, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
             Text(text = description, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.testTag(settingSwitchTestTag(title))
+        )
     }
 }
 

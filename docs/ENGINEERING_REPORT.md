@@ -205,6 +205,8 @@ All new tests use `TestScope` + `UnconfinedTestDispatcher` and fake orchestrator
   ./gradlew testDebugUnitTest
   ./gradlew assembleDebug
   ```
+* **Second phase (testing/diagnostics/performance/CI):** still **not executed** — see §14.3 for what
+  was and was not verified, and `docs/TESTING_STRATEGY.md` for the suite inventory.
 
 ---
 
@@ -214,7 +216,9 @@ All new tests use `TestScope` + `UnconfinedTestDispatcher` and fake orchestrator
 * **UI recreation:** Activity rotation does not restart session — `StudySessionMachine` lives below ViewModel (in `AppContainer` singleton) (§101, §102). ViewModel is a thin `dispatch`/`collect` layer.
 * **Foreground service:** dispatches same `UserPauseRequested`/`UserResumeRequested`/`UserEndRequested` events; no parallel machine (§103, §104).
 * **VoiceTurn ownership:** `effectId` validation for TTS and `turnId` for STT is enforced; however STT purpose still depends on current `AppSettings` at effect time — settings change mid-action is reflected at next transition (§70).
-* **Performance:** transitions are low-frequency (<10/sec) — correctness over micro-optimization (§147).
+* **Performance:** transitions are low-frequency (<10/sec) — correctness over micro-optimization (§147). No latency budget has been measured yet; the table in `docs/PERFORMANCE.md` is intentionally empty.
+* **Uncompiled test surface:** the 12 new JVM suites, the 8 shared testutil files and the 5 instrumented suites were written against the production interfaces and have never been compiled in this environment (§14.3). Treat the first CI run as the compile-and-run baseline.
+* **Real-device behaviour:** audio routing, screen-off endurance, battery and memory over hours are covered by `docs/REAL_DEVICE_TEST_MATRIX.md`, none of which has been run.
 
 ---
 
@@ -241,6 +245,46 @@ No god-class collapse: `SpeechOrchestrator`, `SpeechRecognitionOrchestrator`, `A
 * `app/src/test/.../study/StudyReducerTest.kt`, `SessionInvariantTest.kt`.
 * `docs/SESSION_STATE_MACHINE.md` + this report.
 * `app/src/main/java/com/studyagent/client/core/study/SessionDiagnostics.kt` (§143).
+
+---
+
+## 14. Testing, diagnostics, performance and CI (second phase)
+
+This phase built the verification and observability scaffolding *around* the machine. The transition
+table is unchanged apart from the one guarded reconcile rule in §14.2.
+
+### 14.1 What was added
+
+| Area | Artifact |
+|---|---|
+| Strategy | `docs/TESTING_STRATEGY.md` — layers, the harness, determinism and test-quality rules, the flaky-test policy, the risk-area × layer coverage matrix, §179 definition of done |
+| Diagnostics | `docs/DIAGNOSTICS.md` — bounded log ring + structured event timeline, the metrics model, the two-layer privacy model, log-level policy, export contract, crash breadcrumbs |
+| Performance | `docs/PERFORMANCE.md` — metric families, local-vs-remote latency separation, bounded-by-construction memory argument, battery/radio discipline, and the *procedure* that fills the budget table (every budget currently `unmeasured`) |
+| Device validation | `docs/REAL_DEVICE_TEST_MATRIX.md` — hardware cases (phone/wired/Bluetooth/A2DP/echo, screen-off, reconnection, 1000-card endurance, battery, memory, accessibility); all cells `not run` |
+| CI | `.github/workflows/android-ci.yml` — unit tests + `lint` + `assembleDebug`/`assembleRelease` on every push/PR with reports uploaded on failure; nightly seeded chaos sweep (`-Dstudyagent.chaos.full=true`, now actually forwarded to the test JVM); nightly instrumented job on API 30 and 34. No `continue-on-error` on a critical gate. |
+| JVM suites | 12 new suites + 8 shared fakes/harness files (`testutil/`): mandatory happy path (1 answer, 1 rating, 1 transition, 0 stale callbacks, 0 TTS/STT overlap), 100-card simulation, 1000-card endurance with bounded-resource assertions, seeded chaos with invariants after every event, network chaos (loss/duplicate/reorder/late ACK/malformed frame), reconnection at every phase, idempotency, protocol fuzz, logger hardening, settings-persistence regression, export privacy |
+| Instrumented | 5 Compose/Android suites in `app/src/androidTest/`: navigation shell, study controls (touch targets, idle honesty), settings persistence against the real DataStore, diagnostics export + clipboard redaction, `MainActivity` launch smoke |
+| Production changes the above required | `AppClock`/`TestClock`, `DiagnosticTimeline`, `PerformanceMetrics`, `NetworkStats`, hardened `AppLogger` (bounded ring, coalesced publication, precompiled redaction), rewritten `DiagnosticsRepository`/`SessionDiagnostics`/`DiagnosticsViewModel`, `SessionReconciler` stale-terminal guard, test tags + idle-animation gating in the study/settings/diagnostics UI, and `app/build.gradle.kts` test-property forwarding + failure logging |
+
+### 14.2 The one behavioural change to the session
+
+`SessionReconciler` now refuses a server status frame that would take a locally *ending* session
+(`Finishing`; `Finished` as defence in depth) back to an active phase. Before the change, a stale
+`session_status` arriving after the user pressed End could re-open the question and the microphone.
+The reconciler now keeps the local phase, reports `CONNECTED`, cancels speech and recognition, and
+records `ending-reconcile-stale`. Covered by `SessionReconstructionTest` (ending cannot be undone by
+a stale status frame) and `ReconnectAtEveryPhaseTest`.
+
+### 14.3 Validation status (honest)
+
+Nothing in this phase has been executed: the sandbox still has no JDK, no Android SDK and no network
+egress (§1). Every check is static — structural parse/brace-balance checks, member greps against the
+main sources, and reads of the call sites the tests depend on. The 12 JVM suites, the 8 testutil
+files and the 5 instrumented suites **have never been compiled**, so the first CI run is the first
+real signal; `docs/TESTING_STRATEGY.md` states this at the top so no reader mistakes the suite for
+green. No number in `docs/PERFORMANCE.md` is a measurement, and every device-matrix cell is
+`not run`. The required commands (`./gradlew testDebugUnitTest`, `lint`, `assembleDebug`,
+`assembleRelease`, `connectedDebugAndroidTest`) remain unexecuted here and are wired into CI.
 
 **All state mutations for the study session now answer:**
 > What session? What turn? Is it still valid? Is the transition legal? Has it already happened? What side-effect exactly once? How to reconcile if connection drops? Can this callback still alter the current card?

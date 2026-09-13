@@ -10,6 +10,10 @@ import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.audio.StudyAudioRouteEvent
 import com.studyagent.client.core.common.AppLogger
+import com.studyagent.client.core.diagnostics.DiagnosticCategory
+import com.studyagent.client.core.diagnostics.DiagnosticTimeline
+import com.studyagent.client.core.diagnostics.DiagnosticsFormatting
+import com.studyagent.client.core.diagnostics.PerformanceMetrics
 import com.studyagent.client.core.models.ClientMessage
 import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.AppSettings
@@ -51,6 +55,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -75,7 +80,17 @@ class StudySessionMachine(
      * Study-audio routing (§70/§112). Optional so headless tests can run the machine without a
      * device: when absent the machine behaves like a bare phone in Auto mode.
      */
-    private val audioRouteCoordinator: StudyAudioRouteCoordinator? = null
+    private val audioRouteCoordinator: StudyAudioRouteCoordinator? = null,
+    /**
+     * Bounded technical metrics (§51/§57). Nullable so a headless unit test can run the machine
+     * without a metrics graph; the app always passes the shared instance.
+     */
+    private val performance: PerformanceMetrics? = null,
+    /**
+     * Structured diagnostic timeline (§67). Bounded ring buffer; recording an event is a few
+     * field writes, so instrumenting the voice path does not create the latency it measures (§55).
+     */
+    private val timeline: DiagnosticTimeline? = null
 ) {
     private val tag = "StudySessionMachine"
 
@@ -93,8 +108,32 @@ class StudySessionMachine(
     private val _lastRecognizedCommand = MutableSharedFlow<VoiceCommand>(extraBufferCapacity = 16)
     val lastRecognizedCommand: SharedFlow<VoiceCommand> = _lastRecognizedCommand.asSharedFlow()
 
-    private val timeoutJobs = mutableMapOf<String, Job>()
+    /**
+     * Timeout handles, keyed by action id.
+     *
+     * Concurrent because effects are executed from `scope.launch` bodies on a dispatcher while the
+     * reducer runs on the machine coroutine. Entries are removed by the job's own completion
+     * handler, so the map cannot grow with the number of turns (§19/§99).
+     */
+    private val timeoutJobs = ConcurrentHashMap<String, Job>()
     @Volatile private var currentSettings: AppSettings = AppSettings()
+
+    /** Dispatch/processing counters behind [resourceSnapshot]; never grow without bound. */
+    private val eventsDispatched = AtomicLong(0L)
+    private val eventsProcessed = AtomicLong(0L)
+
+    /** Invariant violations seen since construction — must stay 0 in every test (§22/§139). */
+    private val invariantViolations = AtomicLong(0L)
+
+    /**
+     * Wall-clock anchors for the voice-turn latencies (§51). Each is set when the *transport
+     * write* happens, not when the UI thinks it happened, so the measurement includes the
+     * handoff and not just the coroutine hop.
+     */
+    @Volatile private var startRequestedAtMs = -1L
+    @Volatile private var questionReceivedAtMs = -1L
+    @Volatile private var answerSentAtMs = -1L
+    @Volatile private var ratingSentAtMs = -1L
 
     // ------------------------------------------------------------------ phone-mode voice gate
     //
@@ -151,8 +190,11 @@ class StudySessionMachine(
     }
 
     fun dispatch(event: StudyEvent) {
+        eventsDispatched.incrementAndGet()
         val ok = eventChannel.trySend(event)
-        if (ok.isFailure) AppLogger.w(tag, "Event channel saturated: ${event.debugName}")
+        if (ok.isFailure) {
+            AppLogger.w(tag, "Event channel saturated: ${event.debugName}")
+        }
     }
 
     private suspend fun processEvent(event: StudyEvent) {
@@ -160,6 +202,8 @@ class StudySessionMachine(
         val transition = StudyReducer.reduce(before, event, clock())
         _machineState.value = transition.newState
         derivePublicFlows(transition.newState)
+        eventsProcessed.incrementAndGet()
+        recordEventDiagnostics(event, before, transition)
         if (transition.accepted) {
             AppLogger.i(tag, "SESSION_TRANSITION epoch=${transition.newState.epoch} from=${SessionPhase.serverPhaseName(before.phase)} event=${event.debugName} to=${SessionPhase.serverPhaseName(transition.newState.phase)} card=${transition.newState.currentCardId}")
         } else {
@@ -258,19 +302,79 @@ class StudySessionMachine(
         checkInvariants(machine, derivedState)
     }
 
+    /**
+     * Cross-system invariants checked after every state derivation (§22/§139).
+     *
+     * These are *observations*, not repairs: a violation is logged (and counted) so the chaos and
+     * endurance tests fail loudly, but production never mutates state from here. The checks are
+     * deliberately about relationships that must hold in every phase — they are the cheap version
+     * of the assertions the JVM harness re-runs after every chaos event.
+     */
     private fun checkInvariants(machine: SessionMachineState, derived: StudyState) {
         val derivedCardId = derived.currentCardOrNull?.id
-        val sessionCardId = machine.session?.currentCard?.id ?: machine.cardTurn?.card?.id
-        val machineCardId = machine.cardTurn?.cardId
+        val machineCardId = machine.cardTurn?.cardId ?: machine.session?.currentCard?.id
         if (derivedCardId != null && machineCardId != null && derivedCardId != machineCardId) {
-            AppLogger.w(tag, "Invariant violation: StudyState card $derivedCardId != machine card $machineCardId")
+            recordInvariantViolation("card-mismatch", "StudyState card $derivedCardId != machine card $machineCardId")
         }
-        val evalCardMismatch = machine.cardTurn?.evaluation != null && machine.cardTurn?.cardId != machine.cardTurn?.cardId
-        // evaluation belongs to card turn already by construction; no leak
-        if (machine.pendingRatingConfirmation != null && machine.pendingRatingConfirmation.turnId != machine.cardTurn?.turnId) {
-            AppLogger.w(tag, "Invariant: pendingRatingConfirmation turn mismatch")
+
+        // An evaluation belongs to the turn that was answered. If the machine still shows an
+        // evaluation while the turn id has moved on, a stale evaluation leaked into a new turn.
+        val turn = machine.cardTurn
+        if (turn?.evaluation != null) {
+            if (turn.turnId.isBlank()) {
+                recordInvariantViolation("evaluation-without-turn", "evaluation present on a turn without an id")
+            }
+            if (machine.currentCardId != null && machine.currentCardId != turn.cardId) {
+                recordInvariantViolation("evaluation-card-drift", "evaluation on ${turn.cardId} while current card is ${machine.currentCardId}")
+            }
+            val legal = machine.phase is SessionPhase.SpeakingFeedback ||
+                machine.phase is SessionPhase.WaitingForRating ||
+                machine.phase is SessionPhase.SubmittingRating ||
+                machine.phase is SessionPhase.Paused ||
+                machine.phase is SessionPhase.Pausing
+            if (!legal) {
+                recordInvariantViolation("evaluation-in-illegal-phase", "evaluation visible in ${SessionPhase.serverPhaseName(machine.phase)}")
+            }
+        }
+
+        // A pending rating confirmation must belong to the live turn; otherwise it is a stale
+        // confirmation from the previous card that could rate the next one (§103).
+        machine.pendingRatingConfirmation?.let { pending ->
+            if (machine.cardTurn != null && pending.turnId != machine.cardTurn.turnId) {
+                recordInvariantViolation("rating-confirmation-turn-mismatch", "pendingRatingConfirmation turn ${pending.turnId} != ${machine.cardTurn.turnId}")
+            }
+            if (pending.epoch != machine.epoch) {
+                recordInvariantViolation("rating-confirmation-epoch-mismatch", "pendingRatingConfirmation epoch ${pending.epoch} != ${machine.epoch}")
+            }
+        }
+
+        // A paused session must not hold the microphone: pausing is the mechanism that guarantees
+        // the user is not recorded while they think study is stopped (§22).
+        if (machine.phase.isPaused && machine.activeRecognitionEffectId != null) {
+            recordInvariantViolation("paused-with-open-mic", "paused phase still holds recognition effect ${machine.activeRecognitionEffectId}")
+        }
+
+        // Finished is terminal for this epoch: no turn may still be open after the session ended.
+        if (machine.phase is SessionPhase.Finished && machine.cardTurn != null && machine.pendingAction != null) {
+            recordInvariantViolation("finished-with-pending-action", "finished session still holds ${machine.pendingAction.type}")
         }
     }
+
+    /** Logs (and counts) one invariant violation. Never throws: production must not die here. */
+    private fun recordInvariantViolation(code: String, detail: String) {
+        invariantViolations.incrementAndGet()
+        AppLogger.w(tag, "invariant_violation code=$code detail=$detail")
+        timeline?.record(
+            DiagnosticCategory.SESSION,
+            "INVARIANT_VIOLATION",
+            sessionEpoch = _machineState.value.epoch,
+            turnId = _machineState.value.cardTurn?.turnId,
+            metadata = mapOf("code" to code, "detail" to detail)
+        )
+    }
+
+    /** Violations observed since construction; surfaced through [resourceSnapshot] consumers. */
+    val invariantViolationCount: Long get() = invariantViolations.get()
 
     /** Fallback metrics store when no coordinator is wired (headless tests). */
     private val localMetrics = PhoneModeDiagnostics()
@@ -291,6 +395,7 @@ class StudySessionMachine(
             ).copy(id = effect.effectId)
             val res = recognitionOrchestrator.startRecognition(req)
             AppLogger.i(tag, "STT start result=$res")
+            performance?.onSttActiveRequests(if (res is com.studyagent.client.core.voice.stt.RecognitionStartResult.Started) 1 else 0)
             sttStartCount.incrementAndGet()
         } catch (e: Exception) {
             AppLogger.w(tag, "STT start failed: ${e.message}")
@@ -428,6 +533,14 @@ class StudySessionMachine(
                 sttGeneration.incrementAndGet()
                 speechOrchestrator.stopSpeech(StopReason.ROUTE_LOST)
                 recognitionOrchestrator.cancelCurrentTurn("input-route-lost")
+                performance?.onRouteInterruption()
+                timeline?.record(
+                    DiagnosticCategory.AUDIO,
+                    "ROUTE_LOST",
+                    sessionEpoch = _machineState.value.epoch,
+                    turnId = _machineState.value.cardTurn?.turnId,
+                    metadata = mapOf("policy" to event.policy.name)
+                )
                 AppLogger.w(tag, "Audio route lost mid-session (policy=${event.policy})")
 
                 when (event.policy) {
@@ -465,6 +578,14 @@ class StudySessionMachine(
                         sttGeneration.incrementAndGet()
                         speechOrchestrator.stopSpeech(StopReason.USER)
                         recognitionOrchestrator.cancelCurrentTurn("route-changed")
+                        performance?.onRouteInterruption()
+                        timeline?.record(
+                            DiagnosticCategory.AUDIO,
+                            "ROUTE_CHANGED",
+                            sessionEpoch = _machineState.value.epoch,
+                            turnId = _machineState.value.cardTurn?.turnId,
+                            metadata = mapOf("to" to event.to.effective.name)
+                        )
                         dispatch(StudyEvent.AudioRouteRestored(cardId))
                     }
                 }
@@ -502,18 +623,24 @@ class StudySessionMachine(
         for (effect in effects) {
             when (effect) {
                 is StudyEffect.Network.Send -> {
+                    recordOutboundEffect(effect.message)
                     scope.launch {
                         val ok = connectionRepository.send(effect.message)
                         if (!ok) {
                             // Send failure -> inject as timeout-like error for ledger rollback
+                            recordSendFailure(effect.message)
                             handleSendFailure(effect, triggerEvent)
                         }
                     }
                 }
                 is StudyEffect.Voice.Speak -> {
                     val snapshotCardId = _machineState.value.cardTurn?.cardId ?: _machineState.value.session?.currentCard?.id ?: ""
+                    if (effect.request.purpose == com.studyagent.client.core.voice.tts.SpeechPurpose.QUESTION) {
+                        recordQuestionToSpeechStart()
+                    }
                     scope.launch {
                         val result = speechOrchestrator.speak(effect.request)
+                        recordSpeechResult(effect.request, result)
                         val cardId = snapshotCardId
                         if (result is SpeechResult.Completed && effect.request.purpose != com.studyagent.client.core.voice.tts.SpeechPurpose.PREVIEW) {
                             // The self-echo window opens when the app stops talking (§18).
@@ -563,6 +690,25 @@ class StudySessionMachine(
                                     .recordHandoffLatency(decision.handoffLatencyMs)
                                 val profile = (audioRouteCoordinator?.effectiveRoute?.value ?: fallbackRoute).acousticProfile
                                 (audioRouteCoordinator?.metrics ?: localMetrics).recordListenTurn(profile)
+                                performance?.let { perf ->
+                                    perf.recordSpeechDoneToListen(decision.handoffLatencyMs)
+                                    if (profile == com.studyagent.client.core.audio.AcousticProfile.PHONE_SPEAKER) {
+                                        perf.onListenTurnOnPhone()
+                                    } else {
+                                        perf.onListenTurnOnHeadset()
+                                    }
+                                }
+                                timeline?.record(
+                                    DiagnosticCategory.STT,
+                                    "STT_READY",
+                                    sessionEpoch = _machineState.value.epoch,
+                                    turnId = _machineState.value.cardTurn?.turnId,
+                                    requestId = effect.effectId,
+                                    metadata = mapOf(
+                                        "purpose" to effect.purpose.name,
+                                        "gapMs" to decision.gapMs.toString()
+                                    )
+                                )
                                 startRecognitionNow(effect)
                             }
                         }
@@ -579,6 +725,7 @@ class StudySessionMachine(
                     // belonged to no longer exists (§102 stale gap / §103 pause / §104 end).
                     sttGeneration.incrementAndGet()
                     recognitionOrchestrator.cancelCurrentTurn(effect.reason)
+                    performance?.onSttActiveRequests(0)
                     _machineState.value = _machineState.value.copy(activeRecognitionEffectId = null)
                 }
                 is StudyEffect.ScheduleTimeout -> {
@@ -586,8 +733,13 @@ class StudySessionMachine(
                         delay(effect.delayMs)
                         dispatch(StudyEvent.ActionTimedOut(effect.actionId, effect.type))
                     }
-                    timeoutJobs[effect.actionId]?.cancel()
-                    timeoutJobs[effect.actionId] = job
+                    // The completion handler is what keeps this map bounded: without it every
+                    // action that timed out (or was superseded) left its Job behind for the rest
+                    // of the session (§19/§99).
+                    job.invokeOnCompletion {
+                        timeoutJobs.remove(effect.actionId, job)
+                    }
+                    timeoutJobs.put(effect.actionId, job)?.cancel()
                 }
                 is StudyEffect.CancelTimeout -> {
                     timeoutJobs.remove(effect.actionId)?.cancel()
@@ -651,11 +803,24 @@ class StudySessionMachine(
                     is ConnectionState.Error,
                     is ConnectionState.ServerUnavailable,
                     is ConnectionState.NetworkUnavailable -> {
+                        timeline?.record(
+                            DiagnosticCategory.NETWORK,
+                            "CONNECTION_LOST",
+                            sessionEpoch = _machineState.value.epoch,
+                            turnId = _machineState.value.cardTurn?.turnId,
+                            metadata = mapOf("state" to state.label)
+                        )
                         if (_machineState.value.phase !is SessionPhase.Idle && _machineState.value.phase !is SessionPhase.Finished && _machineState.value.phase !is SessionPhase.Error) {
                             dispatch(StudyEvent.ConnectionLost(state.label))
                         }
                     }
                     is ConnectionState.Connected -> {
+                        timeline?.record(
+                            DiagnosticCategory.NETWORK,
+                            "CONNECTION_RESTORED",
+                            sessionEpoch = _machineState.value.epoch,
+                            turnId = _machineState.value.cardTurn?.turnId
+                        )
                         if (_machineState.value.phase is SessionPhase.Recovering || _machineState.value.phase is SessionPhase.Error) {
                             dispatch(StudyEvent.ConnectionRestored("connected"))
                         } else if (_machineState.value.phase is SessionPhase.Error && _machineState.value.error?.recoverable == true) {
@@ -674,6 +839,31 @@ class StudySessionMachine(
                 when (result) {
                     is RecognitionTurnResult.Completed -> {
                         val outcome: RecognitionOutcome = result.outcome
+                        performance?.let { perf ->
+                            perf.onSttCompleted()
+                            perf.onSttActiveRequests(0)
+                            perf.recordSttFinalize(recognitionOrchestrator.health.value.metrics.lastFinalizationMs)
+                            perf.onSttReady(recognitionOrchestrator.health.value.metrics.lastReadyLatencyMs)
+                            recognitionOrchestrator.health.value.metrics.staleCallbacksDropped.let { dropped ->
+                                // Mirror the orchestrator's own counter so the session summary can
+                                // report dropped stale callbacks without reaching into the STT layer.
+                                if (dropped > perf.staleCallbackWatermark) {
+                                    repeat((dropped - perf.staleCallbackWatermark).toInt()) { perf.onSttStaleCallbackDropped() }
+                                    perf.staleCallbackWatermark = dropped.toLong()
+                                }
+                            }
+                        }
+                        timeline?.record(
+                            DiagnosticCategory.STT,
+                            "STT_FINAL",
+                            sessionEpoch = _machineState.value.epoch,
+                            turnId = _machineState.value.cardTurn?.turnId,
+                            requestId = outcome.requestId,
+                            metadata = mapOf(
+                                "purpose" to outcome.purpose.name,
+                                "chars" to outcome.selectedText.length.toString()
+                            )
+                        )
                         // Diagnostic only (§18/§52): the transcript is *never* discarded because
                         // of similarity — a user may legitimately repeat the question's words.
                         val profile = (audioRouteCoordinator?.effectiveRoute?.value ?: fallbackRoute).acousticProfile
@@ -681,6 +871,7 @@ class StudySessionMachine(
                             selfEchoDetector.isSuspectedSelfEcho(outcome.selectedText, clock())
                         ) {
                             (audioRouteCoordinator?.metrics ?: localMetrics).recordSuspectedSelfEcho()
+                            performance?.onSuspectedSelfEcho()
                             AppLogger.w(tag, "suspected_self_echo purpose=${outcome.purpose} chars=${outcome.selectedText.length}")
                         }
                         if (outcome.purpose == RecognitionPurpose.ANSWER ||
@@ -722,12 +913,301 @@ class StudySessionMachine(
                                 (audioRouteCoordinator?.metrics ?: localMetrics).recordTimeout()
                             else -> Unit
                         }
+                        performance?.let { perf ->
+                            perf.onSttFailed()
+                            perf.onSttActiveRequests(0)
+                            when (result.error.code) {
+                                RecognitionErrorCode.NO_SPEECH -> perf.onSttNoSpeech()
+                                RecognitionErrorCode.NO_MATCH -> perf.onSttNoMatch()
+                                RecognitionErrorCode.BUSY -> perf.onSttBusy()
+                                RecognitionErrorCode.TOO_MANY_REQUESTS -> perf.onSttRateLimited()
+                                else -> Unit
+                            }
+                        }
+                        timeline?.record(
+                            DiagnosticCategory.STT,
+                            "STT_FAILED",
+                            sessionEpoch = _machineState.value.epoch,
+                            turnId = _machineState.value.cardTurn?.turnId,
+                            requestId = result.error.requestId,
+                            metadata = mapOf("code" to result.error.code.name)
+                        )
                         dispatch(StudyEvent.RecognitionFailed(null, result.error.code.name))
                     }
                 }
             }
         }
     }
+
+    // ------------------------------------------------------------------ diagnostics (§19/§51/§59/§67)
+
+    /**
+     * Records the reducer's own verdict for every processed event.
+     *
+     * Rejections are recorded with the reason the reducer gave, not a guess: when a chaos run
+     * fails, "EVENT_REJECTED event=ServerEvaluationReceived reason=stale-card" is the answer to
+     * "why did nothing happen?" (§25/§172).
+     */
+    private fun recordEventDiagnostics(event: StudyEvent, before: SessionMachineState, transition: Transition) {
+        val tl = timeline
+        val epoch = transition.newState.epoch
+        val turnId = transition.newState.cardTurn?.turnId
+        if (!transition.accepted) {
+            tl?.record(
+                DiagnosticCategory.SESSION,
+                "EVENT_REJECTED",
+                sessionEpoch = before.epoch,
+                turnId = before.cardTurn?.turnId,
+                metadata = mapOf(
+                    "event" to event.debugName,
+                    "reason" to (transition.rejectionReason ?: "unspecified")
+                )
+            )
+            return
+        }
+        when (event) {
+            is StudyEvent.UserStartRequested -> {
+                startRequestedAtMs = clock()
+                tl?.record(
+                    DiagnosticCategory.SESSION,
+                    "SESSION_START_REQUESTED",
+                    sessionEpoch = epoch,
+                    metadata = mapOf("mode" to event.mode)
+                )
+            }
+
+            is StudyEvent.ServerSessionStarted -> {
+                performance?.onSessionStarted()
+                tl?.record(
+                    DiagnosticCategory.SESSION,
+                    "SESSION_STARTED",
+                    sessionEpoch = epoch,
+                    metadata = mapOf(
+                        "session" to DiagnosticsFormatting.abbreviate(event.sessionId),
+                        "cards" to (event.totalCards?.toString() ?: "-")
+                    )
+                )
+            }
+
+            is StudyEvent.ServerQuestionReceived -> {
+                questionReceivedAtMs = clock()
+                val sentAt = ratingSentAtMs
+                if (sentAt > 0L) {
+                    performance?.recordRatingToNextQuestion((clock() - sentAt).coerceAtLeast(0L))
+                    ratingSentAtMs = -1L
+                }
+                performance?.onTurnStarted()
+                tl?.record(
+                    DiagnosticCategory.SESSION,
+                    "QUESTION_RECEIVED",
+                    sessionEpoch = epoch,
+                    turnId = turnId,
+                    metadata = mapOf(
+                        "card" to DiagnosticsFormatting.abbreviate(event.cardId),
+                        "remaining" to (event.remaining?.toString() ?: "-")
+                    )
+                )
+            }
+
+            is StudyEvent.ServerEvaluationReceived -> {
+                val sentAt = answerSentAtMs
+                if (sentAt > 0L) {
+                    performance?.recordEvaluationRoundTrip((clock() - sentAt).coerceAtLeast(0L))
+                    answerSentAtMs = -1L
+                }
+                tl?.record(
+                    DiagnosticCategory.SESSION,
+                    "EVALUATION_RECEIVED",
+                    sessionEpoch = epoch,
+                    turnId = turnId,
+                    metadata = mapOf("card" to DiagnosticsFormatting.abbreviate(event.cardId))
+                )
+            }
+
+            is StudyEvent.ServerRatingSaved -> tl?.record(
+                DiagnosticCategory.SESSION,
+                "RATING_SAVED",
+                sessionEpoch = epoch,
+                turnId = turnId,
+                metadata = mapOf("rating" to event.rating.name.lowercase())
+            )
+
+            is StudyEvent.ServerSessionPaused -> tl?.record(
+                DiagnosticCategory.SESSION,
+                "SESSION_PAUSED",
+                sessionEpoch = epoch,
+                turnId = turnId
+            )
+
+            is StudyEvent.ServerSessionResumed -> tl?.record(
+                DiagnosticCategory.SESSION,
+                "SESSION_RESUMED",
+                sessionEpoch = epoch,
+                turnId = turnId
+            )
+
+            is StudyEvent.ServerSessionFinished -> {
+                performance?.onSessionFinished()
+                tl?.record(
+                    DiagnosticCategory.SESSION,
+                    "SESSION_FINISHED",
+                    sessionEpoch = epoch,
+                    metadata = mapOf("reviewed" to event.totalReviewed.toString())
+                )
+            }
+
+            else -> Unit
+        }
+    }
+
+    /** Transport writes: what the app actually put on the wire, and when (§51/§108-§110). */
+    private fun recordOutboundEffect(message: ClientMessage) {
+        val state = _machineState.value
+        val turnId = state.cardTurn?.turnId
+        when (message) {
+            is ClientMessage.StartSession -> {
+                val startedAt = startRequestedAtMs
+                if (startedAt > 0L) {
+                    performance?.recordStartToRequest((clock() - startedAt).coerceAtLeast(0L))
+                    startRequestedAtMs = -1L
+                }
+                timeline?.record(
+                    DiagnosticCategory.NETWORK,
+                    "START_SESSION_SENT",
+                    sessionEpoch = state.epoch,
+                    metadata = mapOf("deck" to DiagnosticsFormatting.abbreviate(message.deck))
+                )
+            }
+
+            is ClientMessage.SubmitAnswer -> {
+                answerSentAtMs = clock()
+                performance?.onAnswerSubmitted()
+                timeline?.record(
+                    DiagnosticCategory.NETWORK,
+                    "ANSWER_SENT",
+                    sessionEpoch = state.epoch,
+                    turnId = turnId,
+                    requestId = message.messageId.take(8),
+                    // Length, never content: an answer can be clinical detail (§81).
+                    metadata = mapOf("chars" to message.text.length.toString())
+                )
+            }
+
+            is ClientMessage.RateCard -> {
+                ratingSentAtMs = clock()
+                performance?.onRatingSubmitted()
+                timeline?.record(
+                    DiagnosticCategory.NETWORK,
+                    "RATING_SENT",
+                    sessionEpoch = state.epoch,
+                    turnId = turnId,
+                    requestId = message.messageId.take(8),
+                    metadata = mapOf("rating" to message.rating.name.lowercase())
+                )
+            }
+
+            is ClientMessage.PauseSession -> timeline?.record(
+                DiagnosticCategory.SESSION,
+                "PAUSE_SENT",
+                sessionEpoch = state.epoch,
+                turnId = turnId
+            )
+
+            is ClientMessage.ResumeSession -> timeline?.record(
+                DiagnosticCategory.SESSION,
+                "RESUME_SENT",
+                sessionEpoch = state.epoch,
+                turnId = turnId
+            )
+
+            is ClientMessage.EndSession -> timeline?.record(
+                DiagnosticCategory.SESSION,
+                "END_SENT",
+                sessionEpoch = state.epoch,
+                turnId = turnId
+            )
+
+            else -> Unit
+        }
+    }
+
+    private fun recordSendFailure(message: ClientMessage) {
+        val state = _machineState.value
+        timeline?.record(
+            DiagnosticCategory.NETWORK,
+            "SEND_FAILED",
+            sessionEpoch = state.epoch,
+            turnId = state.cardTurn?.turnId,
+            metadata = mapOf("type" to message.type)
+        )
+    }
+
+    /** Question received → the engine actually started speaking (§51). */
+    private fun recordQuestionToSpeechStart() {
+        val receivedAt = questionReceivedAtMs
+        if (receivedAt > 0L) {
+            performance?.recordQuestionToSpeechStart((clock() - receivedAt).coerceAtLeast(0L))
+        }
+        val state = _machineState.value
+        timeline?.record(
+            DiagnosticCategory.TTS,
+            "TTS_START",
+            sessionEpoch = state.epoch,
+            turnId = state.cardTurn?.turnId
+        )
+    }
+
+    private fun recordSpeechResult(request: com.studyagent.client.core.voice.tts.SpeechRequest, result: SpeechResult) {
+        performance?.let { perf ->
+            perf.onTtsQueueDepth(speechOrchestrator.health.value.queueDepth)
+            val lastStart = speechOrchestrator.health.value.metrics.lastRequestToStartMs
+            if (lastStart >= 0L) perf.onTtsRequestToStart(lastStart)
+            when (result) {
+                is SpeechResult.Completed -> perf.onTtsCompleted()
+                is SpeechResult.Failed -> perf.onTtsFailed()
+                is SpeechResult.Cancelled -> perf.onTtsCancelled()
+            }
+        }
+        if (request.purpose == com.studyagent.client.core.voice.tts.SpeechPurpose.PREVIEW) return
+        val state = _machineState.value
+        val name = when (result) {
+            is SpeechResult.Completed -> "TTS_DONE"
+            is SpeechResult.Failed -> "TTS_FAILED"
+            is SpeechResult.Cancelled -> "TTS_CANCELLED"
+        }
+        timeline?.record(
+            DiagnosticCategory.TTS,
+            name,
+            sessionEpoch = state.epoch,
+            turnId = state.cardTurn?.turnId,
+            metadata = mapOf(
+                "purpose" to request.purpose.name,
+                "chars" to request.text.length.toString()
+            )
+        )
+    }
+
+    /**
+     * Internal resource inventory (§19). Every field is a bounded structure, so the endurance
+     * tests can assert "back to quiescent" instead of guessing from wall-clock behaviour.
+     */
+    fun resourceSnapshot(): MachineResourceCounts {
+        val state = _machineState.value
+        return MachineResourceCounts(
+            pendingTimers = timeoutJobs.size,
+            eventsAwaitingProcessing = (eventsDispatched.get() - eventsProcessed.get()).coerceAtLeast(0L),
+            ledgerEntries = state.ledger.entries.size,
+            recentServerMessageIds = state.recentServerMessageIds.size,
+            transitionHistory = state.transitionHistory.size,
+            cardTurnHistory = state.cardTurnHistory.size,
+            activeSpeechEffects = if (state.activeSpeechEffectId != null) 1 else 0,
+            activeRecognitionEffects = if (state.activeRecognitionEffectId != null) 1 else 0,
+            hasPendingAction = state.pendingAction != null
+        )
+    }
+
+    /** Sanitized session snapshot for Diagnostics (§59). */
+    fun diagnosticsSnapshot(): SessionDiagnosticsSnapshot = _machineState.value.toDiagnostics(clock())
 
     companion object {
         /**
@@ -737,10 +1217,12 @@ class StudySessionMachine(
         const val PTT_SETTLE_BUDGET_MS = 600L
     }
 
+    /** Stops the machine and releases every timer it owns (§98/§121). */
     fun close() {
         machineJob.cancel()
         eventChannel.close()
         timeoutJobs.values.forEach { it.cancel() }
         timeoutJobs.clear()
+        performance?.onSttActiveRequests(0)
     }
 }
