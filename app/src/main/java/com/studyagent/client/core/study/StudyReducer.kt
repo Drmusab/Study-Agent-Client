@@ -123,8 +123,24 @@ object StudyReducer {
 
     // ------------------------------------------------------------------ helpers
 
-    private fun newPending(type: PendingAction.ActionType, state: SessionMachineState, msgId: String, cardTurnId: String?, cardId: String?, clockMs: Long): PendingAction =
-        PendingAction(msgId, type, state.epoch, cardTurnId, cardId, clockMs, PendingAction.timeoutFor(type))
+    private fun newPending(
+        type: PendingAction.ActionType,
+        state: SessionMachineState,
+        msgId: String,
+        cardTurnId: String?,
+        cardId: String?,
+        clockMs: Long,
+        expectedRating: Rating? = null
+    ): PendingAction = PendingAction(
+        messageId = msgId,
+        type = type,
+        sessionEpoch = state.epoch,
+        cardTurnId = cardTurnId,
+        cardId = cardId,
+        createdAtMs = clockMs,
+        timeoutMs = PendingAction.timeoutFor(type),
+        expectedRating = expectedRating
+    )
 
     private fun speechRequestForQuestion(card: StudyCard): SpeechRequest =
         SpeechRequest(
@@ -305,7 +321,17 @@ object StudyReducer {
         val msgId = UUID.randomUUID().toString()
         val pending = newPending(PendingAction.ActionType.SUBMIT_ANSWER, state, msgId, turn.turnId, turn.cardId, clockMs)
         val ledger2 = state.ledger.tryBeginAnswer(turn.turnId, turn.cardId, msgId)
-        val send = StudyEffect.Network.Send(msgId, ClientMessage.SubmitAnswer(sessionId = state.session?.sessionId, cardId = event.cardId, text = event.transcript, messageId = msgId))
+        val send = StudyEffect.Network.Send(
+            msgId,
+            ClientMessage.SubmitAnswer(
+                sessionId = state.session?.sessionId,
+                cardId = event.cardId,
+                text = event.transcript,
+                messageId = msgId,
+                reviewTurnId = turn.turnId,
+                sessionRevision = turn.serverRevision
+            )
+        )
 
         val newState = state.copy(
             phase = SessionPhase.SubmittingAnswer,
@@ -421,9 +447,27 @@ object StudyReducer {
         }
 
         val msgId = UUID.randomUUID().toString()
-        val pending = newPending(PendingAction.ActionType.RATE_CARD, state, msgId, turn.turnId, turn.cardId, clockMs)
+        val pending = newPending(
+            PendingAction.ActionType.RATE_CARD,
+            state,
+            msgId,
+            turn.turnId,
+            turn.cardId,
+            clockMs,
+            expectedRating = event.rating
+        )
         val ledger2 = state.ledger.tryBeginRating(turn.turnId, turn.cardId, msgId)
-        val send = StudyEffect.Network.Send(msgId, ClientMessage.RateCard(sessionId = state.session?.sessionId, cardId = event.cardId, rating = event.rating, messageId = msgId))
+        val send = StudyEffect.Network.Send(
+            msgId,
+            ClientMessage.RateCard(
+                sessionId = state.session?.sessionId,
+                cardId = event.cardId,
+                rating = event.rating,
+                messageId = msgId,
+                reviewTurnId = turn.turnId,
+                sessionRevision = turn.serverRevision
+            )
+        )
 
         val newState = state.copy(
             phase = SessionPhase.SubmittingRating,
@@ -451,6 +495,11 @@ object StudyReducer {
         val pending = state.pendingAction
         if (pending?.type == PendingAction.ActionType.RATE_CARD && pending.cardId != event.cardId) {
             return Transition.reject(state, event, "stale-pending")
+        }
+        if (pending?.type == PendingAction.ActionType.RATE_CARD &&
+            pending.expectedRating != null && pending.expectedRating != event.rating
+        ) {
+            return Transition.reject(state, event, "unexpected-rating-ack")
         }
         val turn = state.cardTurn ?: return Transition.reject(state, event, "no-card")
         val ledger2 = state.ledger.markRatingAck(turn.turnId)

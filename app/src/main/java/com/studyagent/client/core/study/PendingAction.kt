@@ -1,5 +1,7 @@
 package com.studyagent.client.core.study
 
+import com.studyagent.client.core.models.Rating
+
 /**
  * Tracks a client action that has been sent but not yet acknowledged.
  *
@@ -14,7 +16,9 @@ data class PendingAction(
     val cardId: String?,
     val createdAtMs: Long,
     val timeoutMs: Long,
-    val attempt: Int = 1
+    val attempt: Int = 1,
+    /** Expected value for acknowledgements when the protocol provides one. */
+    val expectedRating: Rating? = null
 ) {
     fun isExpired(nowMs: Long): Boolean = nowMs - createdAtMs >= timeoutMs
 

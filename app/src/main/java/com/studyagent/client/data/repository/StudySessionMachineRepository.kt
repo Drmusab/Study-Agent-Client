@@ -36,19 +36,8 @@ class StudySessionMachineRepository(
         connectionRepository = connectionRepository,
         speechOrchestrator = speechOrchestrator,
         recognitionOrchestrator = recognitionOrchestrator,
-        scope = scope,
-        clock = clock
-    )
-
-    // Executor that handles voice+settings aware effects
-    private val executor = StudyEffectExecutor(
-        connectionRepository = connectionRepository,
-        speechOrchestrator = speechOrchestrator,
-        recognitionOrchestrator = recognitionOrchestrator,
-        audioRouteManager = audioRouteManager,
         settingsFlow = settingsFlow,
         scope = scope,
-        dispatch = machine::dispatch,
         clock = clock
     )
 
