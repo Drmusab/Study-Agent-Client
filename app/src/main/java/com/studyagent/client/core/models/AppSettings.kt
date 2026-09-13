@@ -11,23 +11,23 @@ data class AppSettings(
     // ---- Speech recognition (STT) ----
     /**
      * Legacy single-locale STT language. Still read (so an existing install keeps its
-     * choice) but superseded by [sttLanguageMode]; see `PreferencesDataStore.readSettings`
+     * choice) but superseded by [sttLanguageMode]; see `AppSettingsPreferencesCodec`
      * for the migration.
      */
-    val sttLanguage: String = "en-US",
+    val sttLanguage: String = AppSettingsPolicy.DEFAULT_ENGLISH_LOCALE,
     /** `AUTO_EN_AR` | `ENGLISH` | `ARABIC` — the user no longer switches locale per card. */
-    val sttLanguageMode: String = "AUTO_EN_AR",
-    val sttEnglishLocale: String = "en-US",
-    val sttArabicLocale: String = "ar-IQ",
+    val sttLanguageMode: String = AppSettingsPolicy.DEFAULT_STT_LANGUAGE_MODE,
+    val sttEnglishLocale: String = AppSettingsPolicy.DEFAULT_ENGLISH_LOCALE,
+    val sttArabicLocale: String = AppSettingsPolicy.DEFAULT_ARABIC_LOCALE,
     /** Locale AUTO falls back to when language detection/switching is unavailable. */
-    val sttAutoFallbackLocale: String = "en-US",
+    val sttAutoFallbackLocale: String = AppSettingsPolicy.DEFAULT_ENGLISH_LOCALE,
     /** `AUTO` | `PREFER_ON_DEVICE` | `SYSTEM_DEFAULT`. */
-    val sttRecognitionMode: String = "AUTO",
+    val sttRecognitionMode: String = AppSettingsPolicy.DEFAULT_STT_RECOGNITION_MODE,
     val sttPreferOnDevice: Boolean = true,
     val sttShowPartialTranscript: Boolean = true,
     val sttMedicalBiasing: Boolean = true,
     /** `SHORT` | `NORMAL` | `LONG` — the only answer-length knob exposed to users. */
-    val sttAnswerLength: String = "NORMAL",
+    val sttAnswerLength: String = AppSettingsPolicy.DEFAULT_STT_ANSWER_LENGTH,
     /**
      * Logs full transcript text. Developer opt-in only; medical answers are never logged
      * by default.
@@ -35,11 +35,15 @@ data class AppSettings(
     val sttDebugTranscriptLogging: Boolean = false,
 
     // ---- Legacy voice locale (kept for migration compatibility; voices are now per-language) ----
-    val ttsLanguage: String = "en-US",
-    /** Legacy global rate — remains readable; per-purpose rates fall back to it on migration. */
-    val speechRate: Float = 1.0f,
+    val ttsLanguage: String = AppSettingsPolicy.DEFAULT_ENGLISH_LOCALE,
+    /**
+     * Legacy global rate. It is read from old installs to seed the per-purpose rates, but is
+     * not a runtime TTS source after migration. The codec keeps a model-value shadow while the
+     * stable `speech_rate` key mirrors [questionRate] for older app versions.
+     */
+    val speechRate: Float = AppSettingsPolicy.DEFAULT_TTS_RATE,
     /** Shared TTS pitch (used as TtsSettings.pitch). */
-    val speechPitch: Float = 1.0f,
+    val speechPitch: Float = AppSettingsPolicy.DEFAULT_SPEECH_PITCH,
 
     // ---- Voice engine / voices ----
     /** TTS engine package name, null = system default. */
@@ -50,14 +54,14 @@ data class AppSettings(
     val preferOfflineVoices: Boolean = true,
 
     // ---- Per-purpose speech rates ----
-    val questionRate: Float = 1.0f,
-    val feedbackRate: Float = 1.05f,
-    val explanationRate: Float = 1.0f,
+    val questionRate: Float = AppSettingsPolicy.DEFAULT_TTS_RATE,
+    val feedbackRate: Float = AppSettingsPolicy.DEFAULT_FEEDBACK_RATE,
+    val explanationRate: Float = AppSettingsPolicy.DEFAULT_TTS_RATE,
 
     // ---- Speech pipeline behavior ----
     val ttsAutoLanguageDetection: Boolean = true,
     val ttsMedicalPronunciation: Boolean = true,
-    val ttsAcousticGapMs: Int = 350,
+    val ttsAcousticGapMs: Int = AppSettingsPolicy.DEFAULT_ACOUSTIC_GAP_MS,
     val headsetDisconnectBehavior: HeadsetDisconnectBehavior = HeadsetDisconnectBehavior.PAUSE_SPEECH,
 
     // ---- Study audio routing (headphones are optional; the phone is a first-class route) ----
@@ -83,6 +87,6 @@ data class AppSettings(
     val useFakeAgent: Boolean = false,
     val debugLogging: Boolean = true,
     val autoReconnect: Boolean = true,
-    val maxReconnectAttempts: Int = 10,
-    val pingIntervalSeconds: Long = 15L
+    val maxReconnectAttempts: Int = AppSettingsPolicy.DEFAULT_MAX_RECONNECT_ATTEMPTS,
+    val pingIntervalSeconds: Long = AppSettingsPolicy.DEFAULT_PING_INTERVAL_SECONDS
 )

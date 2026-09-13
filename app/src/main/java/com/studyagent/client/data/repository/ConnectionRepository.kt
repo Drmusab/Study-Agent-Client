@@ -44,7 +44,10 @@ class DefaultConnectionRepository(
 
     private val tag = "ConnectionRepo"
 
-    private val realConnection = WebSocketAgentConnection(dispatchers)
+    private val realConnection = WebSocketAgentConnection(
+        dispatchers = dispatchers,
+        settingsFlow = preferencesDataStore.settingsFlow
+    )
     private val fakeConnection = FakeAgentConnection(scope)
 
     private val _isFakeMode = MutableStateFlow(false)

@@ -2,6 +2,8 @@ package com.studyagent.client.core.network
 
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.common.DispatcherProvider
+import com.studyagent.client.core.models.AppSettings
+import com.studyagent.client.core.models.AppSettingsPolicy
 import com.studyagent.client.core.models.ClientMessage
 import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.ServerMessage
@@ -11,10 +13,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
@@ -29,7 +34,9 @@ import java.util.concurrent.TimeUnit
 
 class WebSocketAgentConnection(
     private val dispatchers: DispatcherProvider,
-    private val customOkHttpClient: OkHttpClient? = null
+    private val customOkHttpClient: OkHttpClient? = null,
+    /** Device network preferences remain user intent; runtime reads the latest flow. */
+    private val settingsFlow: Flow<AppSettings> = flowOf(AppSettings())
 ) : AgentConnection {
 
     private val tag = "WebSocketAgentConn"
@@ -39,9 +46,14 @@ class WebSocketAgentConnection(
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
-        .pingInterval(20, TimeUnit.SECONDS)
+        // The application ping loop below is driven by the persisted setting.
+        // Disable OkHttp's second fixed-rate ping loop to avoid duplicate traffic.
+        .pingInterval(0, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
+
+    @Volatile
+    private var networkSettings: AppSettings = AppSettings()
 
     private var activeWebSocket: WebSocket? = null
     private var connectionProfile: ServerProfile? = null
@@ -60,6 +72,20 @@ class WebSocketAgentConnection(
 
     override val currentProfile: ServerProfile?
         get() = connectionProfile
+
+    init {
+        scope.launch {
+            settingsFlow.collect { updated ->
+                networkSettings = updated
+                if (!updated.autoReconnect) {
+                    reconnectJob?.cancel()
+                    if (_connectionState.value is ConnectionState.Reconnecting) {
+                        _connectionState.value = ConnectionState.Disconnected
+                    }
+                }
+            }
+        }
+    }
 
     override suspend fun connect(profile: ServerProfile) {
         isExplicitlyDisconnected = false
@@ -173,10 +199,13 @@ class WebSocketAgentConnection(
     }
 
     private fun scheduleReconnect(profile: ServerProfile, reason: String?) {
-        if (isExplicitlyDisconnected) return
+        if (isExplicitlyDisconnected || !networkSettings.autoReconnect) {
+            _connectionState.value = ConnectionState.Disconnected
+            return
+        }
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            val maxAttempts = 15
+            val maxAttempts = networkSettings.maxReconnectAttempts
             if (reconnectController.currentAttempt >= maxAttempts) {
                 AppLogger.w(tag, "Max reconnect attempts ($maxAttempts) reached.")
                 _connectionState.value = ConnectionState.ServerUnavailable("PC Agent is unreachable after $maxAttempts attempts")
@@ -193,7 +222,7 @@ class WebSocketAgentConnection(
             )
 
             delay(delayMs)
-            if (isActive && !isExplicitlyDisconnected) {
+            if (isActive && !isExplicitlyDisconnected && networkSettings.autoReconnect) {
                 initiateConnection(profile)
             }
         }
@@ -203,7 +232,10 @@ class WebSocketAgentConnection(
         pingJob?.cancel()
         pingJob = scope.launch {
             while (isActive && _connectionState.value is ConnectionState.Connected) {
-                delay(15000L)
+                val intervalMs = networkSettings.pingIntervalSeconds
+                    .coerceAtLeast(AppSettingsPolicy.MIN_PING_INTERVAL_SECONDS)
+                    .coerceAtMost(AppSettingsPolicy.MAX_PING_INTERVAL_SECONDS) * 1_000L
+                delay(intervalMs)
                 if (isActive && _connectionState.value is ConnectionState.Connected) {
                     lastPingTimestamp = System.currentTimeMillis()
                     send(ClientMessage.Ping())

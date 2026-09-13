@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -23,9 +24,13 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
@@ -33,10 +38,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.models.AppSettings
+import com.studyagent.client.core.models.AppSettingsPolicy
 import com.studyagent.client.core.voice.stt.AnswerEndpointProfile
 import com.studyagent.client.core.voice.stt.RecognitionCapabilities
 import com.studyagent.client.core.voice.tts.HeadsetDisconnectBehavior
 import com.studyagent.client.core.voice.tts.SegmentLanguage
+import com.studyagent.client.core.voice.tts.TtsEngineInfo
 import com.studyagent.client.core.voice.tts.TtsSettings
 import com.studyagent.client.core.voice.tts.TtsVoiceInfo
 import com.studyagent.client.core.voice.tts.VoiceLatency
@@ -55,11 +62,13 @@ fun SettingsScreen(
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val settings by viewModel.settings.collectAsState()
-    val englishVoices by viewModel.englishVoices.collectAsState()
-    val arabicVoices by viewModel.arabicVoices.collectAsState()
-    val previewing by viewModel.previewing.collectAsState()
-    val recognitionCapabilities by viewModel.recognitionCapabilities.collectAsState()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val englishVoices by viewModel.englishVoices.collectAsStateWithLifecycle()
+    val arabicVoices by viewModel.arabicVoices.collectAsStateWithLifecycle()
+    val previewing by viewModel.previewing.collectAsStateWithLifecycle()
+    val recognitionCapabilities by viewModel.recognitionCapabilities.collectAsStateWithLifecycle()
+    val persistenceError by viewModel.persistenceError.collectAsStateWithLifecycle()
+    var showResetConfirmation by remember { androidx.compose.runtime.mutableStateOf(false) }
 
     Scaffold(
         containerColor = DarkBackground,
@@ -88,6 +97,30 @@ fun SettingsScreen(
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            if (persistenceError != null) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = persistenceError ?: "Couldn't save settings",
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedButton(onClick = viewModel::clearPersistenceError) {
+                                Text("Dismiss")
+                            }
+                        }
+                    }
+                }
+            }
+
             // ------------------------------------------------ Study audio routing (§34/§79)
             //
             // Headphones are an enhancement, never a requirement. Automatic is the default and
@@ -317,6 +350,16 @@ fun SettingsScreen(
             // ------------------------------------------------ Voice output (TTS)
             item { SectionHeader("VOICE OUTPUT (TTS)") }
 
+            item {
+                SettingsCard {
+                    EnginePicker(
+                        engines = engines,
+                        selectedEngineId = settings.ttsEngineId,
+                        onSelect = { id -> viewModel.updateSettings { it.copy(ttsEngineId = id) } }
+                    )
+                }
+            }
+
             // Voice pickers: real installed voices + Auto recommended.
             item {
             SettingsCard {
@@ -393,15 +436,26 @@ fun SettingsScreen(
                         onChange = { v -> viewModel.updateSettings { it.copy(explanationRate = v) } }
                     )
                     Spacer(modifier = Modifier.height(8.dp))
+                    var pendingPitch by remember(settings.speechPitch) {
+                        mutableFloatStateOf(
+                            settings.speechPitch.coerceIn(
+                                AppSettingsPolicy.MIN_SPEECH_PITCH,
+                                AppSettingsPolicy.MAX_SPEECH_PITCH
+                            )
+                        )
+                    }
                     Text(
-                        text = "Pitch: ${(settings.speechPitch * 100).roundToInt()}%",
+                        text = "Pitch: ${(pendingPitch * 100).roundToInt()}%",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextPrimary
                     )
                     Slider(
-                        value = settings.speechPitch,
-                        onValueChange = { viewModel.updateSettings { s -> s.copy(speechPitch = it) } },
-                        valueRange = 0.7f..1.4f
+                        value = pendingPitch,
+                        onValueChange = { pendingPitch = it },
+                        onValueChangeFinished = {
+                            viewModel.updateSettings { s -> s.copy(speechPitch = pendingPitch) }
+                        },
+                        valueRange = AppSettingsPolicy.MIN_SPEECH_PITCH..AppSettingsPolicy.MAX_SPEECH_PITCH
                     )
                 }
             }
@@ -432,8 +486,16 @@ fun SettingsScreen(
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
+                    var pendingGap by remember(settings.ttsAcousticGapMs) {
+                        mutableFloatStateOf(
+                            settings.ttsAcousticGapMs.toFloat().coerceIn(
+                                TtsSettings.MIN_ACOUSTIC_GAP_MS.toFloat(),
+                                TtsSettings.MAX_ACOUSTIC_GAP_MS.toFloat()
+                            )
+                        )
+                    }
                     Text(
-                        text = "Mic handoff gap: ${settings.ttsAcousticGapMs} ms",
+                        text = "Mic handoff gap: ${pendingGap.roundToInt()} ms",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextPrimary
                     )
@@ -442,15 +504,11 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodySmall, color = TextSecondary
                     )
                     Slider(
-                        value = settings.ttsAcousticGapMs.toFloat(),
-                        onValueChange = { v ->
+                        value = pendingGap,
+                        onValueChange = { pendingGap = it },
+                        onValueChangeFinished = {
                             viewModel.updateSettings {
-                                it.copy(
-                                    ttsAcousticGapMs = v.roundToInt().coerceIn(
-                                        TtsSettings.MIN_ACOUSTIC_GAP_MS,
-                                        TtsSettings.MAX_ACOUSTIC_GAP_MS
-                                    )
-                                )
+                                it.copy(ttsAcousticGapMs = pendingGap.roundToInt())
                             }
                         },
                         valueRange = TtsSettings.MIN_ACOUSTIC_GAP_MS.toFloat()..TtsSettings.MAX_ACOUSTIC_GAP_MS.toFloat()
@@ -507,11 +565,89 @@ fun SettingsScreen(
                         checked = settings.debugLogging,
                         onCheckedChange = { v -> viewModel.updateSettings { it.copy(debugLogging = v) } }
                     )
+
+                    var pendingReconnectAttempts by remember(settings.maxReconnectAttempts) {
+                        mutableFloatStateOf(
+                            settings.maxReconnectAttempts.toFloat().coerceIn(
+                                AppSettingsPolicy.MIN_RECONNECT_ATTEMPTS.toFloat(),
+                                AppSettingsPolicy.MAX_RECONNECT_ATTEMPTS.toFloat()
+                            )
+                        )
+                    }
+                    Text(
+                        text = "Reconnect attempts: ${pendingReconnectAttempts.roundToInt()}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary
+                    )
+                    Slider(
+                        value = pendingReconnectAttempts,
+                        onValueChange = { pendingReconnectAttempts = it },
+                        onValueChangeFinished = {
+                            viewModel.updateSettings {
+                                it.copy(maxReconnectAttempts = pendingReconnectAttempts.roundToInt())
+                            }
+                        },
+                        valueRange = AppSettingsPolicy.MIN_RECONNECT_ATTEMPTS.toFloat()..AppSettingsPolicy.MAX_RECONNECT_ATTEMPTS.toFloat()
+                    )
+
+                    var pendingPingInterval by remember(settings.pingIntervalSeconds) {
+                        mutableFloatStateOf(
+                            settings.pingIntervalSeconds.toFloat().coerceIn(
+                                AppSettingsPolicy.MIN_PING_INTERVAL_SECONDS.toFloat(),
+                                AppSettingsPolicy.MAX_PING_INTERVAL_SECONDS.toFloat()
+                            )
+                        )
+                    }
+                    Text(
+                        text = "Ping interval: ${pendingPingInterval.roundToInt()} seconds",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary
+                    )
+                    Slider(
+                        value = pendingPingInterval,
+                        onValueChange = { pendingPingInterval = it },
+                        onValueChangeFinished = {
+                            viewModel.updateSettings {
+                                it.copy(pingIntervalSeconds = pendingPingInterval.roundToInt().toLong())
+                            }
+                        },
+                        valueRange = AppSettingsPolicy.MIN_PING_INTERVAL_SECONDS.toFloat()..AppSettingsPolicy.MAX_PING_INTERVAL_SECONDS.toFloat()
+                    )
+
+                    TextButton(onClick = { showResetConfirmation = true }) {
+                        Text("Reset device settings", color = AccentTeal)
+                    }
                 }
             }
 
             item { Spacer(modifier = Modifier.height(24.dp)) }
         }
+    }
+
+    if (showResetConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showResetConfirmation = false },
+            title = { Text("Reset device settings?", color = TextPrimary) },
+            text = {
+                Text(
+                    "This restores device preferences to defaults. Profiles, tokens, and cached Agent data are kept.",
+                    color = TextSecondary
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.resetAppSettings()
+                        showResetConfirmation = false
+                    }
+                ) { Text("Reset", color = AccentTeal) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetConfirmation = false }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            }
+        )
     }
 }
 
@@ -540,6 +676,37 @@ private fun SettingsCard(content: @Composable () -> Unit) {
 }
 
 @Composable
+private fun EnginePicker(
+    engines: List<TtsEngineInfo>,
+    selectedEngineId: String?,
+    onSelect: (String?) -> Unit
+) {
+    Text(text = "TTS Engine", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+    Spacer(modifier = Modifier.height(4.dp))
+    LanguageRadioItem(
+        title = "System default",
+        selected = selectedEngineId == null,
+        onClick = { onSelect(null) }
+    )
+    engines.forEach { engine ->
+        LanguageRadioItem(
+            title = engine.label + if (engine.isSystemDefault) " (system default)" else "",
+            selected = selectedEngineId == engine.packageName,
+            onClick = { onSelect(engine.packageName) }
+        )
+    }
+    if (selectedEngineId != null && engines.none { it.packageName == selectedEngineId }) {
+        Text(
+            text = "Saved engine is currently unavailable. System default is used temporarily; " +
+                "your preference is retained.",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted,
+            modifier = Modifier.padding(start = 8.dp, top = 2.dp)
+        )
+    }
+}
+
+@Composable
 private fun VoicePicker(
     title: String,
     voices: List<TtsVoiceInfo>,
@@ -556,6 +723,15 @@ private fun VoicePicker(
     if (voices.isEmpty()) {
         Text(
             text = "Installed voices appear here once the speech engine is ready.",
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted,
+            modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 4.dp)
+        )
+    }
+    if (selectedVoiceId != null && voices.none { it.id == selectedVoiceId }) {
+        Text(
+            text = "Saved voice is currently unavailable. A compatible fallback is used; " +
+                "your preference is retained.",
             style = MaterialTheme.typography.bodySmall,
             color = TextMuted,
             modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 4.dp)
@@ -581,15 +757,21 @@ private fun voiceLabel(voice: TtsVoiceInfo): String {
 
 @Composable
 private fun RateSlider(label: String, value: Float, onChange: (Float) -> Unit) {
+    var pendingValue by remember(value) {
+        mutableFloatStateOf(value.coerceIn(AppSettingsPolicy.MIN_TTS_RATE, AppSettingsPolicy.MAX_TTS_RATE))
+    }
     Text(
-        text = "$label: ${(value * 100).roundToInt()}%",
+        text = "$label: ${(pendingValue * 100).roundToInt()}%",
         style = MaterialTheme.typography.bodyMedium,
         color = TextPrimary
     )
     Slider(
-        value = value.coerceIn(0.6f, 1.8f),
-        onValueChange = onChange,
-        valueRange = 0.6f..1.8f
+        value = pendingValue,
+        onValueChange = { pendingValue = it },
+        // Slider drags are local UI state; commit once at the end rather than
+        // issuing a DataStore transaction for every pixel of movement.
+        onValueChangeFinished = { onChange(pendingValue) },
+        valueRange = AppSettingsPolicy.MIN_TTS_RATE..AppSettingsPolicy.MAX_TTS_RATE
     )
 }
 

@@ -16,6 +16,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -152,6 +153,18 @@ class StudyControlRepositoryTest {
         assertEquals(51, h.control.draft.value?.newPerDay)
         val state = h.control.saveState.value
         assertTrue(state is ConfigSaveState.Error && state.timedOut)
+
+        // A late response for the timed-out request is not a new unsolicited
+        // server push and must not silently commit the candidate.
+        h.connection.emit(
+            ServerMessage.StudyConfigUpdated(
+                messageId = h.lastUpdateRequestId(),
+                config = h.control.draft.value
+            )
+        )
+        advanceUntilIdle()
+        assertEquals(20, h.control.serverConfig.value?.newPerDay)
+        assertEquals(51, h.control.draft.value?.newPerDay)
     }
 
     @Test
@@ -263,6 +276,93 @@ class StudyControlRepositoryTest {
         assertEquals(12, h.control.serverConfig.value?.newPerDay)
         assertEquals(pushed, received)
         job.cancel()
+    }
+
+    @Test
+    fun `draft envelope survives a fresh repository instance`() = runTest(timeout = 30.seconds) {
+        val h = Harness()
+        h.start(testScheduler)
+        h.control.updateDraft { it.copy(newPerDay = 88) }
+        advanceUntilIdle()
+
+        val scope2 = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        val caps2 = CapabilityStore(h.connection, scope2, negotiationTimeoutMs = 4_000L)
+        val restored = DefaultStudyControlRepository(
+            connectionRepository = h.connection,
+            capabilityStore = caps2,
+            cacheStorage = h.storage,
+            dispatchers = TestDispatcherProvider(UnconfinedTestDispatcher(testScheduler)),
+            scope = scope2
+        )
+        advanceUntilIdle()
+
+        assertEquals(88, restored.draft.value?.newPerDay)
+    }
+
+    @Test
+    fun `corrupt draft does not damage valid local config cache`() = runTest(timeout = 30.seconds) {
+        val storage = InMemoryManagementCacheStorage()
+        storage.saveControlConfigCache(
+            com.studyagent.client.data.repository.CachedPayload(
+                com.studyagent.client.core.network.ProtocolJson.json.encodeToString(
+                    StudyControlConfig.serializer(),
+                    serverConfig
+                ),
+                1L,
+                com.studyagent.client.data.repository.ManagementCacheSchema.CONTROL_CONFIG
+            )
+        )
+        storage.saveControlDraft("{bad-draft")
+        val connection = FakeConnectionRepository()
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        val caps = CapabilityStore(connection, scope, negotiationTimeoutMs = 4_000L)
+        val restored = DefaultStudyControlRepository(
+            connectionRepository = connection,
+            capabilityStore = caps,
+            cacheStorage = storage,
+            dispatchers = TestDispatcherProvider(UnconfinedTestDispatcher(testScheduler)),
+            scope = scope
+        )
+        advanceUntilIdle()
+
+        assertEquals(serverConfig, restored.localConfig.value)
+        assertNull(restored.draft.value)
+        assertNull(storage.readControlDraft())
+    }
+
+    @Test
+    fun `future cache schemas are discarded without hiding defaults`() = runTest(timeout = 30.seconds) {
+        val storage = InMemoryManagementCacheStorage()
+        val encoded = com.studyagent.client.core.network.ProtocolJson.json.encodeToString(
+            StudyControlConfig.serializer(),
+            serverConfig
+        )
+        storage.saveControlConfigCache(
+            com.studyagent.client.data.repository.CachedPayload(
+                encoded,
+                1L,
+                com.studyagent.client.data.repository.ManagementCacheSchema.CONTROL_CONFIG + 99
+            )
+        )
+        storage.saveControlDraft(
+            "{\"schemaVersion\":99,\"savedAtEpochMs\":1,\"config\":$encoded}"
+        )
+        val connection = FakeConnectionRepository()
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        val caps = CapabilityStore(connection, scope, negotiationTimeoutMs = 4_000L)
+        val restored = DefaultStudyControlRepository(
+            connectionRepository = connection,
+            capabilityStore = caps,
+            cacheStorage = storage,
+            dispatchers = TestDispatcherProvider(UnconfinedTestDispatcher(testScheduler)),
+            scope = scope
+        )
+        advanceUntilIdle()
+
+        assertEquals(StudyControlConfig(), restored.localConfig.value)
+        assertNull(restored.draft.value)
+        assertNull(storage.readControlConfigCache())
+        assertNull(storage.readControlDraft())
     }
 
     @Test

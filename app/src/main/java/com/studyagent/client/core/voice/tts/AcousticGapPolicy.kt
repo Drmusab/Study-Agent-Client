@@ -1,6 +1,7 @@
 package com.studyagent.client.core.voice.tts
 
 import com.studyagent.client.core.audio.AcousticProfile
+import com.studyagent.client.core.models.AppSettingsPolicy
 
 /**
  * Route-aware acoustic gap policy (§15/§16/§17).
@@ -21,8 +22,8 @@ import com.studyagent.client.core.audio.AcousticProfile
  */
 object AcousticGapPolicy {
 
-    const val MIN_GAP_MS = 150
-    const val MAX_GAP_MS = 1200
+    const val MIN_GAP_MS = AppSettingsPolicy.MIN_ACOUSTIC_GAP_MS
+    const val MAX_GAP_MS = AppSettingsPolicy.MAX_ACOUSTIC_GAP_MS
 
     /** Floor for the phone-speaker path: measurably longer than a typical headset tail. */
     const val PHONE_SPEAKER_FLOOR_MS = 450

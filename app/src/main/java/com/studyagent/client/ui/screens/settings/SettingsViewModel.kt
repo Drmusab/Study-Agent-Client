@@ -26,6 +26,11 @@ class SettingsViewModel(
     val settings: StateFlow<AppSettings> = preferencesDataStore.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppSettings())
 
+    /** Non-terminal write feedback; the flow remains the last committed settings value. */
+    val persistenceError: StateFlow<String?> = preferencesDataStore.lastSettingsWriteError
+
+    fun clearPersistenceError() = preferencesDataStore.clearSettingsWriteError()
+
     private val _englishVoices = MutableStateFlow<List<TtsVoiceInfo>>(emptyList())
     val englishVoices: StateFlow<List<TtsVoiceInfo>> = _englishVoices.asStateFlow()
 
@@ -85,6 +90,12 @@ class SettingsViewModel(
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         viewModelScope.launch {
             preferencesDataStore.updateSettings(transform)
+        }
+    }
+
+    fun resetAppSettings() {
+        viewModelScope.launch {
+            preferencesDataStore.resetAppSettings()
         }
     }
 

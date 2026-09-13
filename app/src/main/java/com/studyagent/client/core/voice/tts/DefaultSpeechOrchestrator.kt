@@ -1,5 +1,6 @@
 package com.studyagent.client.core.voice.tts
 
+import com.studyagent.client.core.models.AppSettingsPolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -570,14 +571,26 @@ class DefaultSpeechOrchestrator(
 
     private fun localeForLanguage(language: SegmentLanguage, cfg: TtsSettings = settings): Locale =
         when (language) {
-            SegmentLanguage.ARABIC -> parseLocaleSafe(cfg.arabicLocale, Locale("ar", "SA"))
-            else -> parseLocaleSafe(cfg.englishLocale, Locale.US)
+            SegmentLanguage.ARABIC -> parseLocaleSafe(
+                cfg.arabicLocale,
+                Locale.forLanguageTag(AppSettingsPolicy.DEFAULT_TTS_ARABIC_LOCALE)
+            )
+            else -> parseLocaleSafe(
+                cfg.englishLocale,
+                Locale.forLanguageTag(AppSettingsPolicy.DEFAULT_ENGLISH_LOCALE)
+            )
         }
 
     private fun localeForLanguage(languageCode: String): Locale =
         when (languageCode.lowercase()) {
-            "ar" -> parseLocaleSafe(settings.arabicLocale, Locale("ar", "SA"))
-            else -> parseLocaleSafe(settings.englishLocale, Locale.US)
+            "ar" -> parseLocaleSafe(
+                settings.arabicLocale,
+                Locale.forLanguageTag(AppSettingsPolicy.DEFAULT_TTS_ARABIC_LOCALE)
+            )
+            else -> parseLocaleSafe(
+                settings.englishLocale,
+                Locale.forLanguageTag(AppSettingsPolicy.DEFAULT_ENGLISH_LOCALE)
+            )
         }
 
     private fun parseLocaleSafe(tag: String, fallback: Locale): Locale =
@@ -627,12 +640,12 @@ class DefaultSpeechOrchestrator(
         }
 
     private fun clampRate(rate: Float): Float = when {
-        rate.isNaN() -> 1.0f
+        !rate.isFinite() -> AppSettingsPolicy.DEFAULT_TTS_RATE
         else -> rate.coerceIn(MIN_RATE, MAX_RATE)
     }
 
     private fun clampPitch(pitch: Float): Float = when {
-        pitch.isNaN() -> 1.0f
+        !pitch.isFinite() -> AppSettingsPolicy.DEFAULT_SPEECH_PITCH
         else -> pitch.coerceIn(MIN_PITCH, MAX_PITCH)
     }
 
@@ -707,10 +720,10 @@ class DefaultSpeechOrchestrator(
     private data class ChunkItem(val text: String, val language: SegmentLanguage)
 
     companion object {
-        const val MIN_RATE = 0.5f
-        const val MAX_RATE = 2.0f
-        const val MIN_PITCH = 0.6f
-        const val MAX_PITCH = 1.5f
+        const val MIN_RATE = AppSettingsPolicy.MIN_TTS_RATE
+        const val MAX_RATE = AppSettingsPolicy.MAX_TTS_RATE
+        const val MIN_PITCH = AppSettingsPolicy.MIN_SPEECH_PITCH
+        const val MAX_PITCH = AppSettingsPolicy.MAX_SPEECH_PITCH
         const val MIN_CHUNK_LENGTH = 128
         const val VOICE_QUERY_TIMEOUT_MS = 2_000L
 

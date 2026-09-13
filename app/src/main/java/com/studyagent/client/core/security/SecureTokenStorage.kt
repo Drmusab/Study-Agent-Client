@@ -7,6 +7,10 @@ import androidx.security.crypto.MasterKeys
 import com.studyagent.client.core.common.AppLogger
 
 interface SecureTokenStorage {
+    /** False when the platform keystore is unavailable; callers must fail closed. */
+    val isAvailable: Boolean
+        get() = true
+
     fun saveToken(profileId: String, token: String)
     fun getToken(profileId: String): String?
     fun removeToken(profileId: String)
@@ -17,7 +21,15 @@ class AndroidSecureTokenStorage(
     private val context: Context
 ) : SecureTokenStorage {
 
-    private val prefs: SharedPreferences by lazy {
+    /**
+     * Nullable by design: if the platform keystore is unavailable we fail closed
+     * instead of silently putting credentials in plaintext SharedPreferences.
+     * The profile itself remains usable for unauthenticated servers.
+     */
+    override val isAvailable: Boolean
+        get() = prefs != null
+
+    private val prefs: SharedPreferences? by lazy {
         try {
             val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
             EncryptedSharedPreferences.create(
@@ -28,25 +40,25 @@ class AndroidSecureTokenStorage(
                 EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
             )
         } catch (e: Exception) {
-            AppLogger.w("SecureTokenStorage", "Fallback to private SharedPreferences: ${e.message}")
-            context.getSharedPreferences("secure_prefs_fallback", Context.MODE_PRIVATE)
+            AppLogger.e("SecureTokenStorage", "Encrypted token storage unavailable; not persisting token", e)
+            null
         }
     }
 
     override fun saveToken(profileId: String, token: String) {
-        prefs.edit().putString(KEY_PREFIX + profileId, token).apply()
+        prefs?.edit()?.putString(KEY_PREFIX + profileId, token)?.apply()
     }
 
     override fun getToken(profileId: String): String? {
-        return prefs.getString(KEY_PREFIX + profileId, null)
+        return prefs?.getString(KEY_PREFIX + profileId, null)
     }
 
     override fun removeToken(profileId: String) {
-        prefs.edit().remove(KEY_PREFIX + profileId).apply()
+        prefs?.edit()?.remove(KEY_PREFIX + profileId)?.apply()
     }
 
     override fun clearAll() {
-        prefs.edit().clear().apply()
+        prefs?.edit()?.clear()?.apply()
     }
 
     companion object {

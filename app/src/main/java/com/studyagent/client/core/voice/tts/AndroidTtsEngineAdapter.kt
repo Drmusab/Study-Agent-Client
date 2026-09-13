@@ -9,6 +9,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import com.studyagent.client.core.common.AppLogger
+import com.studyagent.client.core.models.AppSettingsPolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
@@ -66,6 +67,10 @@ class AndroidTtsEngineAdapter(
     @Volatile
     private var requestedEnginePackage: String? = null
 
+    /** Runtime choice may temporarily be system default while the preferred package is absent. */
+    @Volatile
+    private var effectiveEnginePackage: String? = null
+
     /** Completed by onInit (true=SUCCESS). Re-created on every (re-)initialization. */
     private var initDeferred: CompletableDeferred<Boolean>? = null
 
@@ -107,7 +112,7 @@ class AndroidTtsEngineAdapter(
         }
         mainHandler.post {
             try {
-                val pkg = requestedEnginePackage
+                val pkg = effectiveEnginePackage
                 val engine = if (pkg.isNullOrBlank()) {
                     TextToSpeech(appContext, this)
                 } else {
@@ -153,10 +158,26 @@ class AndroidTtsEngineAdapter(
     }
 
     private fun failInitialization(error: SpeechError) {
+        var fallbackToSystem = false
         synchronized(lock) {
             initError = error
-            _status.value = EngineStatus.FAILED
+            // Keep the preferred package in memory as user intent, but do not let
+            // a removed/broken engine prevent speech. The next initialization uses
+            // the platform default without changing the persisted preference.
+            if (!released && requestedEnginePackage != null &&
+                effectiveEnginePackage == requestedEnginePackage
+            ) {
+                effectiveEnginePackage = null
+                _status.value = EngineStatus.UNINITIALIZED
+                fallbackToSystem = true
+            } else {
+                _status.value = EngineStatus.FAILED
+            }
             initDeferred?.complete(false)
+        }
+        if (fallbackToSystem) {
+            AppLogger.w(tag, "Preferred TTS engine unavailable; using system default temporarily")
+            initializeEngine()
         }
     }
 
@@ -452,12 +473,13 @@ class AndroidTtsEngineAdapter(
 
     override fun setEngine(enginePackage: String?) {
         val normalized = enginePackage?.takeIf { it.isNotBlank() }
-        if (normalized == requestedEnginePackage) return
+        if (normalized == requestedEnginePackage && normalized == effectiveEnginePackage) return
         stop()
         val old = synchronized(lock) {
             val e = tts
             tts = null
             requestedEnginePackage = normalized
+            effectiveEnginePackage = normalized
             e
         }
         mainHandler.post { shutdownQuietly(old) }
@@ -576,8 +598,8 @@ class AndroidTtsEngineAdapter(
         const val MS_PER_CHAR_AT_1X = 110L
         const val MIN_UTTERANCE_TIMEOUT_MS = 4_000L
         const val MAX_UTTERANCE_TIMEOUT_MS = 360_000L
-        const val MIN_VALID_RATE = 0.3f
-        const val MAX_VALID_RATE = 3.0f
+        const val MIN_VALID_RATE = AppSettingsPolicy.MIN_TTS_RATE
+        const val MAX_VALID_RATE = AppSettingsPolicy.MAX_TTS_RATE
 
         const val MAX_CONSECUTIVE_TIMEOUTS = 2
         const val MAX_RECOVERY_ATTEMPTS = 3

@@ -205,6 +205,36 @@ class DashboardRepositoryTest {
     }
 
     @Test
+    fun `corrupt dashboard cache is isolated from a valid decks cache`() = runTest(timeout = 30.seconds) {
+        val storage = InMemoryManagementCacheStorage()
+        storage.saveDashboardCache(
+            com.studyagent.client.data.repository.CachedPayload("{not-dashboard", 1L)
+        )
+        storage.saveDecksCache(
+            com.studyagent.client.data.repository.CachedPayload(
+                "[{\"name\":\"Recovered deck\"}]",
+                2L
+            )
+        )
+        val connection = FakeConnectionRepository()
+        val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        val caps = CapabilityStore(connection, scope, negotiationTimeoutMs = 4_000L)
+        val repo = DefaultDashboardRepository(
+            connectionRepository = connection,
+            capabilityStore = caps,
+            cacheStorage = storage,
+            dispatchers = TestDispatcherProvider(UnconfinedTestDispatcher(testScheduler)),
+            scope = scope
+        )
+        advanceUntilIdle()
+
+        assertNull(repo.data.value.snapshot)
+        assertEquals("Recovered deck", repo.data.value.decks.single().name)
+        assertNull(storage.readDashboardCache())
+        assertNotNull(storage.readDecksCache())
+    }
+
+    @Test
     fun `session pushes update the active session panel without a full refresh`() = runTest(timeout = 30.seconds) {
         val h = Harness()
         h.start(testScheduler)
