@@ -12,7 +12,14 @@ import com.studyagent.client.core.models.StudyCard
  */
 sealed interface StudyEvent {
     // -- User intents (every UI/voice/notification action converges here §61-§62)
-    data class UserStartRequested(val deck: String?, val messageId: String) : StudyEvent
+    data class UserStartRequested(
+        val deck: String?,
+        val messageId: String,
+        /** Study mode wire value; defaults to the v1-compatible due-review mode. */
+        val mode: String = "review_due",
+        /** Optional Protocol v2 session configuration from the Control Center (§75). */
+        val config: com.studyagent.client.core.models.SessionStartConfig? = null
+    ) : StudyEvent
     data class UserSubmitAnswer(val cardId: String, val transcript: String) : StudyEvent
     data class UserSubmitPendingTranscript(val cardId: String, val transcript: String) : StudyEvent
     data class UserDiscardPendingTranscript(val cardId: String) : StudyEvent

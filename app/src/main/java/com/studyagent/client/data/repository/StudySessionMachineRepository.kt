@@ -38,7 +38,12 @@ class StudySessionMachineRepository(
      * Study audio routing policy (§70/§112). Optional so the machine stays constructible in
      * headless tests; without it the app behaves like a bare phone in Auto mode.
      */
-    private val audioRouteCoordinator: StudyAudioRouteCoordinator? = null
+    private val audioRouteCoordinator: StudyAudioRouteCoordinator? = null,
+    /**
+     * Supplies the Control Center's current start payload (§75) for starts that do not
+     * carry explicit parameters (e.g. a spoken "start study" command). Nullable in tests.
+     */
+    private val startRequestProvider: (() -> StartStudyRequest)? = null
 ) : StudySessionRepository {
 
     private val machine = StudySessionMachine(
@@ -55,16 +60,24 @@ class StudySessionMachineRepository(
     override val currentSession: StateFlow<StudySession?> = machine.currentSession
     override val lastRecognizedCommand: Flow<VoiceCommand> = machine.lastRecognizedCommand
 
-    override suspend fun startStudy(deckName: String?) {
-        startOrBlock(deckName)
+    override suspend fun startStudy(deckName: String?, mode: String, config: com.studyagent.client.core.models.SessionStartConfig?) {
+        startOrBlock(deckName, mode, config)
     }
 
     /**
      * Start study, unless the user's audio preference forbids a headset-less start (§7/§82).
      * Only `HEADSET_REQUIRED` can block; Auto and Phone always start, on the phone when there
      * are no headphones.
+     *
+     * When no explicit mode/config is given (voice command path), the Control Center's
+     * current configuration is used (§75). The state machine rejects a start while one is
+     * already active/starting, so repeated taps never create duplicate sessions (§24).
      */
-    private fun startOrBlock(deckName: String?) {
+    private fun startOrBlock(
+        deckName: String?,
+        mode: String? = null,
+        config: com.studyagent.client.core.models.SessionStartConfig? = null
+    ) {
         val route = audioRouteCoordinator?.effectiveRoute?.value
         if (route != null && !route.canStartVoiceStudy) {
             val reason = route.reason
@@ -73,7 +86,15 @@ class StudySessionMachineRepository(
             machine.dispatch(StudyEvent.VoiceRouteBlocked(reason))
             return
         }
-        machine.dispatch(StudyEvent.UserStartRequested(deckName ?: "Toronto Notes", UUID.randomUUID().toString()))
+        val fallback = if (mode == null) startRequestProvider?.invoke() else null
+        machine.dispatch(
+            StudyEvent.UserStartRequested(
+                deck = deckName ?: fallback?.deck,
+                messageId = UUID.randomUUID().toString(),
+                mode = mode ?: fallback?.mode ?: com.studyagent.client.core.models.StudyMode.DUE_REVIEWS.wireValue,
+                config = config ?: fallback?.config
+            )
+        )
     }
 
     override suspend fun submitSpokenAnswer(cardId: String, transcript: String) {

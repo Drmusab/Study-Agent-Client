@@ -9,7 +9,9 @@ import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.ServerMessage
+import com.studyagent.client.core.models.SessionStartConfig
 import com.studyagent.client.core.models.StudyCard
+import com.studyagent.client.core.models.StudyMode
 import com.studyagent.client.core.models.StudySession
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.models.VoiceCommand
@@ -61,7 +63,18 @@ interface StudySessionRepository {
     val currentSession: StateFlow<StudySession?>
     val lastRecognizedCommand: Flow<VoiceCommand>
 
-    suspend fun startStudy(deckName: String? = "Toronto Notes")
+    /**
+     * Starts a study session. Deck/mode/config come from the Study Control Center
+     * (§75); `config` is only sent to Protocol v2 servers — v1 agents receive the
+     * backward-compatible deck + mode pair (§76). Passing an already-active state
+     * is rejected by the session state machine, so duplicate taps cannot start a
+     * second session (§24).
+     */
+    suspend fun startStudy(
+        deckName: String? = null,
+        mode: String = StudyMode.DUE_REVIEWS.wireValue,
+        config: SessionStartConfig? = null
+    )
     suspend fun submitSpokenAnswer(cardId: String, transcript: String)
     suspend fun rateCurrentCard(rating: Rating)
     suspend fun requestRepeat()
@@ -355,7 +368,7 @@ class DefaultStudySessionRepository(
             is ServerMessage.SessionStarted -> {
                 val session = StudySession(
                     sessionId = message.sessionId,
-                    deckName = message.deck ?: "Toronto Notes",
+                    deckName = message.deck ?: "Study Session",
                     cardNumber = 0,
                     remainingCards = message.totalCards ?: 0
                 )
@@ -1113,7 +1126,7 @@ class DefaultStudySessionRepository(
                 is VoiceCommand.StopSpeaking -> stopSpeakingNow()
                 is VoiceCommand.Stop, is VoiceCommand.EndSession -> endStudy()
 
-                is VoiceCommand.StartStudy -> startStudy(command.deck ?: "Toronto Notes")
+                is VoiceCommand.StartStudy -> startStudy(command.deck)
                 is VoiceCommand.StatusQuestion -> {
                     val sess = _currentSession.value
                     connectionRepository.send(ClientMessage.RequestSessionStatus(sessionId = sess?.sessionId))
@@ -1167,9 +1180,8 @@ class DefaultStudySessionRepository(
 
     // ------------------------------------------------------------------ study actions
 
-    override suspend fun startStudy(deckName: String?) {
-        val targetDeck = deckName ?: "Toronto Notes"
-        AppLogger.i(tag, "Starting study session for deck: $targetDeck")
+    override suspend fun startStudy(deckName: String?, mode: String, config: SessionStartConfig?) {
+        AppLogger.i(tag, "Starting study session for deck: ${deckName ?: "<server default>"} mode=$mode")
         // Fresh session: the per-card submission window reopens.
         synchronized(submissionLock) {
             pendingRatingConfirmation = null
@@ -1180,8 +1192,9 @@ class DefaultStudySessionRepository(
         _studyState.value = StudyState.Loading("Connecting to study session...")
 
         val startMsg = ClientMessage.StartSession(
-            deck = targetDeck,
-            mode = "review_due"
+            deck = deckName,
+            mode = mode,
+            config = config
         )
         val sent = connectionRepository.send(startMsg)
         if (!sent) {

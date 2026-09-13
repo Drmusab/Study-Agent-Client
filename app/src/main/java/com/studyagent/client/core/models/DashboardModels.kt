@@ -34,9 +34,16 @@ enum class ComponentStatus(val wireValue: String, val displayName: String) {
     UNKNOWN("unknown", "Unknown")
 }
 
-/** Health of one server-side component (Anki, LLM, ...). */
+/**
+ * Health of one server-side component (Anki, LLM, ...).
+ *
+ * [name] identifies the component on the wire ("anki", "llm", "audio", ...).
+ * Older servers may omit it; such entries cannot be attributed and are kept
+ * in [ComponentHealth.extra] instead of being silently mapped.
+ */
 @Serializable
 data class ComponentHealthEntry(
+    val name: String? = null,
     val status: ComponentStatus = ComponentStatus.UNKNOWN,
     val message: String? = null,
     @SerialName("latency_ms")
@@ -51,9 +58,43 @@ data class ComponentHealthEntry(
 data class ComponentHealth(
     val anki: ComponentHealthEntry? = null,
     val llm: ComponentHealthEntry? = null,
+    val audio: ComponentHealthEntry? = null,
     @SerialName("updated_at")
     val updatedAt: String? = null
-)
+) {
+    /** All attributed components, for rendering arbitrary server-reported parts. */
+    val all: List<ComponentHealthEntry>
+        get() = listOfNotNull(anki, llm, audio)
+
+    fun mergedWith(newer: ComponentHealth?): ComponentHealth {
+        if (newer == null) return this
+        return ComponentHealth(
+            anki = newer.anki ?: anki,
+            llm = newer.llm ?: llm,
+            audio = newer.audio ?: audio,
+            updatedAt = newer.updatedAt ?: updatedAt
+        )
+    }
+
+    companion object {
+        private fun ComponentHealthEntry.namedAs(candidate: String): Boolean =
+            name?.trim()?.equals(candidate, ignoreCase = true) == true
+
+        /**
+         * Maps a nameless-legacy-safe list of entries into attributed health.
+         * Entries whose names are not recognized are preserved without attribution.
+         */
+        fun fromEntries(entries: List<ComponentHealthEntry>, updatedAt: String? = null): ComponentHealth {
+            val known = entries.filter { it.name != null }
+            return ComponentHealth(
+                anki = known.firstOrNull { it.namedAs("anki") },
+                llm = known.firstOrNull { it.namedAs("llm") || it.namedAs("ai") || it.namedAs("evaluator") },
+                audio = known.firstOrNull { it.namedAs("audio") },
+                updatedAt = updatedAt
+            )
+        }
+    }
+}
 
 /** A deck as reported by the PC agent (Anki is the source of truth). */
 @Serializable
@@ -273,7 +314,26 @@ data class DashboardSnapshotPayload(
     val aiUsage: AiUsageSummary? = null,
     @SerialName("component_health")
     val componentHealth: ComponentHealth? = null
-)
+) {
+    /**
+     * Panel-scoped merge (§92): a dedicated response (e.g. history) replaces only
+     * its own section and never wipes unrelated snapshot data. Null incoming
+     * sections keep the current value unless [replaceNulls] is set.
+     */
+    fun mergedWith(newer: DashboardSnapshotPayload, replaceNulls: Boolean = false): DashboardSnapshotPayload =
+        DashboardSnapshotPayload(
+            generatedAt = newer.generatedAt ?: if (replaceNulls) null else generatedAt,
+            activeDeck = newer.activeDeck ?: if (replaceNulls) null else activeDeck,
+            today = newer.today,
+            currentSession = newer.currentSession ?: if (replaceNulls) null else currentSession,
+            goal = newer.goal ?: if (replaceNulls) null else goal,
+            recentPerformance = newer.recentPerformance ?: if (replaceNulls) null else recentPerformance,
+            recommendation = newer.recommendation ?: if (replaceNulls) null else recommendation,
+            insight = newer.insight ?: if (replaceNulls) null else insight,
+            aiUsage = newer.aiUsage ?: if (replaceNulls) null else aiUsage,
+            componentHealth = componentHealth.mergedWith(newer.componentHealth)
+        )
+}
 
 /** Range selector shared by history / rating distribution requests. */
 enum class StatsRange(val wireValue: String, val displayName: String) {
