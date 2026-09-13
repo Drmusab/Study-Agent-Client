@@ -25,6 +25,7 @@ import com.studyagent.client.data.repository.DefaultConnectionRepository
 import com.studyagent.client.data.repository.DefaultDiagnosticsRepository
 import com.studyagent.client.data.repository.DefaultStudySessionRepository
 import com.studyagent.client.data.repository.DiagnosticsRepository
+import com.studyagent.client.data.repository.StudySessionMachineRepository
 import com.studyagent.client.data.repository.StudySessionRepository
 
 interface AppContainer {
@@ -93,7 +94,23 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
     }
 
     override val voiceCommandManager: VoiceCommandManager by lazy { VoiceCommandManager() }
+    /**
+     * Hardened machine-backed repository (§151). The legacy [DefaultStudySessionRepository]
+     * remains available for tests and as a migration fallback, but the app's
+     * authoritative session coordinator is now the serialized state machine.
+     */
     override val studySessionRepository: StudySessionRepository by lazy {
+        StudySessionMachineRepository(
+            connectionRepository = connectionRepository,
+            speechOrchestrator = speechOrchestrator,
+            recognitionOrchestrator = recognitionOrchestrator,
+            settingsFlow = preferencesDataStore.settingsFlow,
+            audioRouteManager = audioRouteManager,
+            dispatchers = dispatchers
+        )
+    }
+    /** Legacy repository kept for direct testing and gradual migration. */
+    val legacyStudySessionRepository: StudySessionRepository by lazy {
         DefaultStudySessionRepository(
             connectionRepository = connectionRepository,
             speechOrchestrator = speechOrchestrator,
