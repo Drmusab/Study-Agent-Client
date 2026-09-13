@@ -2,6 +2,10 @@ package com.studyagent.client.data.repository
 
 import com.studyagent.client.core.audio.AudioDeviceInfoModel
 import com.studyagent.client.core.audio.AudioRouteManager
+import com.studyagent.client.core.audio.EffectiveStudyAudioRoute
+import com.studyagent.client.core.audio.PhoneModeMetrics
+import com.studyagent.client.core.audio.StudyAudioAttention
+import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.common.LogEntry
 import com.studyagent.client.core.models.ConnectionState
@@ -10,7 +14,16 @@ import com.studyagent.client.core.voice.stt.RecognitionHealthSnapshot
 import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.core.voice.tts.TtsHealthSnapshot
+import com.studyagent.client.core.audio.AudioRouteSnapshot
+import com.studyagent.client.core.audio.DefaultStudyAudioModeResolver
+import com.studyagent.client.core.audio.StudyAudioMode
+import com.studyagent.client.core.models.AppSettings
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 
 interface DiagnosticsRepository {
     val logs: StateFlow<List<LogEntry>>
@@ -19,6 +32,16 @@ interface DiagnosticsRepository {
     val isHeadsetConnected: StateFlow<Boolean>
     val ttsHealth: StateFlow<TtsHealthSnapshot>
     val recognitionHealth: StateFlow<RecognitionHealthSnapshot>
+
+    /** Effective study audio route — preference vs. what is actually happening (§67/§68). */
+    val studyAudioRoute: StateFlow<EffectiveStudyAudioRoute>
+    val audioRouteAttention: StateFlow<StudyAudioAttention?>
+
+    /** Study-audio rows, shown alongside the recognition rows (§67). */
+    fun studyAudioDiagnosticsRows(): List<Pair<String, String>>
+
+    /** Local Phone Mode counters — counts and timings only, never transcripts (§110/§111). */
+    fun phoneModeMetrics(): PhoneModeMetrics
 
     fun clearLogs()
     fun getFormattedLogsText(): String
@@ -31,7 +54,10 @@ class DefaultDiagnosticsRepository(
     private val connectionRepository: ConnectionRepository,
     private val audioRouteManager: AudioRouteManager,
     speechOrchestrator: SpeechOrchestrator,
-    recognitionOrchestrator: SpeechRecognitionOrchestrator
+    recognitionOrchestrator: SpeechRecognitionOrchestrator,
+    private val studyAudioRouteCoordinator: StudyAudioRouteCoordinator? = null,
+    settingsFlow: Flow<AppSettings>? = null,
+    scope: CoroutineScope? = null
 ) : DiagnosticsRepository {
 
     override val logs: StateFlow<List<LogEntry>> = AppLogger.logsFlow
@@ -41,8 +67,44 @@ class DefaultDiagnosticsRepository(
     override val ttsHealth: StateFlow<TtsHealthSnapshot> = speechOrchestrator.health
     override val recognitionHealth: StateFlow<RecognitionHealthSnapshot> = recognitionOrchestrator.health
 
+    override val studyAudioRoute: StateFlow<EffectiveStudyAudioRoute> =
+        studyAudioRouteCoordinator?.effectiveRoute ?: MutableStateFlow(phoneOnlyRoute)
+    override val audioRouteAttention: StateFlow<StudyAudioAttention?> =
+        studyAudioRouteCoordinator?.attention ?: MutableStateFlow(null)
+
+    /** Latest settings, mirrored for the diagnostics rows that are settings-derived (§67). */
+    private val latestSettings = MutableStateFlow(AppSettings())
+
+    init {
+        val source = settingsFlow
+        val collectorScope = scope
+        if (source != null && collectorScope != null) {
+            collectorScope.launch { source.collect { latestSettings.value = it } }
+        }
+    }
+
+    override fun studyAudioDiagnosticsRows(): List<Pair<String, String>> =
+        (studyAudioRouteCoordinator?.diagnosticsRows() ?: emptyList()) + listOf(
+            // Interaction mode, not a route: hands-free is available on both routes.
+            "Hands-free study" to if (latestSettings.value.handsFreeMode) "On" else "Off",
+            "Auto-play question" to if (latestSettings.value.autoPlayQuestion) "On" else "Off",
+            "Listen for spoken rating" to if (latestSettings.value.listenForSpokenRating) "On" else "Off"
+        )
+
+    override fun phoneModeMetrics(): PhoneModeMetrics =
+        studyAudioRouteCoordinator?.metrics?.metrics?.value ?: PhoneModeMetrics()
+
     override fun clearLogs() {
         AppLogger.clear()
+    }
+
+    private companion object {
+        /** What the app assumes before any device enumeration: a bare, working phone (§71). */
+        val phoneOnlyRoute: EffectiveStudyAudioRoute =
+            DefaultStudyAudioModeResolver().resolve(
+                StudyAudioMode.AUTO,
+                AudioRouteSnapshot.PHONE_ONLY
+            )
     }
 
     /**
@@ -141,6 +203,15 @@ class DefaultDiagnosticsRepository(
                 "timeToReadyMs=${health.metrics.timeToReadyMs}\n"
         )
         sb.append("TTS Last Error: ${health.lastError?.code?.name ?: "none"}\n\n")
+
+        sb.append("--- Study Audio Routing ---\n")
+        for ((label, value) in studyAudioDiagnosticsRows()) {
+            sb.append(label.padEnd(24)).append(value).append("\n")
+        }
+        if (studyAudioRouteCoordinator == null) {
+            sb.append("Study audio routing: unavailable in this build\n")
+        }
+        sb.append("\n")
 
         sb.append("--- Speech Recognition ---\n")
         for ((label, value) in recognitionDiagnosticsRows()) {

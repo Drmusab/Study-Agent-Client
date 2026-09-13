@@ -4,6 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyagent.client.core.audio.AudioDeviceInfoModel
 import com.studyagent.client.core.audio.AudioRouteManager
+import com.studyagent.client.core.audio.EffectiveStudyAudioRoute
+import com.studyagent.client.core.audio.StudyAudioAttention
+import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudySession
@@ -25,7 +28,8 @@ class StudyViewModel(
     private val audioRouteManager: AudioRouteManager,
     private val recognitionOrchestrator: SpeechRecognitionOrchestrator,
     private val speechOrchestrator: SpeechOrchestrator,
-    private val preferencesDataStore: PreferencesDataStore
+    private val preferencesDataStore: PreferencesDataStore,
+    studyAudioRouteCoordinator: StudyAudioRouteCoordinator? = null
 ) : ViewModel() {
 
     val studyState: StateFlow<StudyState> = studySessionRepository.studyState
@@ -33,6 +37,18 @@ class StudyViewModel(
     val connectionState: StateFlow<ConnectionState> = connectionRepository.connectionState
     val activeAudioDevice: StateFlow<AudioDeviceInfoModel> = audioRouteManager.activeOutputDevice
     val isHeadsetConnected: StateFlow<Boolean> = audioRouteManager.isHeadsetConnected
+
+    /** Effective study audio route: preference vs. what is running (§68/§81). */
+    val studyAudioRoute: StateFlow<EffectiveStudyAudioRoute>? = studyAudioRouteCoordinator?.effectiveRoute
+
+    /** Non-null only after an *unexpected* headset loss under the pause policy (§96/§118). */
+    val audioRouteAttention: StateFlow<StudyAudioAttention?>? = studyAudioRouteCoordinator?.attention
+
+    /**
+     * A better route that is waiting for a turn boundary (§41) — e.g. headphones plugged in
+     * mid-question. The UI can offer an explicit immediate switch.
+     */
+    val pendingAudioRoute: StateFlow<EffectiveStudyAudioRoute>? = studyAudioRouteCoordinator?.pendingRoute
 
     /** Full recognition lifecycle — the study screen renders this, not a bare boolean. */
     val recognitionState = recognitionOrchestrator.state
@@ -138,6 +154,37 @@ class StudyViewModel(
     fun onSubmitTextAnswer(cardId: String, text: String) {
         viewModelScope.launch {
             studySessionRepository.submitSpokenAnswer(cardId, text)
+        }
+    }
+
+    // ---------------------------------------------------------------- audio route recovery
+
+    /**
+     * *Continue on phone* after headphones disappeared mid-session (§96/§118). Pins the phone
+     * route and resumes; the current question is repeated rather than resumed mid-sentence.
+     */
+    fun onContinueOnPhone() {
+        studySessionRepository.continueOnPhone()
+    }
+
+    /** *Wait for headphones*: dismiss the prompt. The session stays paused until resumed. */
+    fun onWaitForHeadset() {
+        studySessionRepository.dismissAudioRouteAttention()
+    }
+
+    /** Manual *Use headphones now* (§42): immediate, deliberate route change. */
+    fun onUseHeadsetNow() {
+        studySessionRepository.useHeadsetNow()
+    }
+
+    /**
+     * One-time Phone Mode notice (§31/§66). Persisted only when the user asks not to see it
+     * again — the notice must never become a per-session interruption.
+     */
+    fun acknowledgePhoneAudioNotice(suppressForever: Boolean) {
+        if (!suppressForever) return
+        viewModelScope.launch {
+            preferencesDataStore.updateSettings { it.copy(phoneAudioNoticeAcknowledged = true) }
         }
     }
 }

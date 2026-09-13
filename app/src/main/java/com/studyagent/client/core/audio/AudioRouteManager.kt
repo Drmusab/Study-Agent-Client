@@ -17,6 +17,7 @@ enum class InputRouteKind {
     WIRED_HEADSET,
     USB_HEADSET,
     BUILTIN_MIC,
+    SYSTEM_SELECTED,
     UNKNOWN
 }
 
@@ -39,6 +40,16 @@ data class InputRouteInfo(
 
     companion object {
         val UNKNOWN = InputRouteInfo()
+
+        /**
+         * The built-in microphone is a normal, supported study route (§2/§10/§21/§46).
+         * It used to be reported as an untrusted fallback; it is now first-class.
+         */
+        fun builtIn(certain: Boolean) = InputRouteInfo(
+            kind = InputRouteKind.BUILTIN_MIC,
+            label = "Built-in microphone",
+            isCertain = certain
+        )
     }
 }
 
@@ -56,6 +67,12 @@ interface AudioRouteManager {
 
     /** True when a connected device can actually supply a microphone to the recognizer. */
     val hasExternalMicrophone: StateFlow<Boolean>
+
+    /**
+     * Pure device facts for the study-audio policy (§9/§70). Always available: with no
+     * external device this describes the phone (speaker + built-in microphone).
+     */
+    val routeSnapshot: StateFlow<AudioRouteSnapshot>
 
     fun refreshAudioDevices()
     fun release()
@@ -83,7 +100,14 @@ class AndroidAudioRouteManager(
     private val _hasExternalMicrophone = MutableStateFlow(false)
     override val hasExternalMicrophone: StateFlow<Boolean> = _hasExternalMicrophone.asStateFlow()
 
+    // A bare phone is the correct initial description (§71/§90) — it is never "no route".
+    private val _routeSnapshot = MutableStateFlow(AudioRouteSnapshot.PHONE_ONLY)
+    override val routeSnapshot: StateFlow<AudioRouteSnapshot> = _routeSnapshot.asStateFlow()
+
+    private val availableOutputDevices = MutableStateFlow<List<AudioDeviceInfoModel>>(emptyList())
+
     private var deviceCallback: AudioDeviceCallback? = null
+    private var revision: Long = 0L
 
     init {
         registerAudioDeviceCallback()
@@ -112,43 +136,36 @@ class AndroidAudioRouteManager(
 
     override fun refreshAudioDevices() {
         val am = audioManager ?: return
+        val outputs: List<AudioDeviceInfoModel>
         try {
-            val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-            var foundHeadset: AudioDeviceInfoModel? = null
-            var defaultSpeaker: AudioDeviceInfoModel? = null
-
-            for (dev in devices) {
-                val isBt = isBluetoothDevice(dev.type)
-                val isHeadset = isHeadsetDevice(dev.type)
-                val model = AudioDeviceInfoModel(
+            outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { dev ->
+                val deviceClass = classifyOutput(dev.type)
+                AudioDeviceInfoModel(
                     id = dev.id,
-                    name = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) dev.productName.toString() else "Audio Device ${dev.id}",
+                    name = deviceName(dev),
                     typeName = getTypeName(dev.type),
-                    isBluetooth = isBt,
-                    isHeadset = isHeadset,
-                    isMicrophone = dev.isSource
+                    isBluetooth = deviceClass.isBluetooth,
+                    isHeadset = deviceClass.isHeadsetOutput,
+                    isMicrophone = dev.isSource,
+                    deviceClass = deviceClass
                 )
-
-                if (isBt || isHeadset) {
-                    foundHeadset = model
-                    break
-                }
-                if (dev.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER) {
-                    defaultSpeaker = model
-                }
-            }
-
-            if (foundHeadset != null) {
-                _isHeadsetConnected.value = true
-                _activeOutputDevice.value = foundHeadset
-                AppLogger.i(tag, "Active audio route set to Headset: ${foundHeadset.name} (${foundHeadset.typeName})")
-            } else {
-                _isHeadsetConnected.value = false
-                _activeOutputDevice.value = defaultSpeaker ?: AudioDeviceInfoModel.DEFAULT_SPEAKER
-                AppLogger.i(tag, "Active audio route set to Speaker: ${_activeOutputDevice.value.name}")
             }
         } catch (e: Exception) {
             AppLogger.e(tag, "Error querying output devices: ${e.message}", e)
+            return
+        }
+
+        val headset = outputs.firstOrNull { it.deviceClass.isHeadsetOutput }
+        val speaker = outputs.firstOrNull { it.deviceClass == AudioDeviceClass.BUILTIN_SPEAKER }
+
+        _activeOutputDevice.value = headset ?: speaker ?: AudioDeviceInfoModel.DEFAULT_SPEAKER
+        _isHeadsetConnected.value = headset != null
+        availableOutputDevices.value = outputs
+
+        if (headset != null) {
+            AppLogger.i(tag, "Active output route: ${headset.name} (${headset.typeName})")
+        } else {
+            AppLogger.i(tag, "Active output route: ${_activeOutputDevice.value.name}")
         }
 
         refreshInputDevices()
@@ -164,86 +181,133 @@ class AndroidAudioRouteManager(
      */
     private fun refreshInputDevices() {
         val am = audioManager ?: return
+        val inputs: List<AudioDeviceInfoModel>
         try {
-            val inputs = am.getDevices(AudioManager.GET_DEVICES_INPUTS)
-            val models = inputs.map { dev ->
+            inputs = am.getDevices(AudioManager.GET_DEVICES_INPUTS).map { dev ->
+                val deviceClass = classifyInput(dev.type)
                 AudioDeviceInfoModel(
                     id = dev.id,
-                    name = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        dev.productName.toString()
-                    } else {
-                        "Input Device ${dev.id}"
-                    },
+                    name = deviceName(dev),
                     typeName = getTypeName(dev.type),
-                    isBluetooth = isBluetoothDevice(dev.type),
-                    isHeadset = isHeadsetDevice(dev.type),
-                    isMicrophone = dev.isSource
+                    isBluetooth = deviceClass.isBluetooth,
+                    isHeadset = deviceClass.isHeadsetMic,
+                    isMicrophone = dev.isSource,
+                    deviceClass = deviceClass
                 )
             }
-            _availableInputDevices.value = models
-
-            val types = inputs.map { it.type }.toSet()
-            val bleHeadset = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                AudioDeviceInfo.TYPE_BLE_HEADSET in types
-
-            val route = when {
-                AudioDeviceInfo.TYPE_WIRED_HEADSET in types -> InputRouteInfo(
-                    kind = InputRouteKind.WIRED_HEADSET,
-                    label = "Wired headset microphone",
-                    // A wired headset with a mic is unambiguous: Android routes input there.
-                    isCertain = true
-                )
-
-                AudioDeviceInfo.TYPE_USB_HEADSET in types -> InputRouteInfo(
-                    kind = InputRouteKind.USB_HEADSET,
-                    label = "USB headset microphone",
-                    isCertain = true
-                )
-
-                bleHeadset -> InputRouteInfo(
-                    kind = InputRouteKind.BLE_HEADSET,
-                    label = "Bluetooth LE headset microphone",
-                    isCertain = false
-                )
-
-                AudioDeviceInfo.TYPE_BLUETOOTH_SCO in types -> InputRouteInfo(
-                    kind = InputRouteKind.BLUETOOTH_COMMUNICATION,
-                    label = "Bluetooth headset microphone",
-                    // The SCO input exists, but whether the recognizer picked it over the
-                    // built-in mic is not observable from here.
-                    isCertain = false
-                )
-
-                AudioDeviceInfo.TYPE_BUILTIN_MIC in types -> InputRouteInfo(
-                    kind = InputRouteKind.BUILTIN_MIC,
-                    label = "Built-in microphone",
-                    isCertain = types.size == 1
-                )
-
-                else -> InputRouteInfo.UNKNOWN
-            }
-            _likelyInputRoute.value = route
-            _hasExternalMicrophone.value = route.kind != InputRouteKind.BUILTIN_MIC &&
-                route.kind != InputRouteKind.UNKNOWN
-            AppLogger.i(tag, "Likely microphone route: ${route.displayLabel}")
         } catch (e: Exception) {
             AppLogger.e(tag, "Error querying input devices: ${e.message}", e)
+            return
         }
+        _availableInputDevices.value = inputs
+
+        val headsetMic = inputs.firstOrNull { it.deviceClass.isHeadsetMic }
+        val builtInMic = inputs.any { it.deviceClass == AudioDeviceClass.BUILTIN_MIC }
+
+        _likelyInputRoute.value = when (headsetMic?.deviceClass) {
+            AudioDeviceClass.WIRED_HEADSET -> InputRouteInfo(
+                kind = InputRouteKind.WIRED_HEADSET,
+                label = "Wired headset microphone",
+                // A wired headset with a mic is unambiguous: Android routes input there.
+                isCertain = true
+            )
+
+            AudioDeviceClass.USB_HEADSET, AudioDeviceClass.USB_DEVICE -> InputRouteInfo(
+                kind = InputRouteKind.USB_HEADSET,
+                label = "USB headset microphone",
+                isCertain = true
+            )
+
+            AudioDeviceClass.BLE_HEADSET -> InputRouteInfo(
+                kind = InputRouteKind.BLE_HEADSET,
+                label = "Bluetooth LE headset microphone",
+                isCertain = false
+            )
+
+            AudioDeviceClass.BLUETOOTH_SCO -> InputRouteInfo(
+                kind = InputRouteKind.BLUETOOTH_COMMUNICATION,
+                label = "Bluetooth headset microphone",
+                // The SCO input exists, but whether the recognizer picked it over the
+                // built-in mic is not observable from here.
+                isCertain = false
+            )
+
+            else -> if (builtInMic) {
+                InputRouteInfo.builtIn(certain = inputs.size == 1)
+            } else if (inputs.isNotEmpty()) {
+                InputRouteInfo(
+                    kind = InputRouteKind.SYSTEM_SELECTED,
+                    label = "System-selected microphone",
+                    isCertain = false
+                )
+            } else {
+                InputRouteInfo.UNKNOWN
+            }
+        }
+
+        // External-microphone *fact* (kept for Diagnostics/back-compat). Note that nothing in
+        // the study path may require this to be true: the built-in microphone is enough (§11).
+        _hasExternalMicrophone.value = _likelyInputRoute.value.kind != InputRouteKind.BUILTIN_MIC &&
+            _likelyInputRoute.value.kind != InputRouteKind.SYSTEM_SELECTED &&
+            _likelyInputRoute.value.kind != InputRouteKind.UNKNOWN
+
+        revision += 1
+        _routeSnapshot.value = AudioRouteSnapshotFactory.fromDevices(
+            outputs = availableOutputDevices.value,
+            inputs = inputs,
+            revision = revision
+        )
+
+        AppLogger.i(
+            tag,
+            "Likely microphone route: ${_likelyInputRoute.value.displayLabel} " +
+                "(external=${_hasExternalMicrophone.value})"
+        )
     }
 
-    private fun isBluetoothDevice(type: Int): Boolean {
-        return type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-                type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && type == AudioDeviceInfo.TYPE_BLE_HEADSET) ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && type == AudioDeviceInfo.TYPE_BLE_SPEAKER) ||
-                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && type == AudioDeviceInfo.TYPE_BLE_BROADCAST)
+    private fun deviceName(dev: AudioDeviceInfo): String =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            dev.productName?.toString().orEmpty().ifBlank { "Audio Device ${dev.id}" }
+        } else {
+            "Audio Device ${dev.id}"
+        }
+
+    private fun classifyOutput(type: Int): AudioDeviceClass = when (type) {
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> AudioDeviceClass.BLUETOOTH_A2DP
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> AudioDeviceClass.BLUETOOTH_SCO
+        AudioDeviceInfo.TYPE_WIRED_HEADSET -> AudioDeviceClass.WIRED_HEADSET
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> AudioDeviceClass.WIRED_HEADPHONES
+        AudioDeviceInfo.TYPE_USB_HEADSET -> AudioDeviceClass.USB_HEADSET
+        AudioDeviceInfo.TYPE_USB_DEVICE -> AudioDeviceClass.USB_DEVICE
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> AudioDeviceClass.BUILTIN_SPEAKER
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> AudioDeviceClass.BUILTIN_EARPIECE
+        AudioDeviceInfo.TYPE_BLE_HEADSET -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceClass.BLE_HEADSET
+        } else {
+            AudioDeviceClass.OTHER
+        }
+        AudioDeviceInfo.TYPE_BLE_SPEAKER -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceClass.BLE_SPEAKER
+        } else {
+            AudioDeviceClass.OTHER
+        }
+        else -> AudioDeviceClass.OTHER
     }
 
-    private fun isHeadsetDevice(type: Int): Boolean {
-        return isBluetoothDevice(type) ||
-                type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-                type == AudioDeviceInfo.TYPE_USB_HEADSET
+    private fun classifyInput(type: Int): AudioDeviceClass = when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_MIC -> AudioDeviceClass.BUILTIN_MIC
+        AudioDeviceInfo.TYPE_WIRED_HEADSET -> AudioDeviceClass.WIRED_HEADSET
+        AudioDeviceInfo.TYPE_USB_DEVICE -> AudioDeviceClass.USB_DEVICE
+        AudioDeviceInfo.TYPE_USB_HEADSET -> AudioDeviceClass.USB_HEADSET
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> AudioDeviceClass.BLUETOOTH_SCO
+        AudioDeviceInfo.TYPE_FM_TUNER -> AudioDeviceClass.OTHER
+        AudioDeviceInfo.TYPE_TELEPHONY -> AudioDeviceClass.TELEPHONY
+        AudioDeviceInfo.TYPE_BLE_HEADSET -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            AudioDeviceClass.BLE_HEADSET
+        } else {
+            AudioDeviceClass.OTHER
+        }
+        else -> AudioDeviceClass.OTHER
     }
 
     private fun getTypeName(type: Int): String {

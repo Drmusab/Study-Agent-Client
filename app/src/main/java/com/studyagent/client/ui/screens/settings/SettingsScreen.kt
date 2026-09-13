@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.voice.stt.AnswerEndpointProfile
 import com.studyagent.client.core.voice.stt.RecognitionCapabilities
@@ -87,6 +88,66 @@ fun SettingsScreen(
                 .padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // ------------------------------------------------ Study audio routing (§34/§79)
+            //
+            // Headphones are an enhancement, never a requirement. Automatic is the default and
+            // studies happily on a bare phone; only "Headphones Required" ever blocks a start.
+            item { SectionHeader("STUDY AUDIO") }
+
+            item {
+                SettingsCard {
+                    Text(
+                        text = "Audio Mode",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary
+                    )
+                    StudyAudioMode.entries.forEach { mode ->
+                        LanguageRadioItem(
+                            title = mode.displayName,
+                            selected = settings.studyAudioMode == mode,
+                            onClick = { viewModel.updateSettings { it.copy(studyAudioMode = mode) } }
+                        )
+                        Text(
+                            text = mode.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextMuted,
+                            modifier = Modifier.padding(start = 8.dp, top = 2.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "When headphones disconnect",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Applies only when headphones disappear mid-session. Starting " +
+                            "without headphones always uses the phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted
+                    )
+                    LanguageRadioItem(
+                        title = "Pause voice study (recommended)",
+                        selected = settings.headsetDisconnectBehavior == HeadsetDisconnectBehavior.PAUSE_SPEECH,
+                        onClick = {
+                            viewModel.updateSettings {
+                                it.copy(headsetDisconnectBehavior = HeadsetDisconnectBehavior.PAUSE_SPEECH)
+                            }
+                        }
+                    )
+                    LanguageRadioItem(
+                        title = "Continue on phone",
+                        selected = settings.headsetDisconnectBehavior == HeadsetDisconnectBehavior.CONTINUE_ON_PHONE,
+                        onClick = {
+                            viewModel.updateSettings {
+                                it.copy(headsetDisconnectBehavior = HeadsetDisconnectBehavior.CONTINUE_ON_PHONE)
+                            }
+                        }
+                    )
+                }
+            }
+
             // ------------------------------------------------ Speech recognition (STT)
             item { SectionHeader("SPEECH RECOGNITION") }
 
@@ -364,28 +425,10 @@ fun SettingsScreen(
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
-                    Text(text = "On Headset Disconnect", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
                     Text(
-                        text = "What happens to speech when Bluetooth disconnects mid-question",
-                        style = MaterialTheme.typography.bodySmall, color = TextSecondary
-                    )
-                    LanguageRadioItem(
-                        title = "Pause speech (recommended)",
-                        selected = settings.headsetDisconnectBehavior == HeadsetDisconnectBehavior.PAUSE_SPEECH,
-                        onClick = {
-                            viewModel.updateSettings {
-                                it.copy(headsetDisconnectBehavior = HeadsetDisconnectBehavior.PAUSE_SPEECH)
-                            }
-                        }
-                    )
-                    LanguageRadioItem(
-                        title = "Continue on phone speaker",
-                        selected = settings.headsetDisconnectBehavior == HeadsetDisconnectBehavior.CONTINUE_ON_PHONE,
-                        onClick = {
-                            viewModel.updateSettings {
-                                it.copy(headsetDisconnectBehavior = HeadsetDisconnectBehavior.CONTINUE_ON_PHONE)
-                            }
-                        }
+                        text = "Headphone disconnect behaviour is configured under STUDY AUDIO.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))

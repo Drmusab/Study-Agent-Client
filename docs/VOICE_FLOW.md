@@ -1,7 +1,10 @@
 # Voice UX, Interaction Flow & Audio Architecture
 
 ## 1. Primary Voice UX Principle
-> **The user should be able to study while wearing headphones without continuously looking at or touching the phone.**
+> **The user should be able to study hands-free without continuously looking at or touching the phone — with headphones, or with nothing but the phone itself.**
+
+Headphones improve privacy and recognition quality; they are never a requirement. The same
+study loop runs on a headset route and on a bare-phone route (`docs/AUDIO_ROUTING.md`).
 
 To achieve this, the entire study loop is orchestrated by a state machine that controls Text-to-Speech playback, speech recognition activation, silence detection, and voice command parsing.
 
@@ -83,12 +86,26 @@ The client includes local, low-latency command parsing that operates before send
 
 ## 4. Audio Routing & Bluetooth Subsystem
 
-### 4.1 Route Detection
+### 4.1 Preference → Effective Route
+* The user chooses a **preference** (`Automatic` — the default, `Prefer Headphones`, `Phone`,
+  `Headphones Required`) in Settings → Study Audio.
+* `StudyAudioModeResolver` combines that preference with a pure `AudioRouteSnapshot` of the
+  devices present and returns an `EffectiveStudyAudioRoute`: output, input, certainty,
+  readiness and acoustic profile. The resolver contains no Android APIs, so the full policy
+  matrix is unit-tested.
+* `EffectiveStudyAudioMode` is **derived** (`HEADSET` / `HYBRID` / `PHONE` / `BLOCKED`) and never
+  persisted, so a stale "on headset" value can never survive a restart.
+* `AUTO` and `HEADSET_PREFERRED` fall back to the phone. Only the explicit, non-default
+  `HEADSET_REQUIRED` can refuse a start — and it says so, recoverably.
+* Output and input are resolved **independently**, which is how hybrid routes work: Bluetooth
+  A2DP headphones for audio plus the phone's built-in microphone for answers.
+
+### 4.2 Route Detection (Android facts)
 * `AudioRouteManager` registers Android's `AudioDeviceCallback` and monitors **both** `AudioManager.GET_DEVICES_OUTPUTS` and `GET_DEVICES_INPUTS`.
 * **Output** routes distinguish:
   - **Bluetooth Headsets** (`TYPE_BLUETOOTH_SCO`, `TYPE_BLUETOOTH_A2DP`, `TYPE_BLE_HEADSET`)
   - **Wired Headsets** (`TYPE_WIRED_HEADSET`, `TYPE_WIRED_HEADPHONES`, `TYPE_USB_HEADSET`)
-  - **Built-in Speaker** (`TYPE_BUILTIN_SPEAKER`)
+  - **Built-in Speaker / Earpiece** (`TYPE_BUILTIN_SPEAKER`, `TYPE_BUILTIN_EARPIECE`)
 * **Input** routes are tracked separately, because an output device says nothing about the
   microphone. `TYPE_BLUETOOTH_A2DP` is playback-only and never appears in the input list,
   whereas `TYPE_BLUETOOTH_SCO` appearing there means the communication profile — and so a
@@ -96,22 +113,53 @@ The client includes local, low-latency command parsing that operates before send
 * The app never claims a Bluetooth microphone is active merely because Bluetooth headphones
   are connected. Where the route is inferred rather than known, `InputRouteInfo.isCertain` is
   `false` and Diagnostics render it as *"… (system-selected)"*.
-* Losing the microphone route during recognition cancels the turn; a half-recognised answer
-  is never submitted.
+* `AudioRouteSnapshotFactory` turns the enumerated devices into the pure snapshot the resolver
+  consumes: A2DP is an output but never proof of a microphone; BLE speakers are excluded
+  entirely because they are not private.
 
-### 4.2 Disconnection Resilience
-* `AudioRouteManager` reports *device presence* via `AudioDeviceCallback`; the speech pipeline treats a drop while speaking per the user setting (default **Pause speech**):
-  1. In-flight and queued speech requests are cancelled with a typed `ROUTE_LOST` failure — nothing continues over the loudspeaker by surprise.
-  2. The session remains alive; the study state machine is untouched.
-  3. On reconnect, the interrupted question is repeated once (deterministic), only when hands-free mode is on.
-* `CONTINUE_ON_PHONE` restores the legacy "Android reroutes everything" behavior for users who want it.
+### 4.3 Half-Duplex Handoff (`StudyVoiceTurnGate`)
+* The microphone opens **only** through the turn gate. It requires, in order: voice interaction
+  not paused, a route that is not blocked, a usable microphone, no active or queued speech, an
+  acoustic gap sized for the route, and a still-valid turn afterwards.
+* The **acoustic gap** is route-aware (`AcousticGapPolicy`): headphones keep the user's tuned
+  value (default 350 ms, 150–1200 ms); the phone speaker uses `max(450 ms, value × 1.25)`. The
+  gap is a physical guard, never the mechanism that decides correctness.
+* **Stale gaps are harmless.** Every pending start carries a generation; a skip, pause, end, new
+  card, manual rating or route change invalidates it, so a gap that outlives its turn can never
+  open the microphone.
+* Push-to-talk is the one case where the user explicitly asked to talk, so it may briefly wait
+  (≤600 ms) for the engine to actually stop instead of refusing.
+* **Invariant:** `NOT(TTS active AND STT active)`. There is no full-duplex speaker mode.
 
-### 4.3 Speech Pipeline Notes (see docs/TTS_ARCHITECTURE.md for the full model)
-* All speech goes through `SpeechOrchestrator` as structured `SpeechRequest`s with purposes, priorities and queue policies; results are `Completed / Cancelled / Failed` delivered exactly once.
-* The TTS→STT transition is governed by `VoiceHandoffController`: Completed-confirmed end + acoustic gap (default 350 ms, settings-tunable 150–1200 ms) before the microphone opens. There is no fixed sleep anywhere in the loop.
-* Mixed Arabic/English cards are segmented per-language and spoken by the matching installed voice; medical numbers/units/abbreviations are normalized for speech only.
+### 4.4 Phone Mode & Self-Echo Protection
+* Phone Mode is the ordinary route on a bare phone: question and feedback through the speaker,
+  answers through the built-in microphone, hands-free, screen on or off (the foreground service
+  keeps the session alive).
+* The speaker's output leaks into the phone's own microphones, so the handoff adds: completed
+  TTS + drained queue + stable route + acoustic gap + generation-validated start + readiness.
+  "Open the microphone when `onDone` fires" is explicitly **not** the design.
+* A `SelfEchoDetector` flags transcripts that closely match what the app just said. It is
+  **diagnostics only** (`suspected_self_echo`): it never discards a transcript, because a user
+  may legitimately repeat the question's own words, and a feedback sentence containing "Good"
+  must never rate a card by itself (only an explicit rating may reschedule).
+* Phone Mode metrics are local and contain counts, timings and error categories — never
+  transcripts, and nothing is uploaded.
 
-### 4.4 Speech Recognition (STT)
+### 4.5 Disconnection Semantics
+* "Headset lost" means the previously effective **external output device disappeared** — never
+  merely "`isHeadsetConnected == false`". Starting the app without headphones is Phone Mode, not
+  a loss, and produces no event, no prompt and no recovery loop.
+* A loss cancels the live utterance and recognition turn, then applies the configured policy:
+  **Pause voice study** (default) shows a card offering *Continue on phone* / *Wait for
+  headphones*; **Continue on phone** cancels the interrupted turn, resolves Phone Mode and
+  repeats the current question exactly once. *Continue on phone* is a session-scoped hold that
+  is released when headphones return.
+* A headset that appears mid-turn is a **deferred** change: the intent is parked in
+  `pendingRoute` and applied at the next safe boundary, so the output device never changes
+  mid-question. Mode changes the user makes deliberately (Settings, *Use headphones now*) apply
+  immediately and re-issue the current question on the new route.
+
+### 4.6 Speech Recognition (STT)
 * Recognition is **turn-based**, never continuous: the microphone is open only inside an
   explicit answer or rating window.
 * Every turn carries a purpose (`ANSWER`, `RATING`, `COMMAND`, `PUSH_TO_TALK_ANSWER`, …) which

@@ -62,7 +62,7 @@ fun DiagnosticsScreen(
     val logs by viewModel.logs.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
     val audioDevice by viewModel.activeOutputDevice.collectAsState()
-    val isHeadset by viewModel.isHeadsetConnected.collectAsState()
+    val studyAudioRoute by viewModel.studyAudioRoute.collectAsState()
     val ttsHealth by viewModel.ttsHealth.collectAsState()
     val recognitionHealth by viewModel.recognitionHealth.collectAsState()
 
@@ -121,9 +121,10 @@ fun DiagnosticsScreen(
                         Text(text = "SYSTEM STATUS", style = MaterialTheme.typography.labelSmall, color = TextMuted)
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(text = "Connection: ${connectionState.label}", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                        Text(text = "Audio Preference: ${studyAudioRoute.preference.displayName}", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                        Text(text = "Currently using: ${studyAudioRoute.statusLabel}", style = MaterialTheme.typography.bodyMedium, color = AccentTeal)
                         Text(text = "Audio Output: ${audioDevice.name} (${audioDevice.typeName})", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
                         Text(text = "Audio Input: ${recognitionHealth.inputRouteLabel}", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
-                        Text(text = "Headset Active: ${if (isHeadset) "Yes" else "No"}", style = MaterialTheme.typography.bodyMedium, color = AccentTeal)
                     }
                 }
             }
@@ -167,6 +168,48 @@ fun DiagnosticsScreen(
                             text = "Last Error: ${ttsHealth.lastError?.let { "${it.code}: ${it.message}" } ?: "none"}",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (ttsHealth.lastError != null) StatusRed else StatusGreen
+                        )
+                    }
+                }
+            }
+
+            // Study audio routing card (§67): preference, effective mode, output, input,
+            // external headset, acoustic profile, plus local Phone Mode counters.
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(text = "STUDY AUDIO", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                            Text(
+                                text = studyAudioRoute.statusLabelWithIcon,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = AccentTeal
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        viewModel.studyAudioRows().forEach { (label, value) ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(text = label, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                                Text(text = value, style = MaterialTheme.typography.bodySmall, color = TextPrimary)
+                            }
+                        }
+                        val metrics = viewModel.phoneModeMetrics()
+                        Text(
+                            text = "Phone turns=${metrics.phoneTurns} headset turns=${metrics.headsetTurns} " +
+                                "handoff=${if (metrics.avgHandoffLatencyMs < 0) "-" else "${metrics.avgHandoffLatencyMs}ms"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextMuted
                         )
                     }
                 }

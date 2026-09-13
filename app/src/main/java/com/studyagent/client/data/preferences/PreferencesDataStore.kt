@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.ServerProfile
@@ -72,6 +73,11 @@ class PreferencesDataStore(
         val TTS_MEDICAL_PRONUNCIATION = booleanPreferencesKey("tts_medical_pronunciation")
         val TTS_ACOUSTIC_GAP_MS = intPreferencesKey("tts_acoustic_gap_ms")
         val HEADSET_DISCONNECT_BEHAVIOR = stringPreferencesKey("headset_disconnect_behavior")
+
+        // Study audio routing (§77). Absent on existing installs → AUTO, which keeps
+        // headphones-when-available behaviour and never blocks a headset-less user.
+        val STUDY_AUDIO_MODE = stringPreferencesKey("study_audio_mode")
+        val PHONE_AUDIO_NOTICE_ACK = booleanPreferencesKey("phone_audio_notice_acknowledged")
 
         val HANDS_FREE_MODE = booleanPreferencesKey("hands_free_mode")
         val AUTO_PLAY_QUESTION = booleanPreferencesKey("auto_play_question")
@@ -149,6 +155,11 @@ class PreferencesDataStore(
             headsetDisconnectBehavior = parseHeadsetBehavior(
                 prefs[Keys.HEADSET_DISCONNECT_BEHAVIOR]
             ),
+            // Migration §78: no stored value (all existing users) → AUTO. A value written by a
+            // different build that we do not recognise also falls back to AUTO instead of
+            // throwing — a settings file can never brick study.
+            studyAudioMode = StudyAudioMode.fromStorage(prefs[Keys.STUDY_AUDIO_MODE]),
+            phoneAudioNoticeAcknowledged = prefs[Keys.PHONE_AUDIO_NOTICE_ACK] ?: false,
             handsFreeMode = prefs[Keys.HANDS_FREE_MODE] ?: true,
             autoPlayQuestion = prefs[Keys.AUTO_PLAY_QUESTION] ?: true,
             autoPlayFeedback = prefs[Keys.AUTO_PLAY_FEEDBACK] ?: true,
@@ -193,6 +204,8 @@ class PreferencesDataStore(
         prefs[Keys.TTS_MEDICAL_PRONUNCIATION] = s.ttsMedicalPronunciation
         prefs[Keys.TTS_ACOUSTIC_GAP_MS] = s.ttsAcousticGapMs
         prefs[Keys.HEADSET_DISCONNECT_BEHAVIOR] = s.headsetDisconnectBehavior.name
+        prefs[Keys.STUDY_AUDIO_MODE] = s.studyAudioMode.name
+        prefs[Keys.PHONE_AUDIO_NOTICE_ACK] = s.phoneAudioNoticeAcknowledged
         prefs[Keys.HANDS_FREE_MODE] = s.handsFreeMode
         prefs[Keys.AUTO_PLAY_QUESTION] = s.autoPlayQuestion
         prefs[Keys.AUTO_PLAY_FEEDBACK] = s.autoPlayFeedback

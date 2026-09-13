@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -37,14 +38,22 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.studyagent.client.core.audio.EffectiveStudyAudioMode
+import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.ui.components.AudioRouteIndicator
 import com.studyagent.client.ui.components.ConnectionBadge
@@ -74,10 +83,48 @@ fun StudyScreen(
     val studyState by viewModel.studyState.collectAsState()
     val session by viewModel.currentSession.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
-    val audioDevice by viewModel.activeAudioDevice.collectAsState()
-    val isHeadset by viewModel.isHeadsetConnected.collectAsState()
     val isListening by viewModel.isListening.collectAsState()
     val isSpeaking by viewModel.isSpeaking.collectAsState()
+    val studyAudioRoute = viewModel.studyAudioRoute?.collectAsState()?.value
+    val audioRouteAttention = viewModel.audioRouteAttention?.collectAsState()?.value
+    val pendingAudioRoute = viewModel.pendingAudioRoute?.collectAsState()?.value
+    val appSettings = viewModel.appSettings.collectAsState().value
+    var phoneNoticeDismissed by remember { mutableStateOf(false) }
+
+    // One-time education (§31): only when actually running on the phone, only once, and only
+    // after the user has started studying. No blocking dialog in Auto mode.
+    // §31: informational, once, and only when the phone route is a *fallback* — a user who
+    // explicitly picked Phone in Settings does not need to be told what they chose.
+    val showPhoneNotice = !phoneNoticeDismissed &&
+        studyAudioRoute?.effective == EffectiveStudyAudioMode.PHONE &&
+        studyAudioRoute?.preference != StudyAudioMode.PHONE &&
+        appSettings?.phoneAudioNoticeAcknowledged == false &&
+        studyState !is StudyState.Idle
+
+    if (showPhoneNotice) {
+        AlertDialog(
+            onDismissRequest = { phoneNoticeDismissed = true },
+            title = { Text("Using phone audio") },
+            text = {
+                Text(
+                    "No headphones connected. Study Agent will use your phone speaker and " +
+                        "microphone, so you can study with only your phone.\n\n" +
+                        "Phone speaker mode may be audible to people nearby. " +
+                        "Headphones improve privacy and may improve recognition, and you can " +
+                        "connect them at any time."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { phoneNoticeDismissed = true }) { Text("Continue") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    phoneNoticeDismissed = true
+                    viewModel.acknowledgePhoneAudioNotice(suppressForever = true)
+                }) { Text("Don't show again") }
+            }
+        )
+    }
 
     val currentCard = studyState.currentCardOrNull ?: session?.currentCard
     val isPaused = studyState is StudyState.Paused
@@ -99,10 +146,8 @@ fun StudyScreen(
                     connectionState = connectionState,
                     onClick = onNavigateToConnection
                 )
-                AudioRouteIndicator(
-                    audioDevice = audioDevice,
-                    isHeadset = isHeadset
-                )
+                // Effective route (§81) — compact, neutral wording, no error styling.
+                AudioRouteIndicator(route = studyAudioRoute)
             }
         }
     ) { innerPadding ->
@@ -125,6 +170,67 @@ fun StudyScreen(
                     remainingCards = session?.remainingCards ?: 0,
                     state = studyState
                 )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Phone-performance phase (§58): 🔊 Speaking / 🎤 Listening / … — never both,
+                // because the voice loop is half-duplex on every route.
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    PhaseChip(
+                        isSpeaking = isSpeaking,
+                        isListening = isListening || studyState is StudyState.Listening
+                    )
+                    // A headset became available mid-turn (§41/§42): the switch waits for the
+                    // boundary by default, and the user can ask for it now.
+                    if (pendingAudioRoute != null) {
+                        OutlinedButton(onClick = { viewModel.onUseHeadsetNow() }) {
+                            Text("Use headphones now")
+                        }
+                    }
+                }
+
+                // Unexpected headset loss (§96/§118). Only shown when the configured behaviour
+                // is "pause voice study" — Phone Mode itself never raises this.
+                if (audioRouteAttention != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp)) {
+                            Text(
+                                text = "AUDIO ROUTE",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextMuted
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = audioRouteAttention?.message ?: "Audio route changed.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = TextPrimary
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = { viewModel.onContinueOnPhone() },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("Continue on phone") }
+                                OutlinedButton(
+                                    onClick = { viewModel.onWaitForHeadset() },
+                                    modifier = Modifier.weight(1f)
+                                ) { Text("Wait for headphones") }
+                            }
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
@@ -455,4 +561,27 @@ fun StudyScreen(
             }
         }
     }
+}
+
+/**
+ * Explicit phase chip (§58): speaking vs listening, never both. The half-duplex invariant is
+ * enforced in the voice layer; the UI simply refuses to claim something impossible.
+ */
+@Composable
+private fun PhaseChip(
+    isSpeaking: Boolean,
+    isListening: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val (label, tint) = when {
+        isSpeaking -> "🔊 Speaking" to AccentTeal
+        isListening -> "🎤 Listening" to PrimaryBlue
+        else -> "⏸ Idle" to TextMuted
+    }
+    Text(
+        text = label,
+        style = MaterialTheme.typography.labelMedium,
+        color = tint,
+        modifier = modifier.semantics { contentDescription = label }
+    )
 }

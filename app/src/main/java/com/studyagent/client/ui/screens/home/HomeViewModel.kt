@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyagent.client.core.audio.AudioDeviceInfoModel
 import com.studyagent.client.core.audio.AudioRouteManager
+import com.studyagent.client.core.audio.EffectiveStudyAudioRoute
+import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.ServerProfile
 import com.studyagent.client.data.repository.ConnectionRepository
@@ -27,7 +29,8 @@ data class HomeUiState(
 class HomeViewModel(
     private val connectionRepository: ConnectionRepository,
     private val studySessionRepository: StudySessionRepository,
-    private val audioRouteManager: AudioRouteManager
+    private val audioRouteManager: AudioRouteManager,
+    studyAudioRouteCoordinator: StudyAudioRouteCoordinator? = null
 ) : ViewModel() {
 
     val connectionState: StateFlow<ConnectionState> = connectionRepository.connectionState
@@ -36,6 +39,12 @@ class HomeViewModel(
 
     val activeAudioDevice: StateFlow<AudioDeviceInfoModel> = audioRouteManager.activeOutputDevice
     val isHeadsetConnected: StateFlow<Boolean> = audioRouteManager.isHeadsetConnected
+
+    /**
+     * Effective study audio route (§80). The dashboard shows *what the app will actually do*
+     * — headset, headphones + phone mic, or phone — not a raw headset boolean.
+     */
+    val studyAudioRoute: StateFlow<EffectiveStudyAudioRoute>? = studyAudioRouteCoordinator?.effectiveRoute
 
     fun connectToActiveProfile() {
         viewModelScope.launch {

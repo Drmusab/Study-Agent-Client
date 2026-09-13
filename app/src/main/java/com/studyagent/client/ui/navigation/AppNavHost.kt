@@ -35,7 +35,8 @@ fun AppNavHost(
                 HomeViewModel(
                     connectionRepository = container.connectionRepository,
                     studySessionRepository = container.studySessionRepository,
-                    audioRouteManager = container.audioRouteManager
+                    audioRouteManager = container.audioRouteManager,
+                    studyAudioRouteCoordinator = container.studyAudioRouteCoordinator
                 )
             }
             HomeScreen(
@@ -55,7 +56,8 @@ fun AppNavHost(
                     audioRouteManager = container.audioRouteManager,
                     recognitionOrchestrator = container.recognitionOrchestrator,
                     speechOrchestrator = container.speechOrchestrator,
-                    preferencesDataStore = container.preferencesDataStore
+                    preferencesDataStore = container.preferencesDataStore,
+                    studyAudioRouteCoordinator = container.studyAudioRouteCoordinator
                 )
             }
             StudyScreen(

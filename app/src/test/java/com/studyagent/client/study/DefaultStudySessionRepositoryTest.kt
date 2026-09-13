@@ -2,6 +2,7 @@ package com.studyagent.client.study
 
 import com.studyagent.client.core.audio.AudioDeviceInfoModel
 import com.studyagent.client.core.audio.AudioRouteManager
+import com.studyagent.client.core.audio.AudioRouteSnapshot
 import com.studyagent.client.core.audio.InputRouteInfo
 import com.studyagent.client.core.common.DispatcherProvider
 import com.studyagent.client.core.models.AppSettings
@@ -136,6 +137,9 @@ class DefaultStudySessionRepositoryTest {
     private class FakeAudioRouteManager(initialHeadset: Boolean) : AudioRouteManager {
         val headsetFlow = MutableStateFlow(initialHeadset)
         override val isHeadsetConnected: StateFlow<Boolean> = headsetFlow.asStateFlow()
+        override val routeSnapshot: StateFlow<AudioRouteSnapshot> = MutableStateFlow(
+            if (initialHeadset) AudioRouteSnapshot.BLUETOOTH_HEADSET else AudioRouteSnapshot.PHONE_ONLY
+        )
         override val activeOutputDevice: StateFlow<AudioDeviceInfoModel> =
             MutableStateFlow(AudioDeviceInfoModel.DEFAULT_SPEAKER)
         override val availableInputDevices: StateFlow<List<AudioDeviceInfoModel>> =
