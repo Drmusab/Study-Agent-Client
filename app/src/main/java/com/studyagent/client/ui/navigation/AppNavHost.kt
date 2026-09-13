@@ -10,6 +10,8 @@ import androidx.navigation.compose.rememberNavController
 import com.studyagent.client.di.AppContainer
 import com.studyagent.client.ui.screens.connection.ConnectionScreen
 import com.studyagent.client.ui.screens.connection.ConnectionViewModel
+import com.studyagent.client.ui.screens.control.ControlCenterScreen
+import com.studyagent.client.ui.screens.control.ControlCenterViewModel
 import com.studyagent.client.ui.screens.diagnostics.DiagnosticsScreen
 import com.studyagent.client.ui.screens.diagnostics.DiagnosticsViewModel
 import com.studyagent.client.ui.screens.home.HomeScreen
@@ -34,8 +36,10 @@ fun AppNavHost(
             val homeViewModel: HomeViewModel = viewModel {
                 HomeViewModel(
                     connectionRepository = container.connectionRepository,
+                    capabilityStore = container.capabilityStore,
+                    dashboardRepository = container.dashboardRepository,
+                    studyControlRepository = container.studyControlRepository,
                     studySessionRepository = container.studySessionRepository,
-                    audioRouteManager = container.audioRouteManager,
                     studyAudioRouteCoordinator = container.studyAudioRouteCoordinator
                 )
             }
@@ -44,7 +48,25 @@ fun AppNavHost(
                 onNavigateToStudy = { navController.navigate(Screen.Study.route) },
                 onNavigateToConnection = { navController.navigate(Screen.Connection.route) },
                 onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
-                onNavigateToDiagnostics = { navController.navigate(Screen.Diagnostics.route) }
+                onNavigateToDiagnostics = { navController.navigate(Screen.Diagnostics.route) },
+                onNavigateToControl = { navController.navigate(Screen.Control.route) }
+            )
+        }
+
+        composable(Screen.Control.route) {
+            val controlViewModel: ControlCenterViewModel = viewModel {
+                ControlCenterViewModel(
+                    studyControlRepository = container.studyControlRepository,
+                    dashboardRepository = container.dashboardRepository,
+                    capabilityStore = container.capabilityStore,
+                    studySessionRepository = container.studySessionRepository,
+                    preferencesDataStore = container.preferencesDataStore
+                )
+            }
+            ControlCenterScreen(
+                viewModel = controlViewModel,
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToStudy = { navController.navigate(Screen.Study.route) }
             )
         }
 
