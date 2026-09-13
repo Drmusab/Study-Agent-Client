@@ -21,7 +21,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.jsonObject
 
 /** Terminal result of a save attempt. The UI maps this to user-visible states. */
 sealed interface ConfigSaveResult {
@@ -101,7 +105,11 @@ interface StudyControlRepository {
      */
     fun setActiveDeck(deckName: String?)
 
-    /** Authoritative-for-startup configuration: server config when known, else local. */
+    /**
+     * Configuration used by the visible Control Center and Smart Start:
+     * draft -> serverConfig -> localConfig. This intentionally lets Start use
+     * visible unsaved edits; it never silently ignores a user's draft.
+     */
     fun effectiveConfig(): StudyControlConfig
 
     /** Deck/mode/config payload for `start_session`, respecting protocol version. */
@@ -142,6 +150,16 @@ class DefaultStudyControlRepository(
     private val lock = Any()
     private var pendingSave: PendingSave? = null
     private var configRequestInFlight = false
+    private val retiredSaveMessageIds = LinkedHashSet<String>()
+    private val retiredSaveCandidates = LinkedHashSet<StudyControlConfig>()
+
+    // DataStore edits are atomic, but draft/cache persistence is launched from
+    // UI callbacks. Generation checks prevent an older coroutine from winning
+    // after a newer draft has already been produced.
+    private val draftWriteMutex = Mutex()
+    private var draftWriteGeneration = 0L
+    private val localWriteMutex = Mutex()
+    private var localWriteGeneration = 0L
 
     private class PendingSave(
         val messageId: String,
@@ -150,6 +168,27 @@ class DefaultStudyControlRepository(
         /** Config echoed by the ACK, when the server provides one. */
         @Volatile var ackedConfig: StudyControlConfig? = null
     )
+
+    private fun rememberRetiredSaveLocked(messageId: String, candidate: StudyControlConfig) {
+        retiredSaveMessageIds.add(messageId)
+        retiredSaveCandidates.add(candidate)
+        while (retiredSaveMessageIds.size > 32) {
+            retiredSaveMessageIds.remove(retiredSaveMessageIds.first())
+        }
+        while (retiredSaveCandidates.size > 32) {
+            retiredSaveCandidates.remove(retiredSaveCandidates.first())
+        }
+    }
+
+    private fun retireSave(pending: PendingSave) {
+        // Removing the pending entry and recording its retired identity must be
+        // one critical section. Otherwise a late ACK can land in the tiny gap
+        // and be mistaken for an unsolicited server push.
+        synchronized(lock) {
+            if (pendingSave === pending) pendingSave = null
+            rememberRetiredSaveLocked(pending.messageId, pending.candidate)
+        }
+    }
 
     init {
         scope.launch { loadLocalCache() }
@@ -173,18 +212,75 @@ class DefaultStudyControlRepository(
     }
 
     private suspend fun loadLocalCache() {
+        // Config cache and user draft are independent recovery domains. A bad
+        // draft must not hide a valid last-known config, and vice versa.
         try {
-            cacheStorage.readControlConfigCache()?.let { cached ->
-                val config = ProtocolJson.json.decodeFromString(StudyControlConfig.serializer(), cached.json)
-                // Last-known config is display/fallback only until the server speaks (§116).
-                _localConfig.value = config
+            val cached = cacheStorage.readControlConfigCache()
+            if (cached != null &&
+                cached.schemaVersion in ManagementCacheSchema.LEGACY_RAW..ManagementCacheSchema.CONTROL_CONFIG
+            ) {
+                try {
+                    val config = ProtocolJson.json.decodeFromString(
+                        StudyControlConfig.serializer(),
+                        cached.json
+                    )
+                    if (config.validate().isNotEmpty()) {
+                        throw IllegalArgumentException("invalid cached control config")
+                    }
+                    _localConfig.value = config
+                } catch (error: Exception) {
+                    AppLogger.w(tag, "Discarding corrupt local control config cache")
+                    cacheStorage.saveControlConfigCache(null)
+                }
+            } else if (cached != null) {
+                AppLogger.w(tag, "Discarding unsupported control config cache schema=${cached.schemaVersion}")
+                cacheStorage.saveControlConfigCache(null)
             }
-            cacheStorage.readControlDraft()?.let { draftJson ->
-                val draft = ProtocolJson.json.decodeFromString(StudyControlConfig.serializer(), draftJson)
-                _draft.value = draft
+        } catch (error: Exception) {
+            AppLogger.w(tag, "Control config cache unavailable; using model defaults")
+        }
+
+        try {
+            val rawDraft = cacheStorage.readControlDraft()
+            if (!rawDraft.isNullOrBlank()) {
+                val draft = decodeDraft(rawDraft)
+                if (draft != null && draft.validate().isEmpty()) {
+                    _draft.value = draft
+                } else {
+                    // Only the invalid draft is removed. Server/local config
+                    // remains untouched and can still be used for Start.
+                    AppLogger.w(tag, "Discarding corrupt control draft")
+                    cacheStorage.saveControlDraft(null)
+                }
             }
-        } catch (e: Exception) {
-            AppLogger.w(tag, "Failed to load control config cache: ${e.message}")
+        } catch (error: Exception) {
+            AppLogger.w(tag, "Control draft unavailable; preserving authoritative config")
+        }
+    }
+
+    private fun decodeDraft(raw: String): StudyControlConfig? {
+        // A schemaVersion member identifies an envelope. Do not reinterpret a
+        // future/corrupt envelope as a legacy config with all defaults.
+        val isEnvelope = try {
+            ProtocolJson.json.parseToJsonElement(raw).jsonObject.containsKey("schemaVersion")
+        } catch (_: Exception) {
+            false
+        }
+        if (isEnvelope) {
+            return try {
+                val envelope = ProtocolJson.json.decodeFromString<PersistedControlDraft>(raw)
+                if (envelope.schemaVersion !in ManagementCacheSchema.LEGACY_RAW..ManagementCacheSchema.CONTROL_DRAFT) null
+                else envelope.config
+            } catch (_: Exception) {
+                null
+            }
+        }
+        // Legacy installs stored raw StudyControlConfig JSON. It remains a
+        // read-only compatibility path and is upgraded on the next edit.
+        return try {
+            ProtocolJson.json.decodeFromString(StudyControlConfig.serializer(), raw)
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -221,26 +317,51 @@ class DefaultStudyControlRepository(
     }
 
     private fun persistDraft(config: StudyControlConfig?) {
+        val generation = synchronized(lock) {
+            draftWriteGeneration += 1
+            draftWriteGeneration
+        }
         scope.launch {
-            try {
-                val json = config?.let {
-                    ProtocolJson.json.encodeToString(StudyControlConfig.serializer(), it)
+            draftWriteMutex.withLock {
+                if (generation != synchronized(lock) { draftWriteGeneration }) return@withLock
+                try {
+                    val json = config?.let {
+                        ProtocolJson.json.encodeToString(
+                            PersistedControlDraft(
+                                schemaVersion = ManagementCacheSchema.CONTROL_DRAFT,
+                                savedAtEpochMs = clock(),
+                                config = it
+                            )
+                        )
+                    }
+                    cacheStorage.saveControlDraft(json)
+                } catch (error: Exception) {
+                    AppLogger.w(tag, "Failed to persist control draft")
                 }
-                cacheStorage.saveControlDraft(json)
-            } catch (e: Exception) {
-                AppLogger.w(tag, "Failed to persist draft: ${e.message}")
             }
         }
     }
 
     private fun persistLocal(config: StudyControlConfig) {
         _localConfig.value = config
+        val generation = synchronized(lock) {
+            localWriteGeneration += 1
+            localWriteGeneration
+        }
         scope.launch {
-            try {
-                val json = ProtocolJson.json.encodeToString(StudyControlConfig.serializer(), config)
-                cacheStorage.saveControlConfigCache(CachedPayload(json, clock()))
-            } catch (e: Exception) {
-                AppLogger.w(tag, "Failed to persist local config: ${e.message}")
+            localWriteMutex.withLock {
+                if (generation != synchronized(lock) { localWriteGeneration }) return@withLock
+                try {
+                    val json = ProtocolJson.json.encodeToString(
+                        StudyControlConfig.serializer(),
+                        config
+                    )
+                    cacheStorage.saveControlConfigCache(
+                        CachedPayload(json, clock(), ManagementCacheSchema.CONTROL_CONFIG)
+                    )
+                } catch (error: Exception) {
+                    AppLogger.w(tag, "Failed to persist local control config")
+                }
             }
         }
     }
@@ -259,8 +380,10 @@ class DefaultStudyControlRepository(
         if (!caps.supportsV2(AgentCapability.STUDY_CONFIG)) {
             // Protocol v1 fallback: keep behavior locally (§12/§116).
             persistLocal(candidate)
-            _draft.value = null
-            persistDraft(null)
+            if (_draft.value == candidate) {
+                _draft.value = null
+                persistDraft(null)
+            }
             _saveState.value = ConfigSaveState.Saved(clock(), localOnly = true)
             return ConfigSaveResult.SavedLocally
         }
@@ -279,15 +402,16 @@ class DefaultStudyControlRepository(
 
         val sent = connectionRepository.send(message)
         if (!sent) {
-            synchronized(lock) { pendingSave = null }
+            retireSave(pending)
             _saveState.value = ConfigSaveState.Error("Could not reach the Study Agent")
             return ConfigSaveResult.NotConnected
         }
 
         val result = withTimeoutOrNull(saveTimeoutMs) { pending.result.await() }
-        synchronized(lock) {
-            if (pendingSave === pending) pendingSave = null
-        }
+        // A late ACK after timeout/rejection is a response to an already
+        // completed request, not a new server push. Retire every id after the
+        // waiter has completed so duplicate frames cannot mutate local truth.
+        retireSave(pending)
         return when (result) {
             null -> {
                 _saveState.value = ConfigSaveState.Error("Could not confirm settings.", timedOut = true)
@@ -299,8 +423,13 @@ class DefaultStudyControlRepository(
                 val committed = pending.ackedConfig ?: candidate
                 _serverConfig.value = committed
                 persistLocal(committed)
-                _draft.value = null
-                persistDraft(null)
+                // A user may have continued editing while this candidate was
+                // in flight. Only clear the draft that was actually committed;
+                // a newer draft is valuable user work and must survive.
+                if (_draft.value == candidate) {
+                    _draft.value = null
+                    persistDraft(null)
+                }
                 _saveState.value = ConfigSaveState.Saved(clock(), localOnly = false)
                 ConfigSaveResult.Saved
             }
@@ -372,6 +501,11 @@ class DefaultStudyControlRepository(
 
     private fun onConfigUpdated(message: ServerMessage.StudyConfigUpdated) {
         val config = message.config
+        val retired = synchronized(lock) {
+            message.messageId?.let { it in retiredSaveMessageIds } == true ||
+                (message.messageId == null && config != null && config in retiredSaveCandidates)
+        }
+        if (retired) return
         val pending = synchronized(lock) { pendingSave }
         val ackMatchesPending = pending != null &&
             (message.messageId == pending.messageId ||
@@ -393,6 +527,13 @@ class DefaultStudyControlRepository(
 
     private fun onError(message: ServerMessage.ErrorMessage) {
         val pending = synchronized(lock) { pendingSave } ?: return
+        // Protocol v2 correlates errors. A null id is retained only as the
+        // backward-compatible v1/v2 fallback; an unrelated id must not reject a
+        // save that is still waiting for its own ACK.
+        if (message.messageId != null && message.messageId != pending.messageId) {
+            AppLogger.d(tag, "Ignoring uncorrelated config error")
+            return
+        }
         // A rejection ends the save attempt; the draft survives (§52).
         pending.result.complete(ConfigSaveResult.Rejected(message.message))
     }

@@ -1,6 +1,7 @@
 package com.studyagent.client.core.voice.tts
 
 import com.studyagent.client.core.models.AppSettings
+import com.studyagent.client.core.models.AppSettingsPolicy
 
 /** What to do with in-flight speech when the headset disconnects mid-utterance. */
 enum class HeadsetDisconnectBehavior {
@@ -8,7 +9,21 @@ enum class HeadsetDisconnectBehavior {
     PAUSE_SPEECH,
 
     /** Let Android reroute to the phone speaker and keep talking. */
-    CONTINUE_ON_PHONE
+    CONTINUE_ON_PHONE;
+
+    companion object {
+        /** Stable storage contract; Kotlin enum names remain an implementation detail. */
+        fun fromStorage(raw: String?): HeadsetDisconnectBehavior = when (raw?.trim()?.uppercase()) {
+            "CONTINUE_ON_PHONE" -> CONTINUE_ON_PHONE
+            "PAUSE_SPEECH" -> PAUSE_SPEECH
+            else -> PAUSE_SPEECH
+        }
+
+        fun toStorage(value: HeadsetDisconnectBehavior): String = when (value) {
+            PAUSE_SPEECH -> "PAUSE_SPEECH"
+            CONTINUE_ON_PHONE -> "CONTINUE_ON_PHONE"
+        }
+    }
 }
 
 /**
@@ -25,18 +40,18 @@ data class TtsSettings(
     val arabicVoiceId: String? = null,
 
     /** Preferred locales when no explicit voice is selected. */
-    val englishLocale: String = "en-US",
-    val arabicLocale: String = "ar-SA",
+    val englishLocale: String = AppSettingsPolicy.DEFAULT_ENGLISH_LOCALE,
+    val arabicLocale: String = AppSettingsPolicy.DEFAULT_TTS_ARABIC_LOCALE,
 
     /** Prefer voices that do NOT require a network connection. */
     val preferOfflineVoices: Boolean = true,
 
     /** Per-purpose base rates (clamped by the orchestrator before use). */
-    val questionRate: Float = 1.0f,
-    val feedbackRate: Float = 1.05f,
-    val explanationRate: Float = 1.0f,
+    val questionRate: Float = AppSettingsPolicy.DEFAULT_TTS_RATE,
+    val feedbackRate: Float = AppSettingsPolicy.DEFAULT_FEEDBACK_RATE,
+    val explanationRate: Float = AppSettingsPolicy.DEFAULT_TTS_RATE,
 
-    val pitch: Float = 1.0f,
+    val pitch: Float = AppSettingsPolicy.DEFAULT_SPEECH_PITCH,
 
     /** Automatic Arabic/English segmentation of mixed cards. */
     val autoLanguageDetection: Boolean = true,
@@ -56,9 +71,9 @@ data class TtsSettings(
     }
 
     companion object {
-        const val DEFAULT_ACOUSTIC_GAP_MS = 350
-        const val MIN_ACOUSTIC_GAP_MS = 150
-        const val MAX_ACOUSTIC_GAP_MS = 1200
+        const val DEFAULT_ACOUSTIC_GAP_MS = AppSettingsPolicy.DEFAULT_ACOUSTIC_GAP_MS
+        const val MIN_ACOUSTIC_GAP_MS = AppSettingsPolicy.MIN_ACOUSTIC_GAP_MS
+        const val MAX_ACOUSTIC_GAP_MS = AppSettingsPolicy.MAX_ACOUSTIC_GAP_MS
     }
 }
 

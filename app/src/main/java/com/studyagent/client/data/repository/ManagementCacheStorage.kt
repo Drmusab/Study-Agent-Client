@@ -1,27 +1,54 @@
 package com.studyagent.client.data.repository
 
+import com.studyagent.client.core.network.ProtocolJson
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 
 /**
- * A cached JSON payload with the wall-clock time it was saved.
- * The timestamp drives Live/Cached/Stale freshness labels (§14) — cached data
- * must never be presented as live.
+ * A decoded cache payload. schemaVersion=0 means a legacy raw JSON cache from
+ * before envelopes were introduced; repositories may read it once and rewrite it
+ * in the current envelope format.
  */
 data class CachedPayload(
     val json: String,
-    val savedAtEpochMs: Long
+    val savedAtEpochMs: Long,
+    val schemaVersion: Int = 0
+)
+
+object ManagementCacheSchema {
+    const val LEGACY_RAW = 0
+    const val DASHBOARD = 1
+    const val DECKS = 1
+    const val CONTROL_CONFIG = 1
+    const val CONTROL_DRAFT = 1
+}
+
+/** Versioned envelope stored around each optional JSON cache. */
+@Serializable
+data class PersistedCacheEnvelope(
+    val schemaVersion: Int,
+    val savedAtEpochMs: Long,
+    /** JSON payload is kept as a string to avoid coupling the storage layer to model types. */
+    val payload: String
+)
+
+/** Versioned Control Center draft envelope. */
+@Serializable
+data class PersistedControlDraft(
+    val schemaVersion: Int,
+    val savedAtEpochMs: Long,
+    val config: com.studyagent.client.core.models.StudyControlConfig
 )
 
 /**
- * Persistence boundary for the management layer (dashboard + study control).
- *
- * These caches exist purely for UX: they let the dashboard show the last
- * known snapshot while disconnected and let the Control Center recover a
- * draft. The PC Study Agent always remains the source of truth (§16): on any
- * capable connection the server data replaces the cache.
+ * Persistence boundary for management data. Dashboard/deck/config caches are
+ * display/fallback data; a bad one must never affect AppSettings. The Control
+ * draft has a separate accessor because it is user work, not display cache.
  */
 interface ManagementCacheStorage {
     fun observeDashboardCache(): Flow<CachedPayload?>
@@ -36,12 +63,13 @@ interface ManagementCacheStorage {
     suspend fun readControlConfigCache(): CachedPayload?
     suspend fun saveControlConfigCache(payload: CachedPayload?)
 
+    /** Raw string for backward compatibility; repository owns draft envelope decoding. */
     fun observeControlDraft(): Flow<String?>
     suspend fun readControlDraft(): String?
     suspend fun saveControlDraft(json: String?)
 }
 
-/** Production implementation backed by the app's preferences DataStore. */
+/** Production implementation backed by the app's Preferences DataStore. */
 class PreferencesManagementCacheStorage(
     private val preferencesDataStore: PreferencesDataStore
 ) : ManagementCacheStorage {
@@ -50,42 +78,45 @@ class PreferencesManagementCacheStorage(
         combine(
             preferencesDataStore.dashboardCacheJson,
             preferencesDataStore.dashboardCacheSavedAt
-        ) { json, savedAt ->
-            if (json.isNullOrBlank() || savedAt == null) null else CachedPayload(json, savedAt)
-        }
+        ) { json, savedAt -> decodeStoredCache(json, savedAt) }
 
     override suspend fun readDashboardCache(): CachedPayload? = observeDashboardCache().first()
 
     override suspend fun saveDashboardCache(payload: CachedPayload?) {
-        preferencesDataStore.setDashboardCache(payload?.json, payload?.savedAtEpochMs ?: 0L)
+        preferencesDataStore.setDashboardCache(
+            json = payload?.let(::encodeStoredCache),
+            savedAtEpochMs = payload?.savedAtEpochMs ?: 0L
+        )
     }
 
     override fun observeDecksCache(): Flow<CachedPayload?> =
         combine(
             preferencesDataStore.decksCacheJson,
             preferencesDataStore.decksCacheSavedAt
-        ) { json, savedAt ->
-            if (json.isNullOrBlank() || savedAt == null) null else CachedPayload(json, savedAt)
-        }
+        ) { json, savedAt -> decodeStoredCache(json, savedAt) }
 
     override suspend fun readDecksCache(): CachedPayload? = observeDecksCache().first()
 
     override suspend fun saveDecksCache(payload: CachedPayload?) {
-        preferencesDataStore.setDecksCache(payload?.json, payload?.savedAtEpochMs ?: 0L)
+        preferencesDataStore.setDecksCache(
+            json = payload?.let(::encodeStoredCache),
+            savedAtEpochMs = payload?.savedAtEpochMs ?: 0L
+        )
     }
 
     override fun observeControlConfigCache(): Flow<CachedPayload?> =
         combine(
             preferencesDataStore.controlConfigJson,
             preferencesDataStore.controlConfigSavedAt
-        ) { json, savedAt ->
-            if (json.isNullOrBlank() || savedAt == null) null else CachedPayload(json, savedAt)
-        }
+        ) { json, savedAt -> decodeStoredCache(json, savedAt) }
 
     override suspend fun readControlConfigCache(): CachedPayload? = observeControlConfigCache().first()
 
     override suspend fun saveControlConfigCache(payload: CachedPayload?) {
-        preferencesDataStore.setControlConfigCache(payload?.json, payload?.savedAtEpochMs ?: 0L)
+        preferencesDataStore.setControlConfigCache(
+            json = payload?.let(::encodeStoredCache),
+            savedAtEpochMs = payload?.savedAtEpochMs ?: 0L
+        )
     }
 
     override fun observeControlDraft(): Flow<String?> = preferencesDataStore.controlDraftJson
@@ -94,6 +125,35 @@ class PreferencesManagementCacheStorage(
 
     override suspend fun saveControlDraft(json: String?) {
         preferencesDataStore.setControlDraft(json)
+    }
+
+    private fun encodeStoredCache(payload: CachedPayload): String =
+        ProtocolJson.json.encodeToString(
+            PersistedCacheEnvelope(
+                schemaVersion = payload.schemaVersion,
+                savedAtEpochMs = payload.savedAtEpochMs,
+                payload = payload.json
+            )
+        )
+
+    private fun decodeStoredCache(json: String?, separateTimestamp: Long?): CachedPayload? {
+        if (json.isNullOrBlank()) return null
+        return try {
+            val envelope = ProtocolJson.json.decodeFromString<PersistedCacheEnvelope>(json)
+            if (envelope.payload.isBlank()) null
+            else CachedPayload(
+                json = envelope.payload,
+                savedAtEpochMs = envelope.savedAtEpochMs,
+                schemaVersion = envelope.schemaVersion
+            )
+        } catch (_: Exception) {
+            // Pre-envelope installations stored raw payload JSON. Keep that
+            // compatibility path; the repository will validate the model and
+            // rewrite it into an envelope after a successful live response.
+            separateTimestamp?.let {
+                CachedPayload(json = json, savedAtEpochMs = it, schemaVersion = ManagementCacheSchema.LEGACY_RAW)
+            }
+        }
     }
 }
 
@@ -104,10 +164,10 @@ class InMemoryManagementCacheStorage : ManagementCacheStorage {
     private var config: CachedPayload? = null
     private var draft: String? = null
 
-    private val dashboardFlow = kotlinx.coroutines.flow.MutableStateFlow<CachedPayload?>(null)
-    private val decksFlow = kotlinx.coroutines.flow.MutableStateFlow<CachedPayload?>(null)
-    private val configFlow = kotlinx.coroutines.flow.MutableStateFlow<CachedPayload?>(null)
-    private val draftFlow = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    private val dashboardFlow = MutableStateFlow<CachedPayload?>(null)
+    private val decksFlow = MutableStateFlow<CachedPayload?>(null)
+    private val configFlow = MutableStateFlow<CachedPayload?>(null)
+    private val draftFlow = MutableStateFlow<String?>(null)
 
     override fun observeDashboardCache(): Flow<CachedPayload?> = dashboardFlow
     override suspend fun readDashboardCache(): CachedPayload? = dashboard

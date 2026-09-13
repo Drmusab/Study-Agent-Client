@@ -61,6 +61,14 @@ enum class StudyAudioMode {
             if (raw.isNullOrBlank()) return DEFAULT
             return entries.firstOrNull { it.name.equals(raw.trim(), ignoreCase = true) } ?: DEFAULT
         }
+
+        /** Stable wire/storage identifiers; UI labels and Kotlin names may evolve independently. */
+        fun toStorage(mode: StudyAudioMode): String = when (mode) {
+            AUTO -> "AUTO"
+            HEADSET_PREFERRED -> "HEADSET_PREFERRED"
+            PHONE -> "PHONE"
+            HEADSET_REQUIRED -> "HEADSET_REQUIRED"
+        }
     }
 }
 

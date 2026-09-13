@@ -25,6 +25,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
 
 /** Why a dashboard request could not produce data. Every state is actionable in the UI. */
@@ -118,6 +120,13 @@ class DefaultDashboardRepository(
     private var snapshotTimeoutJob: Job? = null
     private var cacheLoaded = false
 
+    // Cache writes are optional persistence, but they must still be ordered: an
+    // older response completing late must not overwrite a newer snapshot.
+    private val snapshotCacheWriteMutex = Mutex()
+    private var snapshotCacheWriteGeneration = 0L
+    private val decksCacheWriteMutex = Mutex()
+    private var decksCacheWriteGeneration = 0L
+
     // -- panel request bookkeeping
     private var decksInFlight = false
     private var outstandingDecksMessageId: String? = null
@@ -170,60 +179,111 @@ class DefaultDashboardRepository(
     // ------------------------------------------------------------------ cache
 
     private suspend fun loadCache() {
+        // Each optional cache is isolated. A malformed dashboard payload must not
+        // prevent decks from loading, and neither can affect AppSettings.
         try {
             val cachedSnapshot = cacheStorage.readDashboardCache()
-            if (cachedSnapshot != null) {
-                val payload = ProtocolJson.json.decodeFromString(
-                    DashboardSnapshotPayload.serializer(),
-                    cachedSnapshot.json
-                )
-                _data.update { current ->
-                    if (current.snapshot != null) current else current.copy(
-                        snapshot = payload,
-                        snapshotUpdatedAtMs = cachedSnapshot.savedAtEpochMs,
-                        snapshotFromCache = true,
-                        activeSession = payload.currentSession
+            if (cachedSnapshot != null &&
+                cachedSnapshot.schemaVersion in ManagementCacheSchema.LEGACY_RAW..ManagementCacheSchema.DASHBOARD
+            ) {
+                try {
+                    val payload = ProtocolJson.json.decodeFromString(
+                        DashboardSnapshotPayload.serializer(),
+                        cachedSnapshot.json
                     )
+                    _data.update { current ->
+                        if (current.snapshot != null) current else current.copy(
+                            snapshot = payload,
+                            snapshotUpdatedAtMs = cachedSnapshot.savedAtEpochMs,
+                            snapshotFromCache = true,
+                            activeSession = payload.currentSession
+                        )
+                    }
+                } catch (error: Exception) {
+                    AppLogger.w(tag, "Discarding corrupt dashboard cache payload")
+                    cacheStorage.saveDashboardCache(null)
                 }
+            } else if (cachedSnapshot != null) {
+                AppLogger.w(tag, "Discarding unsupported dashboard cache schema=${cachedSnapshot.schemaVersion}")
+                cacheStorage.saveDashboardCache(null)
             }
+        } catch (error: Exception) {
+            AppLogger.w(tag, "Dashboard cache unavailable; requesting fresh data")
+        }
+
+        try {
             val cachedDecks = cacheStorage.readDecksCache()
-            if (cachedDecks != null) {
-                val decks = ProtocolJson.json.decodeFromString(
-                    ListSerializer(DeckSummary.serializer()),
-                    cachedDecks.json
-                )
-                _data.update { current ->
-                    if (current.decks.isNotEmpty()) current else current.copy(
-                        decks = decks,
-                        decksUpdatedAtMs = cachedDecks.savedAtEpochMs
+            if (cachedDecks != null &&
+                cachedDecks.schemaVersion in ManagementCacheSchema.LEGACY_RAW..ManagementCacheSchema.DECKS
+            ) {
+                try {
+                    val decks = ProtocolJson.json.decodeFromString(
+                        ListSerializer(DeckSummary.serializer()),
+                        cachedDecks.json
                     )
+                    _data.update { current ->
+                        if (current.decks.isNotEmpty()) current else current.copy(
+                            decks = decks,
+                            decksUpdatedAtMs = cachedDecks.savedAtEpochMs
+                        )
+                    }
+                } catch (error: Exception) {
+                    AppLogger.w(tag, "Discarding corrupt decks cache payload")
+                    cacheStorage.saveDecksCache(null)
                 }
+            } else if (cachedDecks != null) {
+                AppLogger.w(tag, "Discarding unsupported decks cache schema=${cachedDecks.schemaVersion}")
+                cacheStorage.saveDecksCache(null)
             }
-        } catch (e: Exception) {
-            AppLogger.w(tag, "Failed to load dashboard cache: ${e.message}")
+        } catch (error: Exception) {
+            AppLogger.w(tag, "Decks cache unavailable; continuing without cached decks")
         } finally {
             cacheLoaded = true
         }
     }
 
     private fun persistSnapshotCache(payload: DashboardSnapshotPayload) {
+        val generation = synchronized(lock) {
+            snapshotCacheWriteGeneration += 1
+            snapshotCacheWriteGeneration
+        }
         scope.launch {
-            try {
-                val json = ProtocolJson.json.encodeToString(DashboardSnapshotPayload.serializer(), payload)
-                cacheStorage.saveDashboardCache(CachedPayload(json, clock()))
-            } catch (e: Exception) {
-                AppLogger.w(tag, "Failed to persist dashboard cache: ${e.message}")
+            snapshotCacheWriteMutex.withLock {
+                if (generation != synchronized(lock) { snapshotCacheWriteGeneration }) return@withLock
+                try {
+                    val json = ProtocolJson.json.encodeToString(
+                        DashboardSnapshotPayload.serializer(),
+                        payload
+                    )
+                    cacheStorage.saveDashboardCache(
+                        CachedPayload(json, clock(), ManagementCacheSchema.DASHBOARD)
+                    )
+                } catch (error: Exception) {
+                    AppLogger.w(tag, "Failed to persist dashboard cache")
+                }
             }
         }
     }
 
     private fun persistDecksCache(decks: List<DeckSummary>) {
+        val generation = synchronized(lock) {
+            decksCacheWriteGeneration += 1
+            decksCacheWriteGeneration
+        }
         scope.launch {
-            try {
-                val json = ProtocolJson.json.encodeToString(ListSerializer(DeckSummary.serializer()), decks)
-                cacheStorage.saveDecksCache(CachedPayload(json, clock()))
-            } catch (e: Exception) {
-                AppLogger.w(tag, "Failed to persist decks cache: ${e.message}")
+            decksCacheWriteMutex.withLock {
+                if (generation != synchronized(lock) { decksCacheWriteGeneration }) return@withLock
+                try {
+                    val json = ProtocolJson.json.encodeToString(
+                        ListSerializer(DeckSummary.serializer()),
+                        decks
+                    )
+                    cacheStorage.saveDecksCache(
+                        CachedPayload(json, clock(), ManagementCacheSchema.DECKS)
+                    )
+                } catch (error: Exception) {
+                    AppLogger.w(tag, "Failed to persist decks cache")
+                }
             }
         }
     }
