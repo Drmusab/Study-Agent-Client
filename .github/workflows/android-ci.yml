@@ -1,0 +1,218 @@
+name: Android CI
+
+# Quality gates that actually run, on every change that can break them.
+#
+# What this workflow is for (§143-§152):
+#   * a failing unit test, a failing lint check or a build break stops a PR — no `continue-on-error`
+#     on any gate, because a gate that cannot fail is decoration;
+#   * the JVM suite (the bulk of the coverage: state machine, reducer, voice coordination,
+#     reconnection, protocol, privacy) runs in minutes and needs no device;
+#   * the *long* chaos sweep (seeds 100-1000) runs nightly, not on every push, so the fast gate stays
+#     fast while the deep gate still runs deterministically every day;
+#   * instrumented tests run on an emulator in a separate job, on demand and nightly. They are not a
+#     PR gate: an emulator cannot validate Bluetooth routing, TTS engines or real microphones, and
+#     pretending otherwise is how a "green" CI ships a broken study session (see
+#     docs/REAL_DEVICE_TEST_MATRIX.md for what only a real device can prove).
+
+on:
+  push:
+    branches: ["master", "arena/**"]
+  pull_request:
+    branches: ["master"]
+  schedule:
+    # 03:17 UTC nightly: the wide chaos sweep and the instrumented smoke test.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      chaos_full:
+        description: "Run the wide chaos sweep (seeds 100-1000)"
+        type: boolean
+        default: true
+
+concurrency:
+  # A new push to the same ref cancels the previous run: CI minutes are not a diagnostic tool.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=false -Dorg.gradle.workers.max=2"
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  # Gate 1 — the fast gate. This is the one that must never be skipped or soft-failed.
+  # ---------------------------------------------------------------------------------------------
+  unit-tests:
+    name: Unit tests + lint + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          # Writes the dependency/build cache; a cache miss only costs time, never correctness.
+          cache-read-only: ${{ github.ref != 'refs/heads/master' }}
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Unit tests
+        run: ./gradlew --stacktrace testDebugUnitTest
+
+      - name: Lint (fails on errors)
+        run: ./gradlew --stacktrace lint
+
+      - name: Assemble debug
+        run: ./gradlew --stacktrace assembleDebug
+
+      - name: Assemble release
+        # Release is assembled on every PR: it is the only way to catch a debug-only dependency or
+        # a BuildConfig reference that does not exist in release (§150).
+        run: ./gradlew --stacktrace assembleRelease
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-report
+          path: |
+            app/build/reports/tests/testDebugUnitTest/**
+            app/build/test-results/testDebugUnitTest/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: |
+            app/build/reports/lint-results-*.html
+            app/build/reports/lint-results-*.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload APKs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apks
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------------------------
+  # Gate 2 — the deep gate. Deterministic, seeded, long. Nightly and on demand, never on a PR push.
+  # ---------------------------------------------------------------------------------------------
+  chaos-sweep:
+    name: Wide chaos sweep (seeds 100-1000)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Chaos sweep (100-1000 seeds) and endurance suites
+        # The switch is forwarded to the test JVM by app/build.gradle.kts; the seeds themselves are
+        # fixed constants, so a failure found here is reproducible in a developer's checkout with
+        # the same filter and the printed seed.
+        run: |
+          ./gradlew --stacktrace testDebugUnitTest \
+            -Dstudyagent.chaos.full=true \
+            --tests "com.studyagent.client.study.StudyAgentChaosTest" \
+            --tests "com.studyagent.client.study.StudySessionEnduranceTest" \
+            --tests "com.studyagent.client.study.StudySessionSimulationTest" \
+            --tests "com.studyagent.client.study.NetworkChaosTest"
+
+      - name: Upload chaos report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-report
+          path: |
+            app/build/reports/tests/testDebugUnitTest/**
+            app/build/test-results/testDebugUnitTest/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------------------------
+  # Gate 3 — Android-specific behaviour on an emulator. Compose semantics, DataStore on a real
+  # Android runtime, lifecycle. Deliberately NOT a PR gate (see the matrix doc for the reason).
+  # ---------------------------------------------------------------------------------------------
+  instrumented:
+    name: Instrumented tests (emulator)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [30, 34]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run instrumented tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: ./gradlew --stacktrace connectedDebugAndroidTest
+
+      - name: Upload instrumented report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instrumented-report-api${{ matrix.api-level }}
+          path: |
+            app/build/reports/androidTests/connected/**
+            app/build/outputs/androidTest-results/connected/**
+          if-no-files-found: ignore
+          retention-days: 14

@@ -6,8 +6,14 @@ import com.studyagent.client.core.audio.AudioRouteManager
 import com.studyagent.client.core.audio.DefaultStudyAudioModeResolver
 import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.audio.toStudyAudioPreferences
+import com.studyagent.client.BuildConfig
 import com.studyagent.client.core.common.DefaultDispatcherProvider
 import com.studyagent.client.core.common.DispatcherProvider
+import com.studyagent.client.core.diagnostics.AppDiagnostics
+import com.studyagent.client.core.diagnostics.AppPerformanceMetrics
+import com.studyagent.client.core.diagnostics.MemoryProbe
+import com.studyagent.client.core.diagnostics.MemorySample
+import com.studyagent.client.core.diagnostics.PersistenceDiagnostics
 import com.studyagent.client.core.security.AndroidSecureTokenStorage
 import com.studyagent.client.core.security.SecureTokenStorage
 import com.studyagent.client.core.voice.VoiceCommandManager
@@ -31,12 +37,14 @@ import com.studyagent.client.data.repository.DefaultDashboardRepository
 import com.studyagent.client.data.repository.DefaultDiagnosticsRepository
 import com.studyagent.client.data.repository.DefaultStudyControlRepository
 import com.studyagent.client.data.repository.DefaultStudySessionRepository
+import com.studyagent.client.data.repository.DiagnosticsAppInfo
 import com.studyagent.client.data.repository.DiagnosticsRepository
 import com.studyagent.client.data.repository.ManagementCacheStorage
 import com.studyagent.client.data.repository.PreferencesManagementCacheStorage
 import com.studyagent.client.data.repository.StudyControlRepository
 import com.studyagent.client.data.repository.StudySessionMachineRepository
 import com.studyagent.client.data.repository.StudySessionRepository
+import com.studyagent.client.core.network.NetworkStatsRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.map
@@ -68,6 +76,9 @@ interface AppContainer {
 
     /** Study Control Center data layer (§9). */
     val studyControlRepository: StudyControlRepository
+
+    /** Persistence metadata (schema version, cache ages, write errors) for Diagnostics (§64). */
+    val persistenceDiagnostics: PersistenceDiagnostics
 }
 
 /**
@@ -78,6 +89,31 @@ interface AppContainer {
  */
 class DefaultAppContainer(private val context: Context) : AppContainer {
     override val dispatchers: DispatcherProvider by lazy { DefaultDispatcherProvider() }
+
+    /** Heap + PSS. PSS is reported only when the platform actually provides it (§65). */
+    private val androidMemoryProbe = MemoryProbe { atMs ->
+        val runtime = Runtime.getRuntime()
+        val pss = try {
+            val info = android.os.Debug.MemoryInfo()
+            android.os.Debug.getMemoryInfo(info)
+            info.totalPss.toLong() * 1_024L
+        } catch (_: Throwable) {
+            null
+        }
+        MemorySample(
+            usedHeapBytes = runtime.totalMemory() - runtime.freeMemory(),
+            maxHeapBytes = runtime.maxMemory(),
+            pssBytes = pss,
+            atMs = atMs
+        )
+    }
+
+    init {
+        // Android can report PSS; the JVM default cannot. Install the richer probe once, before
+        // any diagnostics snapshot is taken.
+        AppPerformanceMetrics.metrics.memoryProbe = androidMemoryProbe
+    }
+
     override val secureTokenStorage: SecureTokenStorage by lazy { AndroidSecureTokenStorage(context) }
     override val preferencesDataStore: PreferencesDataStore by lazy { PreferencesDataStore(context) }
     override val profileRepository: ProfileRepository by lazy {
@@ -182,7 +218,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             dispatchers = dispatchers,
             audioRouteCoordinator = studyAudioRouteCoordinator,
             // Voice-command starts use the Control Center's live configuration (§75).
-            startRequestProvider = { studyControlRepository.currentStartRequest() }
+            startRequestProvider = { studyControlRepository.currentStartRequest() },
+            // Bounded technical metrics + structured timeline (§51/§57/§67).
+            performance = AppPerformanceMetrics.metrics,
+            timeline = AppDiagnostics.timeline
         )
     }
     /** Legacy repository kept for direct testing and gradual migration. */
@@ -196,6 +235,16 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             dispatchers = dispatchers
         )
     }
+    override val persistenceDiagnostics: PersistenceDiagnostics by lazy {
+        PersistenceDiagnostics(
+            scope = CoroutineScope(SupervisorJob() + dispatchers.default),
+            lastSettingsWriteError = preferencesDataStore.lastSettingsWriteError,
+            dashboardCacheSavedAt = preferencesDataStore.dashboardCacheSavedAt,
+            controlCacheSavedAt = preferencesDataStore.controlConfigSavedAt,
+            controlDraftJson = preferencesDataStore.controlDraftJson
+        )
+    }
+
     override val diagnosticsRepository: DiagnosticsRepository by lazy {
         DefaultDiagnosticsRepository(
             connectionRepository,
@@ -204,7 +253,47 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             recognitionOrchestrator,
             studyAudioRouteCoordinator,
             settingsFlow = preferencesDataStore.settingsFlow,
-            scope = CoroutineScope(SupervisorJob() + dispatchers.default)
+            scope = CoroutineScope(SupervisorJob() + dispatchers.default),
+            performanceMetrics = AppPerformanceMetrics.metrics,
+            timeline = AppDiagnostics.timeline,
+            networkStats = NetworkStatsRegistry.current,
+            capabilityStore = capabilityStore,
+            // The session section reads the machine's own sanitized snapshot (§59) and its
+            // bounded resource inventory (§19) — never the raw card or transcript.
+            sessionDiagnostics = { machineBackedSession?.diagnostics() },
+            machineResources = { machineBackedSession?.resourceSnapshot() },
+            dashboardRepository = dashboardRepository,
+            studyControlRepository = studyControlRepository,
+            persistenceDiagnostics = persistenceDiagnostics,
+            appInfo = { diagnosticsAppInfo() }
+        )
+    }
+
+    /** The machine-backed session repository, when that is the active implementation. */
+    private val machineBackedSession: StudySessionMachineRepository?
+        get() = studySessionRepository as? StudySessionMachineRepository
+
+    /**
+     * §84: version strings and a device *model*. Deliberately no serial number, no advertising
+     * id, no account identifier — enough to reproduce, not enough to identify.
+     */
+    private fun diagnosticsAppInfo(): DiagnosticsAppInfo {
+        val capabilities = capabilityStore.capabilities.value
+        return DiagnosticsAppInfo(
+            appVersion = BuildConfig.VERSION_NAME,
+            buildType = BuildConfig.BUILD_TYPE,
+            androidVersion = try {
+                "Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT})"
+            } catch (_: Throwable) {
+                "unknown"
+            },
+            deviceModel = try {
+                "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim()
+            } catch (_: Throwable) {
+                "unknown"
+            },
+            protocolVersion = capabilities.protocolVersion,
+            serverVersion = capabilities.serverVersion
         )
     }
 }

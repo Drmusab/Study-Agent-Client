@@ -36,9 +36,24 @@ sealed interface StudyEffect {
 }
 
 /**
- * Totally invented but realistic short Utterance ID generator for effects.
+ * Short utterance/effect identity (§14/§104).
+ *
+ * The id only has to be unique *within one process run*: every consumer compares ids it received
+ * earlier in the same run (stale-callback validation, turn ownership). It deliberately contains
+ * no wall clock and no randomness, so two runs of the same event sequence produce the same ids —
+ * which is what makes a seeded chaos run reproducible (§148).
+ *
+ * `System.nanoTime()` used to be part of the id. Besides being nondeterministic, it made the ids
+ * unsortable and unreadable in a failure report for no benefit.
  */
 object EffectIds {
     private var counter = 0L
-    fun next(prefix: String): String = synchronized(this) { "${prefix}-${++counter}-${System.nanoTime()}" }
+
+    fun next(prefix: String): String = synchronized(this) { "${prefix}-${++counter}" }
+
+    /** Test hook: returns the generator to a known state so ids are comparable across tests. */
+    fun resetForTests() = synchronized(this) { counter = 0L }
+
+    /** How many ids have been handed out — used by leak assertions in long simulations. */
+    val issued: Long get() = synchronized(this) { counter }
 }

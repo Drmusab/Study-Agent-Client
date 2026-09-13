@@ -48,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -542,6 +543,7 @@ fun StudyScreen(
                         onClick = {
                             if (isPaused) viewModel.onResumeSession() else viewModel.onPauseSession()
                         },
+                        modifier = Modifier.testTag(StudyScreenTags.PAUSE_TOGGLE),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, contentDescription = null)
@@ -551,6 +553,7 @@ fun StudyScreen(
 
                     OutlinedButton(
                         onClick = { viewModel.onEndSession() },
+                        modifier = Modifier.testTag(StudyScreenTags.END_SESSION),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(Icons.Default.Stop, contentDescription = null, tint = StatusRed)
@@ -561,6 +564,16 @@ fun StudyScreen(
             }
         }
     }
+}
+
+/**
+ * Semantics tags for the study controls (§141). Only the instrumented tests read them; the
+ * visible labels stay the source of truth for users and for accessibility.
+ */
+object StudyScreenTags {
+    const val PHASE_CHIP = "study_phase_chip"
+    const val PAUSE_TOGGLE = "study_pause_toggle"
+    const val END_SESSION = "study_end_session"
 }
 
 /**
@@ -582,6 +595,8 @@ private fun PhaseChip(
         text = label,
         style = MaterialTheme.typography.labelMedium,
         color = tint,
-        modifier = modifier.semantics { contentDescription = label }
+        modifier = modifier
+            .semantics { contentDescription = label }
+            .testTag(StudyScreenTags.PHASE_CHIP)
     )
 }

@@ -3,6 +3,8 @@ package com.studyagent.client.data.repository
 import com.studyagent.client.core.audio.AudioRouteManager
 import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.common.DispatcherProvider
+import com.studyagent.client.core.diagnostics.DiagnosticTimeline
+import com.studyagent.client.core.diagnostics.PerformanceMetrics
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudySession
@@ -43,7 +45,14 @@ class StudySessionMachineRepository(
      * Supplies the Control Center's current start payload (§75) for starts that do not
      * carry explicit parameters (e.g. a spoken "start study" command). Nullable in tests.
      */
-    private val startRequestProvider: (() -> StartStudyRequest)? = null
+    private val startRequestProvider: (() -> StartStudyRequest)? = null,
+    /**
+     * Bounded technical metrics (§51/§57). Nullable: a headless test that does not assert on
+     * latency gets no metrics graph; the app passes the shared instance.
+     */
+    private val performance: PerformanceMetrics? = null,
+    /** Bounded structured diagnostic timeline (§67). Nullable for the same reason. */
+    private val timeline: DiagnosticTimeline? = null
 ) : StudySessionRepository {
 
     private val machine = StudySessionMachine(
@@ -53,7 +62,9 @@ class StudySessionMachineRepository(
         settingsFlow = settingsFlow,
         scope = scope,
         clock = clock,
-        audioRouteCoordinator = audioRouteCoordinator
+        audioRouteCoordinator = audioRouteCoordinator,
+        performance = performance,
+        timeline = timeline
     )
 
     override val studyState: StateFlow<StudyState> = machine.studyState
@@ -239,8 +250,15 @@ class StudySessionMachineRepository(
         }
     }
 
-    fun diagnostics(): SessionDiagnosticsSnapshot = machine.machineState.value.toDiagnostics()
+    fun diagnostics(): SessionDiagnosticsSnapshot = machine.diagnosticsSnapshot()
+
+    /** §19: bounded resource inventory, used by the endurance tests and Diagnostics. */
+    fun resourceSnapshot(): MachineResourceCounts = machine.resourceSnapshot()
+
     fun machineState(): StateFlow<SessionMachineState> = machine.machineState
+
+    /** §22/§139: invariant violations observed by the machine — must stay 0 in tests. */
+    fun invariantViolations(): Long = machine.invariantViolationCount
 
     private companion object {
         /** How long *Continue on phone* waits for an in-flight pause to land (§96). */

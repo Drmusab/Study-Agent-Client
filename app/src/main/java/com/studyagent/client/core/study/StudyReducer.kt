@@ -143,7 +143,11 @@ object StudyReducer {
         expectedRating = expectedRating
     )
 
-    private fun speechRequestForQuestion(card: StudyCard): SpeechRequest =
+    /**
+     * The canonical question utterance. Shared with [SessionReconciler], which re-issues it after
+     * a reconnect so the client never claims to be "speaking" a question it is not speaking.
+     */
+    internal fun speechRequestForQuestion(card: StudyCard): SpeechRequest =
         SpeechRequest(
             id = SpeechIds.forPurpose(SpeechPurpose.QUESTION, card.id),
             text = card.question,
@@ -262,16 +266,22 @@ object StudyReducer {
 
         val newPhase = if (event.speak) SessionPhase.SpeakingQuestion else SessionPhase.WaitingForAnswer
 
-        // Preserve ledger but advance turn history; prune old
+        // Preserve ledger but advance turn history; prune old.
+        //
+        // Both structures are explicitly bounded. The ledger only needs the turns that can still
+        // receive a late callback, and the turn history only needs an identity window for
+        // diagnostics — appending forever (the previous behaviour) meant a 1000-card session kept
+        // 1000 turn ids alive for no reader (§21/§137).
         val keepIds = (state.cardTurnHistory.takeLast(20) + newTurn.turnId).toSet()
         val prunedLedger = state.ledger.pruneOld(keepIds)
+        val boundedHistory = (state.cardTurnHistory + newTurn.turnId).takeLast(CARD_TURN_HISTORY_LIMIT)
 
         val newState = state.copy(
             phase = newPhase,
             cardTurn = newTurn,
             session = newSession,
             cardGeneration = newGen,
-            cardTurnHistory = state.cardTurnHistory + newTurn.turnId,
+            cardTurnHistory = boundedHistory,
             pendingTranscript = null,
             pendingRatingConfirmation = null,
             activeSpeechEffectId = effectId,
@@ -1057,5 +1067,16 @@ object StudyReducer {
                 return Transition(newState, emptyList())
             }
         }
+    }
+
+    companion object {
+        /**
+         * How many accepted card-turn ids are retained (§21).
+         *
+         * Sized for identity/race diagnosis — a stale callback is at most a few turns behind — and
+         * deliberately far smaller than a session's card count, so a 1000-card endurance run holds
+         * the same 64 strings as a 10-card one.
+         */
+        const val CARD_TURN_HISTORY_LIMIT = 64
     }
 }

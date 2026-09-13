@@ -36,7 +36,13 @@ class WebSocketAgentConnection(
     private val dispatchers: DispatcherProvider,
     private val customOkHttpClient: OkHttpClient? = null,
     /** Device network preferences remain user intent; runtime reads the latest flow. */
-    private val settingsFlow: Flow<AppSettings> = flowOf(AppSettings())
+    private val settingsFlow: Flow<AppSettings> = flowOf(AppSettings()),
+    /**
+     * Technical counters for the diagnostics screen (§60/§108). Defaults to the process-level
+     * instance so callers that build this class directly keep feeding the diagnostics view;
+     * tests inject their own to stay isolated.
+     */
+    private val stats: NetworkStats = NetworkStatsRegistry.current
 ) : AgentConnection {
 
     private val tag = "WebSocketAgentConn"
@@ -77,6 +83,10 @@ class WebSocketAgentConnection(
         scope.launch {
             settingsFlow.collect { updated ->
                 networkSettings = updated
+                stats.onTransportSettings(
+                    pingIntervalSeconds = updated.pingIntervalSeconds,
+                    maxReconnectAttempts = updated.maxReconnectAttempts
+                )
                 if (!updated.autoReconnect) {
                     reconnectJob?.cancel()
                     if (_connectionState.value is ConnectionState.Reconnecting) {
@@ -91,6 +101,7 @@ class WebSocketAgentConnection(
         isExplicitlyDisconnected = false
         connectionProfile = profile
         reconnectController.reset()
+        stats.onConnecting(profile.name, profile.host, profile.port)
         initiateConnection(profile)
     }
 
@@ -120,6 +131,7 @@ class WebSocketAgentConnection(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 AppLogger.i(tag, "WebSocket opened successfully to ${profile.host}:${profile.port}")
                 reconnectController.reset()
+                stats.onConnected(profile.name, profile.host, profile.port)
                 _connectionState.value = ConnectionState.Connected(
                     host = profile.host,
                     port = profile.port,
@@ -142,26 +154,33 @@ class WebSocketAgentConnection(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                AppLogger.d(tag, "Received WS text message: $text")
+                // §83: log the envelope, never the payload. `type` + size is everything a
+                // protocol trace needs and nothing a transcript or token can hide in.
                 val message = ProtocolJson.decodeServerMessage(text)
-                if (message != null) {
-                    if (!ProtocolJson.isProtocolVersionCompatible(message.protocolVersion)) {
-                        AppLogger.w(tag, "Protocol version mismatch: ${message.protocolVersion}")
-                    }
+                if (message == null) {
+                    AppLogger.w(tag, "Unrecognized server frame (type=${ProtocolJson.peekType(text)} bytes=${text.length})")
+                    stats.onProtocolError("unrecognized-frame:${ProtocolJson.peekType(text)}")
+                    return
+                }
+                stats.onMessageReceived(message.type)
+                AppLogger.d(tag, "Received WS message type=${message.type} bytes=${text.length}")
 
-                    if (message is ServerMessage.Pong) {
-                        val latency = if (lastPingTimestamp > 0) System.currentTimeMillis() - lastPingTimestamp else null
-                        val currentState = _connectionState.value
-                        if (currentState is ConnectionState.Connected) {
-                            _connectionState.value = currentState.copy(latencyMs = latency)
-                        }
-                    }
+                if (!ProtocolJson.isProtocolVersionCompatible(message.protocolVersion)) {
+                    AppLogger.w(tag, "Protocol version mismatch: ${message.protocolVersion}")
+                    stats.onProtocolError("version-mismatch:${message.protocolVersion}")
+                }
 
-                    scope.launch {
-                        _incomingMessages.emit(message)
+                if (message is ServerMessage.Pong) {
+                    val latency = if (lastPingTimestamp > 0) System.currentTimeMillis() - lastPingTimestamp else null
+                    stats.onPong(latency)
+                    val currentState = _connectionState.value
+                    if (currentState is ConnectionState.Connected) {
+                        _connectionState.value = currentState.copy(latencyMs = latency)
                     }
-                } else {
-                    AppLogger.w(tag, "Unrecognized server message format: $text")
+                }
+
+                scope.launch {
+                    _incomingMessages.emit(message)
                 }
             }
 
@@ -173,6 +192,7 @@ class WebSocketAgentConnection(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 AppLogger.i(tag, "WebSocket closed code=$code, reason=$reason")
                 stopPingLoop()
+                stats.onDisconnected()
                 if (!isExplicitlyDisconnected) {
                     scheduleReconnect(profile, "Closed by server ($code: $reason)")
                 } else {
@@ -183,6 +203,7 @@ class WebSocketAgentConnection(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 AppLogger.e(tag, "WebSocket failure: ${t.message}, HTTP code: ${response?.code}", t)
                 stopPingLoop()
+                stats.onDisconnected()
 
                 if (response?.code == 401 || response?.code == 403) {
                     _connectionState.value = ConnectionState.AuthenticationFailed("Server returned HTTP ${response.code}")
@@ -213,6 +234,7 @@ class WebSocketAgentConnection(
             }
 
             val delayMs = reconnectController.getNextDelayMs()
+            stats.onReconnecting(reconnectController.currentAttempt, maxAttempts, networkSettings.pingIntervalSeconds)
             AppLogger.i(tag, "Scheduling reconnect attempt ${reconnectController.currentAttempt}/$maxAttempts in ${delayMs}ms...")
             _connectionState.value = ConnectionState.Reconnecting(
                 attempt = reconnectController.currentAttempt,
@@ -238,6 +260,7 @@ class WebSocketAgentConnection(
                 delay(intervalMs)
                 if (isActive && _connectionState.value is ConnectionState.Connected) {
                     lastPingTimestamp = System.currentTimeMillis()
+                    stats.onPingSent()
                     send(ClientMessage.Ping())
                 }
             }
@@ -253,20 +276,27 @@ class WebSocketAgentConnection(
         val ws = activeWebSocket
         if (ws == null || _connectionState.value !is ConnectionState.Connected) {
             AppLogger.w(tag, "Cannot send message: WebSocket is not connected (type: ${message.type})")
+            stats.onSendFailed(message.type)
             return@withContext false
         }
 
         val jsonString = ProtocolJson.encodeClientMessage(message)
-        AppLogger.d(tag, "Sending message type=${message.type}: $jsonString")
+        // §83: the frame itself is not logged. Type + size identifies it without carrying
+        // answers, questions or credentials into the log buffer.
+        AppLogger.d(tag, "Sending message type=${message.type} bytes=${jsonString.length} id=${message.messageId.take(8)}")
         val sent = ws.send(jsonString)
-        if (!sent) {
-            AppLogger.e(tag, "Failed to send WebSocket message frame")
+        if (sent) {
+            stats.onMessageSent(message.type)
+        } else {
+            AppLogger.e(tag, "Failed to send WebSocket message frame (type=${message.type})")
+            stats.onSendFailed(message.type)
         }
         sent
     }
 
     override suspend fun disconnect(reason: String) {
         AppLogger.i(tag, "Explicit disconnect requested: $reason")
+        stats.onDisconnected(reason)
         isExplicitlyDisconnected = true
         reconnectJob?.cancel()
         reconnectJob = null

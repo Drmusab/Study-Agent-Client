@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -30,15 +31,21 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.FilterChip
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyagent.client.core.common.LogLevel
 import com.studyagent.client.ui.theme.AccentTeal
 import com.studyagent.client.ui.theme.DarkBackground
@@ -52,6 +59,9 @@ import com.studyagent.client.ui.theme.TextMuted
 import com.studyagent.client.ui.theme.TextPrimary
 import com.studyagent.client.ui.theme.TextSecondary
 
+/** Semantics tag for the diagnostics list (tests scroll to rows that are not composed yet). */
+const val DIAGNOSTICS_LIST_TEST_TAG = "diagnostics_list"
+
 @Composable
 fun DiagnosticsScreen(
     viewModel: DiagnosticsViewModel,
@@ -59,12 +69,15 @@ fun DiagnosticsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val logs by viewModel.logs.collectAsState()
-    val connectionState by viewModel.connectionState.collectAsState()
-    val audioDevice by viewModel.activeOutputDevice.collectAsState()
-    val studyAudioRoute by viewModel.studyAudioRoute.collectAsState()
-    val ttsHealth by viewModel.ttsHealth.collectAsState()
-    val recognitionHealth by viewModel.recognitionHealth.collectAsState()
+    // §91: long-lived flows are collected only while the screen is resumed, so a backgrounded
+    // Diagnostics screen stops recomposing behind a running study session.
+    val logs by viewModel.logs.collectAsStateWithLifecycle()
+    val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
+    val audioDevice by viewModel.activeOutputDevice.collectAsStateWithLifecycle()
+    val studyAudioRoute by viewModel.studyAudioRoute.collectAsStateWithLifecycle()
+    val ttsHealth by viewModel.ttsHealth.collectAsStateWithLifecycle()
+    val recognitionHealth by viewModel.recognitionHealth.collectAsStateWithLifecycle()
+    var levelFilter by remember { mutableStateOf<LogLevel?>(null) }
 
     Scaffold(
         containerColor = DarkBackground,
@@ -88,16 +101,28 @@ fun DiagnosticsScreen(
                 }
 
                 Row {
+                    // §88: two explicit actions instead of one giant dump — a short summary that
+                    // fits in a chat message, and a detailed export for a real investigation.
                     IconButton(onClick = {
-                        val text = viewModel.getExportText()
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("StudyAgent Logs", text))
-                        Toast.makeText(context, "Logs copied to clipboard", Toast.LENGTH_SHORT).show()
+                        copyToClipboard(context, "StudyAgent Summary", viewModel.getSummaryText())
                     }) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy Logs", tint = AccentTeal)
+                        Icon(
+                            Icons.Default.ContentCopy,
+                            contentDescription = "Copy summary",
+                            tint = AccentTeal
+                        )
+                    }
+                    IconButton(onClick = {
+                        copyToClipboard(context, "StudyAgent Diagnostics", viewModel.getExportText())
+                    }) {
+                        Icon(
+                            Icons.Default.Share,
+                            contentDescription = "Export detailed diagnostics",
+                            tint = AccentTeal
+                        )
                     }
                     IconButton(onClick = { viewModel.clearLogs() }) {
-                        Icon(Icons.Default.Delete, contentDescription = "Clear Logs", tint = TextMuted)
+                        Icon(Icons.Default.Delete, contentDescription = "Clear logs", tint = TextMuted)
                     }
                 }
             }
@@ -107,7 +132,8 @@ fun DiagnosticsScreen(
             modifier = modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 16.dp)
+                .testTag(DIAGNOSTICS_LIST_TEST_TAG),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             // Summary banner
@@ -263,17 +289,100 @@ fun DiagnosticsScreen(
                 }
             }
 
+            // Session identity and turn (§59) — the first thing to look at when a turn stalls.
+            item { DiagnosticsRowsCard("SESSION", viewModel.sessionRows()) }
+
+            // Network + protocol (§60/§61). No token, no raw frame.
+            item { DiagnosticsRowsCard("NETWORK", viewModel.networkRows()) }
+            item { DiagnosticsRowsCard("PROTOCOL", viewModel.protocolRows()) }
+
+            // Performance (§65): p50/p95 per measured family, failure rates with denominators,
+            // queue depths and memory where the platform reports it.
+            item { DiagnosticsRowsCard("PERFORMANCE", viewModel.performanceRows()) }
+
+            item { DiagnosticsRowsCard("DASHBOARD", viewModel.dashboardRows()) }
+            item { DiagnosticsRowsCard("CONTROL CENTER", viewModel.controlRows()) }
+            item { DiagnosticsRowsCard("PERSISTENCE", viewModel.persistenceRows()) }
+
+            // Structured timeline (§67): the ordering evidence for a race.
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(text = "PROTOCOL & VOICE LOGS (${logs.size})", style = MaterialTheme.typography.labelMedium, color = AccentTeal)
+                    Text(
+                        text = "EVENT TIMELINE (${viewModel.timeline().size})",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = AccentTeal
+                    )
+                    IconButton(onClick = { viewModel.clearTimeline() }) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = "Clear event timeline",
+                            tint = TextMuted
+                        )
+                    }
                 }
             }
 
-            items(logs.reversed()) { log ->
+            items(viewModel.timeline().asReversed(), key = { event -> "evt-${event.sequence}" }) { event ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Text(
+                            text = "${event.formattedTime}  [${event.category.label.uppercase()}]  ${event.event}",
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+                            color = TextPrimary
+                        )
+                        if (event.metadata.isNotEmpty()) {
+                            Text(
+                                text = event.metadata.entries.joinToString("  ") { "${it.key}=${it.value}" },
+                                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                                color = TextMuted
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = "LOGS (${logs.size})", style = MaterialTheme.typography.labelMedium, color = AccentTeal)
+                    Row {
+                        FilterChip(
+                            selected = levelFilter == null,
+                            onClick = { levelFilter = null },
+                            label = { Text("All", fontSize = 11.sp) }
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        FilterChip(
+                            selected = levelFilter == LogLevel.ERROR,
+                            onClick = { levelFilter = if (levelFilter == LogLevel.ERROR) null else LogLevel.ERROR },
+                            label = { Text("Errors", fontSize = 11.sp) }
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        FilterChip(
+                            selected = levelFilter == LogLevel.WARN,
+                            onClick = { levelFilter = if (levelFilter == LogLevel.WARN) null else LogLevel.WARN },
+                            label = { Text("Warn", fontSize = 11.sp) }
+                        )
+                    }
+                }
+            }
+
+            val filteredLogs = if (levelFilter == null) logs else logs.filter { it.level == levelFilter }
+
+            // §94: `sequence` is the stable key — a rotating bounded buffer must never rebind a
+            // row to a different message.
+            items(filteredLogs.asReversed(), key = { log -> log.sequence }) { log ->
                 val (badgeColor, badgeText) = when (log.level) {
                     LogLevel.DEBUG -> Pair(TextMuted, "DEBUG")
                     LogLevel.INFO -> Pair(PrimaryBlue, "INFO")
@@ -326,5 +435,54 @@ fun DiagnosticsScreen(
                 Spacer(modifier = Modifier.height(20.dp))
             }
         }
+    }
+}
+
+/**
+ * Generic diagnostics section (§58). Rows are rendered in the order the repository produced them,
+ * so adding a section is a repository change, not a UI change.
+ */
+@Composable
+private fun DiagnosticsRowsCard(title: String, rows: List<Pair<String, String>>) {
+    if (rows.isEmpty()) return
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurface)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(text = title, style = MaterialTheme.typography.labelSmall, color = TextMuted)
+            Spacer(modifier = Modifier.height(6.dp))
+            rows.forEach { (label, value) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = value,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextPrimary,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.End
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Copy helper shared by the summary and detailed export actions (§88). */
+private fun copyToClipboard(context: Context, label: String, text: String) {
+    try {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        Toast.makeText(context, "$label copied", Toast.LENGTH_SHORT).show()
+    } catch (t: Throwable) {
+        Toast.makeText(context, "Clipboard unavailable", Toast.LENGTH_SHORT).show()
     }
 }
