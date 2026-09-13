@@ -84,7 +84,7 @@ AudioDeviceCallback                     StudyAudioRouteCoordinator
 
 ## 6. Tests
 
-### Automated (JVM) — 82 new tests
+### Automated (JVM) — 88 new tests
 
 | Suite | Tests | Proves |
 |---|---|---|
@@ -96,6 +96,7 @@ AudioDeviceCallback                     StudyAudioRouteCoordinator
 | `audio/PhoneModeLoopTest` | 6 | A complete phone turn with no speaker/microphone overlap; the word "Good" inside feedback cannot rate the card (and no network effect leaves the device); a spoken rating in the rating window still works; 100 phone cards with no headset-loss event or recovery loop; 1000 gated turns stay bounded; a headset connecting mid-turn switches only at the boundary |
 | `audio/StudyAudioPreferencesMappingTest` | 6 | An existing install migrates to `AUTO` (never Headphones Required) and keeps its disconnect choice; every persisted mode name round-trips |
 | `study/SpokenCommandRouterTest` | 5 | Hands-free commands reach exactly the same events as the on-screen controls |
+| `study/PhoneModeMachineIntegrationTest` | 6 | The whole loop through the real machine: question spoken → gap → microphone for the answer → answer submitted → feedback spoken → rating window → spoken rating sent to the server, with a speak/listen timeline proving no overlap; headset loss under both policies; deferred headset gain; push-to-talk release |
 
 Also updated in the same area: `tts/VoiceHandoffControllerTest` (route-aware gaps) and
 `study/DefaultStudySessionRepositoryTest` (the audio-route fake now reports a snapshot).

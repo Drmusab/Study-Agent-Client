@@ -206,6 +206,7 @@ There is no "connect headphones to continue" prompt in `AUTO`, `HEADSET_PREFERRE
 | `audio/AcousticGapPolicyTest` | Route-aware gaps, degraded floors, cancelled speech never listens |
 | `audio/SelfEchoAndPhoneMetricsTest` | Echo window, no transcript filtering, privacy-safe metrics, 1000-turn bound |
 | `audio/PhoneModeLoopTest` | Full phone turn without overlap, "Good" in feedback cannot rate, 100 cards without a loss event, 1000 gated turns |
+| `study/PhoneModeMachineIntegrationTest` | The same loop through the real `StudySessionMachine`: speak → silence → listen → rate, a spoken rating reaching the server, both disconnect policies, deferred headset gain, push-to-talk release |
 | `study/SpokenCommandRouterTest` | Hands-free commands reach the same events as the buttons |
 | `audio/StudyAudioPreferencesMappingTest` | Migration: existing installs become AUTO, the old disconnect choice keeps its meaning |
 
