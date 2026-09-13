@@ -153,7 +153,9 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             audioRouteManager,
             speechOrchestrator,
             recognitionOrchestrator,
-            studyAudioRouteCoordinator
+            studyAudioRouteCoordinator,
+            settingsFlow = preferencesDataStore.settingsFlow,
+            scope = CoroutineScope(SupervisorJob() + dispatchers.default)
         )
     }
 }

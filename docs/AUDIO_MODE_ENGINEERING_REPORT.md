@@ -84,29 +84,36 @@ AudioDeviceCallback                     StudyAudioRouteCoordinator
 
 ## 6. Tests
 
-### Automated (JVM)
+### Automated (JVM) — 82 new tests
 
-New suites (50+ tests): `StudyAudioModeResolverTest` (policy matrix, hybrid, output-only,
-migration, labels), `StudyAudioRouteCoordinatorTest` (cold start without a headset produces no
-loss; deferred upgrade; loss semantics under both policies; overrides; generations; diagnostics
-rows), `StudyVoiceTurnGateTest` (half-duplex, stale gap, pause/end during the gap, route change
-during the gap, no-mic/blocked routes, push-to-talk settle),
-`AcousticGapPolicyTest` (route-aware gaps, degraded floors, cancelled speech never listens),
-`SelfEchoAndPhoneMetricsTest` (echo window, similarity, no transcript filtering, privacy-safe
-metrics, 1000-turn bound), `PhoneModeLoopTest` (a full phone turn without overlap, "Good" in
-feedback cannot rate, a spoken rating still works, 100 cards without a headset-loss event or a
-recovery loop, 1000 bounded gated turns, a headset connecting mid-turn only switches at the
-boundary), `SpokenCommandRouterTest` (hands-free commands map onto the same events as the
-buttons).
+| Suite | Tests | Proves |
+|---|---|---|
+| `audio/StudyAudioModeResolverTest` | 16 | The full policy matrix without a device: AUTO + no headset ⇒ PHONE/READY, hybrid for output-only headphones, `OUTPUT_ONLY` is not an error, PHONE never degrades into Headphones Required, HEADSET_REQUIRED blocks, storage migration, neutral labels |
+| `audio/StudyAudioRouteCoordinatorTest` | 15 | Cold start with no headset produces no loss, prompt or metric; 100-revision device churn is silent; a headset appearing is deferred to a safe boundary; a real loss is immediate and raises the prompt only under Pause; preference changes are not losses; *Continue on phone*; *Use headphones now*; generations; diagnostics rows |
+| `voice/StudyVoiceTurnGateTest` | 14 | Half-duplex: the microphone never opens under live or queued speech, a stale gap, a pause, an end, a mid-gap route change or a blocked/no-mic route; push-to-talk may wait a bounded 600 ms; the built-in mic alone is usable |
+| `audio/AcousticGapPolicyTest` | 10 | Headset keeps the configured gap; the phone speaker gets `max(450, ×1.25)` with a 1200 ms cap; degraded paths keep a floor; `Cancelled` never waits or listens |
+| `audio/SelfEchoAndPhoneMetricsTest` | 10 | Echo only inside the 2.5 s window after a ≥4-token prompt, similarity is symmetric and bounded, the detector never invalidates a turn, metrics carry no transcript fields, 1000 turns stay bounded |
+| `audio/PhoneModeLoopTest` | 6 | A complete phone turn with no speaker/microphone overlap; the word "Good" inside feedback cannot rate the card (and no network effect leaves the device); a spoken rating in the rating window still works; 100 phone cards with no headset-loss event or recovery loop; 1000 gated turns stay bounded; a headset connecting mid-turn switches only at the boundary |
+| `audio/StudyAudioPreferencesMappingTest` | 6 | An existing install migrates to `AUTO` (never Headphones Required) and keeps its disconnect choice; every persisted mode name round-trips |
+| `study/SpokenCommandRouterTest` | 5 | Hands-free commands reach exactly the same events as the on-screen controls |
 
-Recommend running: `./gradlew testDebugUnitTest`, then `assembleDebug`, `assembleRelease` and
-`lint` if configured.
+Also updated in the same area: `tts/VoiceHandoffControllerTest` (route-aware gaps) and
+`study/DefaultStudySessionRepositoryTest` (the audio-route fake now reports a snapshot).
+
+Recommended commands, in order:
+
+```
+./gradlew testDebugUnitTest
+./gradlew assembleDebug
+./gradlew assembleRelease
+./gradlew lint          # only if lint is configured for this module
+```
 
 ### Real device (mandatory, still outstanding)
 
 No headless environment can validate speaker coupling or recognizer behaviour. The checklist in
-`docs/AUDIO_ROUTING.md` §9 covers: no headphones at a desk and in hand, screen on/off, quiet and
-noisy rooms, English/Arabic/mixed cards, short and long answers, spoken rating, hint,
+`docs/AUDIO_ROUTING.md` §9 covers: no headphones at a desk and in hand, screen on and off,
+quiet and noisy rooms, English/Arabic/mixed cards, short and long answers, spoken rating, hint,
 explanation, repeat, pause/resume/end, mid-question headset connection, unplug during TTS and
 during STT under both policies, Phone preference with wired headphones attached, output-only
 Bluetooth headphones, and `HEADSET_REQUIRED` refusal. Compare Headset vs Phone metrics (handoff
@@ -153,7 +160,11 @@ Modified: `core/audio/{AudioRouteManager,AudioDeviceInfoModel}.kt`,
   classified as a headset loss (now a normal, immediate route change), and
   `hasUsableMicrophone` used to accept `SYSTEM_SELECTED` as proof of a microphone (now only a
   `READY` route counts).
-* A pre-existing gap unrelated to audio routing remains: the machine-backed repository does not
-  execute voice commands from the answer window, and the legacy repository is the only one that
-  interprets them; `SpokenCommandRouter` now provides the shared mapping the machine uses for
-  rating/command windows.
+* Voice commands are interpreted in the rating/command windows (the machine maps them through
+  `SpokenCommandRouter`, so a spoken rating or "repeat" reaches the same reducer path as the
+  button). The answer window still submits text rather than executing commands, which is the
+  intended safety boundary, not a regression.
+* Push-to-talk was a no-op in the reducer before this change (the legacy repository was the only
+  one that handled it). It now cancels speech, opens the microphone through the turn gate with a
+  bounded 600 ms settle budget, ends the turn with `finishCurrentTurn()` on release, and submits
+  only on the recognizer's terminal result.

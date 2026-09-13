@@ -165,7 +165,7 @@ a user may legitimately repeat the question's own words.
 The stored key is `study_audio_mode`; unknown values migrate to `AUTO` instead of crashing. The
 pre-existing `headsetDisconnectBehavior` key is preserved and keeps its meaning, so an upgrade
 does not silently change an existing user's choice. The one-time Phone Mode notice is stored as
-`phone_audio_notice_ack` and is shown at most once, never before every session.
+`phone_audio_notice_acknowledged` and is shown at most once, never before every session.
 
 **UI**
 
@@ -202,11 +202,12 @@ There is no "connect headphones to continue" prompt in `AUTO`, `HEADSET_PREFERRE
 |---|---|
 | `audio/StudyAudioModeResolverTest` | Full policy matrix, Phone Mode READY, hybrid, output-only, migration |
 | `audio/StudyAudioRouteCoordinatorTest` | Cold start without a headset produces no loss; deferred switch; loss semantics; policies; overrides |
-| `audio/StudyVoiceTurnGateTest` | Half-duplex, stale gap, pause/end/skip during the gap, route change during the gap, PTT settle |
+| `voice/StudyVoiceTurnGateTest` | Half-duplex, stale gap, pause/end/skip during the gap, route change during the gap, PTT settle |
 | `audio/AcousticGapPolicyTest` | Route-aware gaps, degraded floors, cancelled speech never listens |
 | `audio/SelfEchoAndPhoneMetricsTest` | Echo window, no transcript filtering, privacy-safe metrics, 1000-turn bound |
 | `audio/PhoneModeLoopTest` | Full phone turn without overlap, "Good" in feedback cannot rate, 100 cards without a loss event, 1000 gated turns |
 | `study/SpokenCommandRouterTest` | Hands-free commands reach the same events as the buttons |
+| `audio/StudyAudioPreferencesMappingTest` | Migration: existing installs become AUTO, the old disconnect choice keeps its meaning |
 
 ### Real device (mandatory, not a substitute for the above)
 

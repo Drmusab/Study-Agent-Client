@@ -42,7 +42,7 @@ object SpokenCommandRouter {
         VoiceCommand.StopSpeaking -> StudyEvent.UserStopSpeaking
         VoiceCommand.Stop, VoiceCommand.EndSession -> StudyEvent.UserEndRequested(messageId)
 
-        VoiceCommand.StartStudy -> StudyEvent.UserStartRequested(null, messageId)
+        is VoiceCommand.StartStudy -> StudyEvent.UserStartRequested(command.deck, messageId)
 
         // Nothing actionable as a session event: the transcript path owns these.
         VoiceCommand.StatusQuestion,

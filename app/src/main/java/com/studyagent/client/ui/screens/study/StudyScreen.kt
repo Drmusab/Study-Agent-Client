@@ -53,6 +53,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.studyagent.client.core.audio.EffectiveStudyAudioMode
+import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.ui.components.AudioRouteIndicator
 import com.studyagent.client.ui.components.ConnectionBadge
@@ -92,8 +93,11 @@ fun StudyScreen(
 
     // One-time education (§31): only when actually running on the phone, only once, and only
     // after the user has started studying. No blocking dialog in Auto mode.
+    // §31: informational, once, and only when the phone route is a *fallback* — a user who
+    // explicitly picked Phone in Settings does not need to be told what they chose.
     val showPhoneNotice = !phoneNoticeDismissed &&
         studyAudioRoute?.effective == EffectiveStudyAudioMode.PHONE &&
+        studyAudioRoute?.preference != StudyAudioMode.PHONE &&
         appSettings?.phoneAudioNoticeAcknowledged == false &&
         studyState !is StudyState.Idle
 

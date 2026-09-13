@@ -15,6 +15,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 /**
@@ -29,7 +32,7 @@ class StudySessionMachineRepository(
     settingsFlow: Flow<AppSettings>,
     audioRouteManager: AudioRouteManager,
     dispatchers: DispatcherProvider,
-    scope: CoroutineScope = CoroutineScope(SupervisorJob() + dispatchers.default),
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + dispatchers.default),
     clock: () -> Long = System::currentTimeMillis,
     /**
      * Study audio routing policy (§70/§112). Optional so the machine stays constructible in
@@ -66,7 +69,7 @@ class StudySessionMachineRepository(
         if (route != null && !route.canStartVoiceStudy) {
             val reason = route.reason
                 ?: "No usable audio output on this device. Check the audio route in Settings."
-            audioRouteCoordinator.metrics.recordBlockedStart()
+            audioRouteCoordinator?.metrics?.recordBlockedStart()
             machine.dispatch(StudyEvent.VoiceRouteBlocked(reason))
             return
         }
@@ -127,9 +130,24 @@ class StudySessionMachineRepository(
         coordinator.continueOnPhone()
         // Resuming repeats the current question on the newly resolved phone route; the resume
         // path never continues mid-sentence (§38/§96/§118).
-        if (machine.machineState.value.phase is SessionPhase.Paused) {
-            machine.dispatch(StudyEvent.UserResumeRequested(UUID.randomUUID().toString()))
+        val phase = machine.machineState.value.phase
+        when {
+            phase is SessionPhase.Paused -> resumeNow()
+            phase is SessionPhase.Pausing -> scope.launch {
+                // The pause request is still in flight (the loss just happened). Resume as soon
+                // as the server confirms it instead of dropping the user's choice.
+                withTimeoutOrNull(RESUME_AFTER_PAUSE_TIMEOUT_MS) {
+                    machine.machineState.first { it.phase is SessionPhase.Paused }
+                }
+                resumeNow()
+            }
+
+            else -> Unit
         }
+    }
+
+    private fun resumeNow() {
+        machine.dispatch(StudyEvent.UserResumeRequested(UUID.randomUUID().toString()))
     }
 
     override fun useHeadsetNow(): Boolean {
@@ -202,4 +220,9 @@ class StudySessionMachineRepository(
 
     fun diagnostics(): SessionDiagnosticsSnapshot = machine.machineState.value.toDiagnostics()
     fun machineState(): StateFlow<SessionMachineState> = machine.machineState
+
+    private companion object {
+        /** How long *Continue on phone* waits for an in-flight pause to land (§96). */
+        const val RESUME_AFTER_PAUSE_TIMEOUT_MS = 5_000L
+    }
 }

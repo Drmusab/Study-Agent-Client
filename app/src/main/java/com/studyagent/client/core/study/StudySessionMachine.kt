@@ -425,6 +425,7 @@ class StudySessionMachine(
                 val cardId = _machineState.value.currentCardId
                 // Cancel the interrupted turn safely: speech and recognition both stop, the
                 // card is preserved, and nothing resumes mid-sentence (§38/§96/§97).
+                sttGeneration.incrementAndGet()
                 speechOrchestrator.stopSpeech(StopReason.ROUTE_LOST)
                 recognitionOrchestrator.cancelCurrentTurn("input-route-lost")
                 AppLogger.w(tag, "Audio route lost mid-session (policy=${event.policy})")
@@ -456,10 +457,14 @@ class StudySessionMachine(
 
             is StudyAudioRouteEvent.RouteChanged -> {
                 if (!event.atSafeBoundary && isVoicePhase(_machineState.value.phase)) {
-                    // Manual switch (§42/§84): repeat the current question on the new route
+                    // Manual switch (§42/§84): cancel the in-flight utterance and any pending
+                    // microphone start, then repeat the current question on the new route
                     // rather than swapping hardware mid-word.
                     val cardId = _machineState.value.currentCardId
                     if (cardId != null && event.to.generation != event.from.generation) {
+                        sttGeneration.incrementAndGet()
+                        speechOrchestrator.stopSpeech(StopReason.USER)
+                        recognitionOrchestrator.cancelCurrentTurn("route-changed")
                         dispatch(StudyEvent.AudioRouteRestored(cardId))
                     }
                 }
@@ -467,6 +472,15 @@ class StudySessionMachine(
 
             is StudyAudioRouteEvent.RouteBlocked -> {
                 AppLogger.w(tag, "Study audio route blocked: ${event.route.reason ?: "unspecified"}")
+                // A preference that forbids headset-free study while a turn is live must not
+                // keep talking into the room: cancel the turn and report it as a recoverable
+                // problem (§7/§82).
+                if (isVoicePhase(_machineState.value.phase)) {
+                    sttGeneration.incrementAndGet()
+                    speechOrchestrator.stopSpeech(StopReason.USER)
+                    recognitionOrchestrator.cancelCurrentTurn("route-blocked")
+                    dispatch(StudyEvent.VoiceRouteBlocked(event.route.reason ?: "Study audio route unavailable"))
+                }
             }
         }
     }
@@ -553,6 +567,12 @@ class StudySessionMachine(
                             }
                         }
                     }
+                }
+                is StudyEffect.Voice.StopListening -> {
+                    // Push-to-talk release: finish the turn and wait for the recognizer's
+                    // terminal result. Nothing is submitted at the moment of release (§18/§105).
+                    recognitionOrchestrator.finishCurrentTurn()
+                    AppLogger.d(tag, "Effect: StopListening (${effect.reason})")
                 }
                 is StudyEffect.Voice.CancelRecognition -> {
                     // Invalidate any delayed microphone start immediately: the turn this start
