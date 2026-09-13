@@ -110,6 +110,37 @@ class StudyReducerTest {
         assertFalse(r2.accepted)
     }
 
+    @Test fun `rating acknowledgement must match the submitted rating`() {
+        var s = startedState()
+        s = withQuestion(s, "c1")
+        s = StudyReducer.reduce(s, StudyEvent.QuestionSpeechCompleted("c1", s.activeSpeechEffectId!!, true), 0L).newState
+        s = StudyReducer.reduce(s, StudyEvent.UserSubmitAnswer("c1", "ans"), 0L).newState
+        s = StudyReducer.reduce(s, StudyEvent.ServerEvaluationReceived(null, "c1", eval(), false, "e1"), 0L).newState
+        s = StudyReducer.reduce(s, StudyEvent.UserRateCard(Rating.GOOD, "c1"), 0L).newState
+        val mismatch = StudyReducer.reduce(
+            s,
+            StudyEvent.ServerRatingSaved("s1", "c1", Rating.HARD, null, "ack-1"),
+            1L
+        )
+        assertFalse(mismatch.accepted)
+        assertEquals("unexpected-rating-ack", mismatch.rejectionReason)
+        assertEquals(SessionPhase.SubmittingRating, mismatch.newState.phase)
+    }
+
+    @Test fun `answer and rating effects carry turn idempotency identity`() {
+        var s = startedState()
+        s = withQuestion(s, "c1")
+        s = StudyReducer.reduce(s, StudyEvent.QuestionSpeechCompleted("c1", s.activeSpeechEffectId!!, true), 0L).newState
+        val answer = StudyReducer.reduce(s, StudyEvent.UserSubmitAnswer("c1", "ans"), 0L)
+            .effects.filterIsInstance<StudyEffect.Network.Send>().single().message
+        assertEquals(s.cardTurn?.turnId, (answer as com.studyagent.client.core.models.ClientMessage.SubmitAnswer).reviewTurnId)
+        s = StudyReducer.reduce(s, StudyEvent.UserSubmitAnswer("c1", "ans"), 0L).newState
+        s = StudyReducer.reduce(s, StudyEvent.ServerEvaluationReceived(null, "c1", eval(), false, "e1"), 0L).newState
+        val rating = StudyReducer.reduce(s, StudyEvent.UserRateCard(Rating.GOOD, "c1"))
+            .effects.filterIsInstance<StudyEffect.Network.Send>().single().message
+        assertEquals(s.cardTurn?.turnId, (rating as com.studyagent.client.core.models.ClientMessage.RateCard).reviewTurnId)
+    }
+
     @Test fun `rating send fail recovers`() {
         var s = startedState()
         s = withQuestion(s, "c1")

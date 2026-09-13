@@ -3,6 +3,7 @@ package com.studyagent.client.core.study
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.models.ClientMessage
 import com.studyagent.client.core.models.ConnectionState
+import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudyCard
@@ -11,7 +12,9 @@ import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.voice.stt.RecognitionOutcome
 import com.studyagent.client.core.voice.stt.RecognitionTurnResult
 import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
+import com.studyagent.client.core.voice.stt.toSttSettings
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
+import com.studyagent.client.core.voice.tts.toTtsSettings
 import com.studyagent.client.core.voice.tts.SpeechResult
 import com.studyagent.client.core.voice.tts.StopReason
 import com.studyagent.client.data.repository.ConnectionRepository
@@ -26,6 +29,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 /**
@@ -42,6 +48,7 @@ class StudySessionMachine(
     private val connectionRepository: ConnectionRepository,
     private val speechOrchestrator: SpeechOrchestrator,
     private val recognitionOrchestrator: SpeechRecognitionOrchestrator,
+    private val settingsFlow: Flow<AppSettings> = kotlinx.coroutines.flow.flowOf(AppSettings()),
     private val scope: CoroutineScope,
     private val clock: () -> Long = System::currentTimeMillis,
     initialEpoch: Long = 1L
@@ -63,6 +70,7 @@ class StudySessionMachine(
     val lastRecognizedCommand: SharedFlow<com.studyagent.client.core.models.VoiceCommand> = _lastRecognizedCommand.asSharedFlow()
 
     private val timeoutJobs = mutableMapOf<String, Job>()
+    @Volatile private var currentSettings: AppSettings = AppSettings()
 
     private val machineJob: Job
 
@@ -73,6 +81,14 @@ class StudySessionMachine(
             }
         }
         // Observe external async sources and map them to events (never mutate directly).
+        scope.launch {
+            settingsFlow.distinctUntilChanged().collect { settings ->
+                currentSettings = settings
+                // Settings affect only future effects; the reducer remains the owner of phase.
+                speechOrchestrator.updateSettings(settings.toTtsSettings())
+                recognitionOrchestrator.updateSettings(settings.toSttSettings())
+            }
+        }
         observeServerMessages()
         observeConnection()
         observeRecognition()
@@ -238,14 +254,14 @@ class StudySessionMachine(
                     // Use simplified dedup via tag-level var; we store lastSttStart in machine state? Use local map.
                     // For now, directly attempt start via policy factory if settings allow
                     try {
-                        val settings = com.studyagent.client.core.models.AppSettings() // fallback; actual settings injected via executor path
-                        // Note: machine's standalone StartRecognition is best-effort; full settings-aware path is via StudyEffectExecutor
+                        val settings = currentSettings
                         AppLogger.i(tag, "Effect: StartRecognition purpose=${effect.purpose} card=${effect.cardId} id=${effect.effectId}")
-                        // Try to start via recognitionOrchestrator using default policy
                         val factory = com.studyagent.client.core.voice.stt.RecognitionPolicyFactory()
-                        // We need a valid SttSettings; use defaults
-                        val sttSettings = com.studyagent.client.core.voice.stt.SttSettings()
-                        val req = factory.createRequest(purpose = effect.purpose, settings = sttSettings, cardId = effect.cardId).copy(id = effect.effectId)
+                        val req = factory.createRequest(
+                            purpose = effect.purpose,
+                            settings = settings.toSttSettings(),
+                            cardId = effect.cardId
+                        ).copy(id = effect.effectId)
                         val res = recognitionOrchestrator.startRecognition(req)
                         AppLogger.i(tag, "STT start result=$res")
                     } catch (e: Exception) {
