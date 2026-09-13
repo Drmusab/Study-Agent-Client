@@ -41,7 +41,8 @@ sealed interface ClientMessage {
             is RequestAnswer -> "request_answer"
             is SkipCard -> "skip_card"
             is RequestSessionStatus -> "request_session_status"
-                        is RequestDashboard -> "request_dashboard"
+            is RequestSessionSnapshot -> "request_session_snapshot"
+            is RequestDashboard -> "request_dashboard"
             is RequestDecks -> "request_decks"
             is RequestComponentHealth -> "request_component_health"
             is RequestStudyConfig -> "request_study_config"
@@ -129,7 +130,10 @@ sealed interface ClientMessage {
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
         @SerialName("card_id") val cardId: String,
-        @SerialName("text") val text: String
+        @SerialName("text") val text: String,
+        /** v2: idempotency + turn ownership (§97). v1 servers ignore. */
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ClientMessage
 
     @Serializable
@@ -140,7 +144,9 @@ sealed interface ClientMessage {
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
         @SerialName("card_id") val cardId: String,
-        @SerialName("rating") val rating: Rating
+        @SerialName("rating") val rating: Rating,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ClientMessage
 
     @Serializable
@@ -150,7 +156,8 @@ sealed interface ClientMessage {
         @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
-        @SerialName("card_id") val cardId: String? = null
+        @SerialName("card_id") val cardId: String? = null,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null
     ) : ClientMessage
 
     @Serializable
@@ -160,7 +167,8 @@ sealed interface ClientMessage {
         @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
-        @SerialName("card_id") val cardId: String? = null
+        @SerialName("card_id") val cardId: String? = null,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null
     ) : ClientMessage
 
     @Serializable
@@ -170,7 +178,8 @@ sealed interface ClientMessage {
         @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
-        @SerialName("card_id") val cardId: String? = null
+        @SerialName("card_id") val cardId: String? = null,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null
     ) : ClientMessage
 
     @Serializable
@@ -180,7 +189,8 @@ sealed interface ClientMessage {
         @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
-        @SerialName("card_id") val cardId: String? = null
+        @SerialName("card_id") val cardId: String? = null,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null
     ) : ClientMessage
 
     @Serializable
@@ -190,13 +200,24 @@ sealed interface ClientMessage {
         @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp(),
-        @SerialName("card_id") val cardId: String? = null
+        @SerialName("card_id") val cardId: String? = null,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null
     ) : ClientMessage
 
     @Serializable
     @SerialName("request_session_status")
     data class RequestSessionStatus(
         @SerialName("protocol_version") override val protocolVersion: String = "1",
+        @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp()
+    ) : ClientMessage
+
+    /** v2: authoritative snapshot for recovery (§95). v1-compatible. */
+    @Serializable
+    @SerialName("request_session_snapshot")
+    data class RequestSessionSnapshot(
+        @SerialName("protocol_version") override val protocolVersion: String = "2",
         @SerialName("message_id") override val messageId: String = UUID.randomUUID().toString(),
         @SerialName("session_id") override val sessionId: String? = null,
         @SerialName("timestamp") override val timestamp: String = currentIsoTimestamp()
@@ -321,7 +342,9 @@ sealed interface ServerMessage {
             is SessionResumed -> "session_resumed"
             is SessionFinished -> "session_finished"
             is SessionStats -> "session_stats"
-                        is SessionProgress -> "session_progress"
+            is SessionSnapshot -> "session_snapshot"
+            is SessionStatus -> "session_status"
+            is SessionProgress -> "session_progress"
             is Capabilities -> "capabilities"
             is DashboardSnapshotResponse -> "dashboard_snapshot"
             is DeckListResponse -> "deck_list"
@@ -345,7 +368,10 @@ sealed interface ServerMessage {
         @SerialName("session_id") override val sessionId: String,
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("deck") val deck: String? = null,
-        @SerialName("total_cards") val totalCards: Int? = null
+        @SerialName("total_cards") val totalCards: Int? = null,
+        /** v2 optional fields */
+        @SerialName("session_revision") val sessionRevision: Long? = null,
+        @SerialName("supported_versions") val supportedVersions: List<String>? = null
     ) : ServerMessage
 
     @Serializable
@@ -359,7 +385,11 @@ sealed interface ServerMessage {
         @SerialName("question") val question: String,
         @SerialName("card_number") val cardNumber: Int? = null,
         @SerialName("remaining") val remaining: Int? = null,
-        @SerialName("speak") val speak: Boolean = true
+        @SerialName("speak") val speak: Boolean = true,
+        /** v2 turn identity (§97) */
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null,
+        @SerialName("sequence") val sequence: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -376,9 +406,10 @@ sealed interface ServerMessage {
         @SerialName("incorrect_points") val incorrectPoints: List<String> = emptyList(),
         @SerialName("short_feedback") val shortFeedback: String = "",
         @SerialName("suggested_rating") val suggestedRating: Rating? = null,
-        /** Evaluator confidence in percent (0..100); drives auto-rating decisions. */
         @SerialName("confidence") val confidence: Double? = null,
-        @SerialName("speak") val speak: Boolean = true
+        @SerialName("speak") val speak: Boolean = true,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -390,7 +421,9 @@ sealed interface ServerMessage {
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("card_id") val cardId: String? = null,
         @SerialName("hint") val hintText: String,
-        @SerialName("speak") val speak: Boolean = true
+        @SerialName("speak") val speak: Boolean = true,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -402,7 +435,9 @@ sealed interface ServerMessage {
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("card_id") val cardId: String? = null,
         @SerialName("explanation") val explanationText: String,
-        @SerialName("speak") val speak: Boolean = true
+        @SerialName("speak") val speak: Boolean = true,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -414,7 +449,9 @@ sealed interface ServerMessage {
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("card_id") val cardId: String? = null,
         @SerialName("answer") val answerText: String,
-        @SerialName("speak") val speak: Boolean = true
+        @SerialName("speak") val speak: Boolean = true,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -426,7 +463,9 @@ sealed interface ServerMessage {
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("card_id") val cardId: String,
         @SerialName("rating") val rating: Rating,
-        @SerialName("next_interval") val nextInterval: String? = null
+        @SerialName("next_interval") val nextInterval: String? = null,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -435,7 +474,8 @@ sealed interface ServerMessage {
         @SerialName("protocol_version") override val protocolVersion: String? = null,
         @SerialName("message_id") override val messageId: String? = null,
         @SerialName("session_id") override val sessionId: String? = null,
-        @SerialName("timestamp") override val timestamp: String? = null
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -444,7 +484,8 @@ sealed interface ServerMessage {
         @SerialName("protocol_version") override val protocolVersion: String? = null,
         @SerialName("message_id") override val messageId: String? = null,
         @SerialName("session_id") override val sessionId: String? = null,
-        @SerialName("timestamp") override val timestamp: String? = null
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -456,8 +497,8 @@ sealed interface ServerMessage {
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("total_reviewed") val totalReviewed: Int = 0,
         @SerialName("summary") val summary: String? = null,
-        /** Rich server-generated session summary (Protocol v2), when available. */
-        @SerialName("details") val details: SessionSummaryPayload? = null
+        @SerialName("details") val details: SessionSummaryPayload? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -469,7 +510,52 @@ sealed interface ServerMessage {
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("cards_studied") val cardsStudied: Int = 0,
         @SerialName("recall_rate") val recallRate: Double? = null,
-        @SerialName("remaining_due") val remainingDue: Int = 0
+        @SerialName("remaining_due") val remainingDue: Int = 0,
+        @SerialName("session_revision") val sessionRevision: Long? = null
+    ) : ServerMessage
+
+    /** v2 authoritative snapshot for recovery (§38). */
+    @Serializable
+    @SerialName("session_snapshot")
+    data class SessionSnapshot(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("exists") val exists: Boolean = true,
+        @SerialName("is_paused") val isPaused: Boolean = false,
+        @SerialName("is_finished") val isFinished: Boolean = false,
+        @SerialName("current_card_id") val currentCardId: String? = null,
+        @SerialName("current_question") val currentQuestion: String? = null,
+        @SerialName("card_number") val cardNumber: Int? = null,
+        @SerialName("remaining") val remaining: Int? = null,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null,
+        @SerialName("awaiting") val awaiting: String? = null, // "answer" | "rating" | "evaluation" | "none"
+        @SerialName("suggested_rating") val suggestedRating: Rating? = null,
+        @SerialName("remaining_due") val remainingDue: Int? = null,
+        @SerialName("cards_studied") val cardsStudied: Int? = null
+    ) : ServerMessage
+
+    /** v2 alias: some agents emit session_status instead of session_snapshot */
+    @Serializable
+    @SerialName("session_status")
+    data class SessionStatus(
+        @SerialName("protocol_version") override val protocolVersion: String? = null,
+        @SerialName("message_id") override val messageId: String? = null,
+        @SerialName("session_id") override val sessionId: String? = null,
+        @SerialName("timestamp") override val timestamp: String? = null,
+        @SerialName("exists") val exists: Boolean = true,
+        @SerialName("is_paused") val isPaused: Boolean = false,
+        @SerialName("is_finished") val isFinished: Boolean = false,
+        @SerialName("current_card_id") val currentCardId: String? = null,
+        @SerialName("current_question") val currentQuestion: String? = null,
+        @SerialName("card_number") val cardNumber: Int? = null,
+        @SerialName("remaining") val remaining: Int? = null,
+        @SerialName("review_turn_id") val reviewTurnId: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null,
+        @SerialName("awaiting") val awaiting: String? = null,
+        @SerialName("suggested_rating") val suggestedRating: Rating? = null
     ) : ServerMessage
 
     @Serializable
@@ -481,7 +567,8 @@ sealed interface ServerMessage {
         @SerialName("timestamp") override val timestamp: String? = null,
         @SerialName("code") val code: String? = null,
         @SerialName("message") val message: String,
-        @SerialName("details") val details: String? = null
+        @SerialName("details") val details: String? = null,
+        @SerialName("session_revision") val sessionRevision: Long? = null
     ) : ServerMessage
 
     @Serializable
@@ -495,8 +582,6 @@ sealed interface ServerMessage {
 
     // ------------------------------------------------------------------
     // Protocol v2 management/dashboard messages (capability-gated).
-    // v1 servers never emit these; they are ignored unless the agent
-    // advertises the matching capability.
     // ------------------------------------------------------------------
 
     @Serializable

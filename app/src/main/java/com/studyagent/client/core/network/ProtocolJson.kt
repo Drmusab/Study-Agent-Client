@@ -47,6 +47,6 @@ object ProtocolJson {
 
     fun isProtocolVersionCompatible(incomingVersion: String?): Boolean {
         if (incomingVersion == null) return true // Be lenient if omitted in V1
-        return incomingVersion == "1"
+        return incomingVersion == "1" || incomingVersion == "2"
     }
 }
