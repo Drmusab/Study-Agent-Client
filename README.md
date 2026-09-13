@@ -1,8 +1,33 @@
 # Study Agent Android Voice Client 🎧📱
 
-A native, production-quality Android application designed as a **thin mobile voice client** for an intelligent Study/Anki PC Agent.
+A native, production-quality Android application designed as the **mobile command center
+and voice client** for an intelligent Study/Anki PC Agent.
 
-The Android client enables hands-free studying with Bluetooth headphones: it reads questions aloud, captures spoken answers, sends transcripts to the PC agent for LLM evaluation, speaks feedback, and updates Anki card ratings via natural voice commands.
+Three surfaces, one product:
+
+```
+                STUDY AGENT
+                     │
+        ┌────────────┼────────────┐
+        ▼            ▼            ▼
+    Dashboard       Study       Control
+   (observe &     (active     (configure
+    launch)        card)       the agent)
+```
+
+- **Dashboard** — a live operational home screen: system readiness (PC Agent / Anki /
+  AI / audio), smart Start/Resume, dynamic decks, today's stats, goal progress, weekly
+  performance, rating distribution, server-generated insights and recommendations,
+  AI usage — all sourced from the PC agent over Protocol v2, with honest
+  Live/Cached/Stale freshness and an offline cache. See `docs/DASHBOARD.md`.
+- **Study** — hands-free voice study loop: questions read aloud, spoken answers
+  evaluated by the PC agent, spoken feedback and voice ratings.
+- **Control Center** — how the agent studies: deck, mode, session target, evaluation
+  strictness, feedback depth, Socratic follow-ups, hints, rating automation and
+  transcript privacy, with presets and ACK-verified config sync. See
+  `docs/CONTROL_CENTER.md`.
+
+The Android client enables hands-free studying with Bluetooth headphones: it reads questions aloud, captures spoken answers, sends transcripts to the PC agent for LLM evaluation, speaks feedback, and updates Anki card ratings via natural voice commands. Protocol v1 agents remain fully supported for basic study; management panels gate off gracefully.
 
 ---
 
