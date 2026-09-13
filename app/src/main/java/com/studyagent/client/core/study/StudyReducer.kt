@@ -106,8 +106,9 @@ object StudyReducer {
             is StudyEvent.UserStopSpeaking -> handleStopSpeaking(state)
             is StudyEvent.RecognitionCompleted -> handleRecognitionCompleted(state, event)
             is StudyEvent.RecognitionFailed -> handleRecognitionFailed(state, event)
-            is StudyEvent.PttStarted -> Transition(state, emptyList())
-            is StudyEvent.PttStopped -> Transition(state, emptyList())
+            is StudyEvent.PttStarted -> handlePttStarted(state, event)
+            is StudyEvent.PttStopped -> handlePttStopped(state, event)
+            is StudyEvent.VoiceRouteBlocked -> handleVoiceRouteBlocked(state, event)
             is StudyEvent.SettingsChanged -> Transition(state, emptyList())
             is StudyEvent.ProtocolError -> Transition.reject(state, event, "protocol-error")
             is StudyEvent.UiRecreated -> Transition(state, emptyList())
@@ -847,13 +848,94 @@ object StudyReducer {
         return handleStatusReceived(state, StudyEvent.SessionStatusReceived(event.snapshot), clockMs)
     }
 
+    // ------------------------------------------------------------------ PUSH TO TALK
+
+    /**
+     * Manual push-to-talk (§27/§59/§79).
+     *
+     * Audio mode and interaction mode are independent: this works identically on headphones and
+     * on the phone speaker. The window decides what is being listened for — an answer during a
+     * question, a rating/command in the feedback and rating windows.
+     */
+    private fun handlePttStarted(state: SessionMachineState, event: StudyEvent.PttStarted): Transition {
+        if (state.isIdle || state.isFinished || state.phase is SessionPhase.Error) {
+            return Transition.reject(state, event, "illegal-phase")
+        }
+        val card = state.cardTurn?.card ?: state.session?.currentCard
+            ?: return Transition.reject(state, event, "no-card")
+        if (event.cardId != null && event.cardId.isNotBlank() && event.cardId != card.id) {
+            return Transition.reject(state, event, "card-mismatch")
+        }
+        val purpose = when (state.phase) {
+            is SessionPhase.WaitingForRating,
+            is SessionPhase.SpeakingFeedback,
+            is SessionPhase.SpeakingExplanation,
+            is SessionPhase.HintShowing -> RecognitionPurpose.PUSH_TO_TALK_COMMAND
+
+            else -> RecognitionPurpose.PUSH_TO_TALK_ANSWER
+        }
+        val effectId = EffectIds.next("ptt")
+        // Speech is interrupted first: the microphone must never open underneath a live
+        // utterance, and the turn gate applies the acoustic gap afterwards.
+        val newState = state.copy(activeRecognitionEffectId = effectId)
+            .recordTransition(event, state.phase, state.phase)
+        return Transition(
+            newState,
+            listOf(
+                StudyEffect.Voice.CancelSpeech("ptt"),
+                StudyEffect.Voice.StartRecognition(purpose, card.id, effectId),
+                StudyEffect.LogTransition(state.phase, event.debugName, state.phase, card.id, state.epoch)
+            )
+        )
+    }
+
+    /** Release: finish the turn, never submit here — the terminal result decides (§18/§105). */
+    private fun handlePttStopped(state: SessionMachineState, event: StudyEvent.PttStopped): Transition {
+        if (state.isIdle || state.isFinished) return Transition.reject(state, event, "illegal-phase")
+        val newState = state.copy(activeRecognitionEffectId = null)
+            .recordTransition(event, state.phase, state.phase)
+        return Transition(newState, listOf(StudyEffect.Voice.StopListening("ptt-release")))
+    }
+
+    // ------------------------------------------------------------------ VOICE ROUTE
+
+    /**
+     * The user's audio preference cannot be satisfied (only `HEADSET_REQUIRED` without
+     * headphones). Recoverable and explicit: study is not started, and the message says how to
+     * proceed (§7/§82). Every other mode falls back to the phone instead of landing here.
+     */
+    private fun handleVoiceRouteBlocked(state: SessionMachineState, event: StudyEvent.VoiceRouteBlocked): Transition {
+        val problem = SessionProblemHolder(SessionProblem.VOICE_ONLY_FAILURE, event.reason, true)
+        val newState = state.copy(
+            phase = SessionPhase.Error(SessionProblem.VOICE_ONLY_FAILURE),
+            error = problem
+        ).recordTransition(event, state.phase, SessionPhase.Error(SessionProblem.VOICE_ONLY_FAILURE))
+        return Transition(
+            newState,
+            listOf(
+                StudyEffect.Voice.CancelSpeech("route-blocked"),
+                StudyEffect.Voice.CancelRecognition("route-blocked"),
+                StudyEffect.LogRejected(event.debugName, "voice-route-blocked", state.phase, state.currentCardId)
+            )
+        )
+    }
+
     // ------------------------------------------------------------------ AUDIO
 
     private fun handleAudioLost(state: SessionMachineState, event: StudyEvent.AudioRouteLost): Transition {
         if (state.phase is SessionPhase.Paused || state.isFinished || state.isIdle) return Transition.reject(state, event, "illegal-phase")
-        // Suspend recognition, keep card, enter recovering-like pause for audio
+        // A lost output route must stop the app talking as well as listening: continuing to
+        // speak through the loudspeaker after the user's headphones disappeared is exactly the
+        // privacy behaviour the disconnect policy exists to prevent (§96).
         val newState = state.copy(connection = SessionConnectionStatus.DISCONNECTED).recordTransition(event, state.phase, state.phase)
-        return Transition(newState, listOf(StudyEffect.Voice.CancelRecognition("audio-lost"), StudyEffect.LogRejected(event.debugName, "audio-lost", state.phase, event.cardId)))
+        return Transition(
+            newState,
+            listOf(
+                StudyEffect.Voice.CancelSpeech("route-lost"),
+                StudyEffect.Voice.CancelRecognition("audio-lost"),
+                StudyEffect.LogRejected(event.debugName, "audio-lost", state.phase, event.cardId)
+            )
+        )
     }
 
     private fun handleAudioRestored(state: SessionMachineState, event: StudyEvent.AudioRouteRestored): Transition {

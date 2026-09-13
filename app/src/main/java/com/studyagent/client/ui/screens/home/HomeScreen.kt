@@ -60,8 +60,8 @@ fun HomeScreen(
 ) {
     val connectionState by viewModel.connectionState.collectAsState()
     val activeProfile by viewModel.activeProfile.collectAsState()
-    val audioDevice by viewModel.activeAudioDevice.collectAsState()
-    val isHeadset by viewModel.isHeadsetConnected.collectAsState()
+    // Nullable because the coordinator is optional in headless/test configurations.
+    val studyAudioRoute = viewModel.studyAudioRoute?.collectAsState()?.value
 
     Scaffold(
         containerColor = DarkBackground,
@@ -114,10 +114,8 @@ fun HomeScreen(
                         connectionState = connectionState,
                         onClick = onNavigateToConnection
                     )
-                    AudioRouteIndicator(
-                        audioDevice = audioDevice,
-                        isHeadset = isHeadset
-                    )
+                    // Effective study audio route (§80): 📱 Phone / 🎧 Headset — never an error.
+                    AudioRouteIndicator(route = studyAudioRoute)
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))

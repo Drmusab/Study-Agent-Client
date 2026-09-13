@@ -1,6 +1,7 @@
 package com.studyagent.client.data.repository
 
 import com.studyagent.client.core.audio.AudioRouteManager
+import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.common.DispatcherProvider
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.Rating
@@ -29,7 +30,12 @@ class StudySessionMachineRepository(
     audioRouteManager: AudioRouteManager,
     dispatchers: DispatcherProvider,
     scope: CoroutineScope = CoroutineScope(SupervisorJob() + dispatchers.default),
-    clock: () -> Long = System::currentTimeMillis
+    clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Study audio routing policy (§70/§112). Optional so the machine stays constructible in
+     * headless tests; without it the app behaves like a bare phone in Auto mode.
+     */
+    private val audioRouteCoordinator: StudyAudioRouteCoordinator? = null
 ) : StudySessionRepository {
 
     private val machine = StudySessionMachine(
@@ -38,7 +44,8 @@ class StudySessionMachineRepository(
         recognitionOrchestrator = recognitionOrchestrator,
         settingsFlow = settingsFlow,
         scope = scope,
-        clock = clock
+        clock = clock,
+        audioRouteCoordinator = audioRouteCoordinator
     )
 
     override val studyState: StateFlow<StudyState> = machine.studyState
@@ -46,6 +53,23 @@ class StudySessionMachineRepository(
     override val lastRecognizedCommand: Flow<VoiceCommand> = machine.lastRecognizedCommand
 
     override suspend fun startStudy(deckName: String?) {
+        startOrBlock(deckName)
+    }
+
+    /**
+     * Start study, unless the user's audio preference forbids a headset-less start (§7/§82).
+     * Only `HEADSET_REQUIRED` can block; Auto and Phone always start, on the phone when there
+     * are no headphones.
+     */
+    private fun startOrBlock(deckName: String?) {
+        val route = audioRouteCoordinator?.effectiveRoute?.value
+        if (route != null && !route.canStartVoiceStudy) {
+            val reason = route.reason
+                ?: "No usable audio output on this device. Check the audio route in Settings."
+            audioRouteCoordinator.metrics.recordBlockedStart()
+            machine.dispatch(StudyEvent.VoiceRouteBlocked(reason))
+            return
+        }
         machine.dispatch(StudyEvent.UserStartRequested(deckName ?: "Toronto Notes", UUID.randomUUID().toString()))
     }
 
@@ -93,6 +117,30 @@ class StudySessionMachineRepository(
 
     override suspend fun endStudy() {
         machine.dispatch(StudyEvent.UserEndRequested(UUID.randomUUID().toString()))
+        // A "continue on phone" override is session-scoped; the next session resolves freshly
+        // (§38/§41).
+        audioRouteCoordinator?.resetSessionOverrides()
+    }
+
+    override fun continueOnPhone() {
+        val coordinator = audioRouteCoordinator ?: return
+        coordinator.continueOnPhone()
+        // Resuming repeats the current question on the newly resolved phone route; the resume
+        // path never continues mid-sentence (§38/§96/§118).
+        if (machine.machineState.value.phase is SessionPhase.Paused) {
+            machine.dispatch(StudyEvent.UserResumeRequested(UUID.randomUUID().toString()))
+        }
+    }
+
+    override fun useHeadsetNow(): Boolean {
+        val coordinator = audioRouteCoordinator ?: return false
+        // The coordinator applies the switch immediately and emits a route change; the machine
+        // repeats the current question from the start on the new route (§42).
+        return coordinator.useHeadsetNow()
+    }
+
+    override fun dismissAudioRouteAttention() {
+        audioRouteCoordinator?.dismissAttention()
     }
 
     override fun requestStopSpeaking() {
@@ -138,7 +186,7 @@ class StudySessionMachineRepository(
             is VoiceCommand.Resume -> machine.dispatch(StudyEvent.UserResumeRequested(UUID.randomUUID().toString()))
             is VoiceCommand.StopSpeaking -> machine.dispatch(StudyEvent.UserStopSpeaking)
             is VoiceCommand.Stop, is VoiceCommand.EndSession -> machine.dispatch(StudyEvent.UserEndRequested(UUID.randomUUID().toString()))
-            is VoiceCommand.StartStudy -> machine.dispatch(StudyEvent.UserStartRequested(command.deck, UUID.randomUUID().toString()))
+            is VoiceCommand.StartStudy -> startOrBlock(command.deck)
             is VoiceCommand.StatusQuestion -> machine.dispatch(StudyEvent.ConnectionRestored("voice-status"))
             is VoiceCommand.SubmitAnswer -> {
                 val cid = machine.machineState.value.currentCardId ?: return

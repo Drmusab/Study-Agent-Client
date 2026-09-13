@@ -15,7 +15,8 @@ The **Study Agent Mobile Client** is a lightweight, voice-first native Android a
 * **Android Mobile Application (Voice Client):**
   - High-resilience WebSocket connection (LAN, Tailscale, WireGuard, WSS).
   - Bidirectional Speech-to-Text (STT) and Text-to-Speech (TTS) pipelines.
-  - Bluetooth headphone audio routing and SCO / LE Audio management.
+  - Study audio routing that is **headset-optional**: headphones when present, the phone
+    speaker + built-in microphone otherwise (`docs/AUDIO_ROUTING.md`).
   - Foreground service for background hands-free study (screen off / phone locked).
   - Real-time state machine driving the study loop without requiring screen interaction.
 
@@ -102,6 +103,14 @@ com.studyagent.client/
 ├── MainActivity.kt                  # Single Activity host with runtime permissions
 │
 ├── core/
+│   ├── audio/                       # Study audio routing (pure policy + Android facts)
+│   │   ├── StudyAudioModels.kt      # Modes, routes, snapshots, readiness, route events
+│   │   ├── StudyAudioModeResolver.kt# preference + snapshot → effective route (pure)
+│   │   ├── AudioRouteSnapshotFactory.kt # enumerated devices → snapshot (pure)
+│   │   ├── AudioRouteManager.kt     # Android device callbacks, verified input route
+│   │   ├── StudyAudioRouteCoordinator.kt # loss, deferred switch, user overrides
+│   │   └── PhoneModeDiagnostics.kt  # Local counters + self-echo detector
+│   │
 │   ├── models/                      # Strongly typed data models & sealed interfaces
 │   │   ├── ConnectionState.kt       # Disconnected, Connecting, Connected, Reconnecting, etc.
 │   │   ├── StudyState.kt            # Idle, SpeakingQuestion, Listening, Evaluating, etc.
@@ -187,7 +196,43 @@ com.studyagent.client/
 
 ---
 
-## 4. Concurrency & Threading Model
+## 4. Study Audio Routing (Headset-Optional)
+
+The client supports two equally valid environments: **Headset Mode** (headset output, headset
+or phone microphone) and **Phone Mode** (phone speaker, built-in microphone). Which one runs is
+decided by a small, pure decision layer, and nothing else in the app branches on
+"is a headset connected".
+
+```
+AppSettings.studyAudioMode ─┐
+                            ├─► StudyAudioModeResolver ─► EffectiveStudyAudioRoute
+AudioRouteSnapshot ─────────┘        (pure)                (output, input, certainty,
+    ▲                                                        readiness, acoustic profile)
+    │
+AudioRouteManager (Android)                     │
+    ▲                                           ▼
+AudioDeviceCallback                    StudyAudioRouteCoordinator
+                                       (loss, pending route, overrides, generation)
+                                                │
+                                                ▼
+                       StudyVoiceTurnGate ──► SpeechRecognitionOrchestrator
+                       (gap + half-duplex)      (microphone opens here, and only here)
+```
+
+* **One workflow.** There is no `PhoneStudySession`; the same reducer, TTS pipeline and STT
+  pipeline run on both routes. `StudyEffect`s, events and effects are identical.
+* **Effective mode is derived, never stored.** `AUTO` is the default, `HEADSET_REQUIRED` is an
+  advanced opt-in that is the only thing that may refuse a start.
+* **The turn gate owns the microphone.** TTS completion, drained queue, stable route, acoustic
+  gap and generation validation are all checked in one place, which is what keeps the
+  half-duplex invariant true on the phone speaker.
+* **Route changes are turn-boundary events.** A headset appearing is parked in `pendingRoute`
+  until the next safe boundary; an unexpected loss cancels the live turn and applies the
+  disconnect policy (pause with a *Continue on phone* offer, or continue on the phone directly).
+
+---
+
+## 5. Concurrency & Threading Model
 
 1. **Main Thread (`Dispatchers.Main`):**
    - Jetpack Compose UI updates.

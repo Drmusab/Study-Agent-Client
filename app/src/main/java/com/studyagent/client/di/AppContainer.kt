@@ -3,6 +3,9 @@ package com.studyagent.client.di
 import android.content.Context
 import com.studyagent.client.core.audio.AndroidAudioRouteManager
 import com.studyagent.client.core.audio.AudioRouteManager
+import com.studyagent.client.core.audio.DefaultStudyAudioModeResolver
+import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
+import com.studyagent.client.core.audio.toStudyAudioPreferences
 import com.studyagent.client.core.common.DefaultDispatcherProvider
 import com.studyagent.client.core.common.DispatcherProvider
 import com.studyagent.client.core.security.AndroidSecureTokenStorage
@@ -27,6 +30,9 @@ import com.studyagent.client.data.repository.DefaultStudySessionRepository
 import com.studyagent.client.data.repository.DiagnosticsRepository
 import com.studyagent.client.data.repository.StudySessionMachineRepository
 import com.studyagent.client.data.repository.StudySessionRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.map
 
 interface AppContainer {
     val dispatchers: DispatcherProvider
@@ -35,6 +41,10 @@ interface AppContainer {
     val profileRepository: ProfileRepository
     val connectionRepository: ConnectionRepository
     val audioRouteManager: AudioRouteManager
+
+    /** Decides which route voice study uses, and how route changes are applied over time. */
+    val studyAudioRouteCoordinator: StudyAudioRouteCoordinator
+
     val ttsEngineAdapter: TtsEngineAdapter
     val speechOrchestrator: SpeechOrchestrator
     val speechRecognitionBackend: SpeechRecognitionBackend
@@ -62,13 +72,29 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
     }
     override val audioRouteManager: AudioRouteManager by lazy { AndroidAudioRouteManager(context) }
 
+    /**
+     * One coordinator for the whole process: the study machine, TTS route-loss policy and the
+     * UI all read the same effective route (§112).
+     */
+    override val studyAudioRouteCoordinator: StudyAudioRouteCoordinator by lazy {
+        StudyAudioRouteCoordinator(
+            snapshots = audioRouteManager.routeSnapshot,
+            preferences = preferencesDataStore.settingsFlow.map { it.toStudyAudioPreferences() },
+            scope = CoroutineScope(SupervisorJob() + dispatchers.default),
+            resolver = DefaultStudyAudioModeResolver()
+        )
+    }
+
     override val ttsEngineAdapter: TtsEngineAdapter by lazy { AndroidTtsEngineAdapter(context) }
 
     override val speechOrchestrator: SpeechOrchestrator by lazy {
         DefaultSpeechOrchestrator(
             engine = ttsEngineAdapter,
             focusController = AudioFocusController(context),
-            headsetConnected = audioRouteManager.isHeadsetConnected,
+            // Route-aware: speech is only interrupted by a disconnect when the *effective*
+            // output was the headset. Starting the app with no headphones — or running Phone
+            // mode with a headset attached — never looks like a route loss (§44).
+            headsetConnected = studyAudioRouteCoordinator.headsetRouteActive,
             workDispatcher = dispatchers.default
         )
     }
@@ -106,7 +132,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             recognitionOrchestrator = recognitionOrchestrator,
             settingsFlow = preferencesDataStore.settingsFlow,
             audioRouteManager = audioRouteManager,
-            dispatchers = dispatchers
+            dispatchers = dispatchers,
+            audioRouteCoordinator = studyAudioRouteCoordinator
         )
     }
     /** Legacy repository kept for direct testing and gradual migration. */
@@ -125,7 +152,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             connectionRepository,
             audioRouteManager,
             speechOrchestrator,
-            recognitionOrchestrator
+            recognitionOrchestrator,
+            studyAudioRouteCoordinator
         )
     }
 }

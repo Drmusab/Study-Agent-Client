@@ -1,5 +1,6 @@
 package com.studyagent.client.core.models
 
+import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.voice.tts.HeadsetDisconnectBehavior
 import kotlinx.serialization.Serializable
 
@@ -58,6 +59,17 @@ data class AppSettings(
     val ttsMedicalPronunciation: Boolean = true,
     val ttsAcousticGapMs: Int = 350,
     val headsetDisconnectBehavior: HeadsetDisconnectBehavior = HeadsetDisconnectBehavior.PAUSE_SPEECH,
+
+    // ---- Study audio routing (headphones are optional; the phone is a first-class route) ----
+    /**
+     * `AUTO` | `HEADSET_PREFERRED` | `PHONE` | `HEADSET_REQUIRED`.
+     *
+     * Typed via [StudyAudioMode] in the model and stored by name; an unknown value migrates to
+     * [StudyAudioMode.AUTO] rather than crashing the app on a settings file from another build.
+     */
+    val studyAudioMode: StudyAudioMode = StudyAudioMode.AUTO,
+    /** One-time "no headphones — using the phone speaker and microphone" notice (§31/§66). */
+    val phoneAudioNoticeAcknowledged: Boolean = false,
 
     // ---- Study behavior ----
     val handsFreeMode: Boolean = true,

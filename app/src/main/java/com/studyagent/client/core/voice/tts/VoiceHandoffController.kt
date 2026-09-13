@@ -1,5 +1,6 @@
 package com.studyagent.client.core.voice.tts
 
+import com.studyagent.client.core.audio.AcousticProfile
 import kotlinx.coroutines.delay
 
 /**
@@ -15,8 +16,10 @@ import kotlinx.coroutines.delay
  *  1. **Completion gate** — [afterSpeech] only proceeds on [SpeechResult.Completed]
  *     (or after a Failed, treated carefully by the caller); Cancelled means another
  *     state transition already happened and nothing starts listening.
- *  2. **Acoustic gap** — a single configurable delay ([TtsSettings.acousticGapMs],
- *     default 350 ms, clamped 150–1200 ms) lets the output path drain on A2DP/SCO.
+ *  2. **Acoustic gap** — a configurable delay ([TtsSettings.acousticGapMs], default 350 ms)
+ *     lets the output path drain on A2DP/SCO, made **route-aware** by [AcousticGapPolicy]:
+ *     headphones keep the user's value, the phone speaker gets a more conservative floor
+ *     because the phone's own speaker couples straight into its microphones (§16).
  *  3. **Degraded-mode rule** — on [SpeechResult.Failed] the handoff waits a shorter
  *     gap (audio is already broken/stopped) and still lets the caller decide to
  *     listen so a TTS failure never bricks the study loop (graceful degradation).
@@ -26,7 +29,13 @@ import kotlinx.coroutines.delay
  */
 class VoiceHandoffController(
     private val gapProvider: () -> Int,
-    private val scheduler: suspend (Long) -> Unit = { delay(it) }
+    private val scheduler: suspend (Long) -> Unit = { delay(it) },
+    /**
+     * Acoustic profile of the **effective output route** (§16). Defaults to the headset
+     * profile so existing callers keep their tuned gap; Phone Mode passes the speaker profile,
+     * which is more conservative because the phone's own speaker leaks into its microphones.
+     */
+    private val profileProvider: () -> AcousticProfile = { AcousticProfile.HEADSET }
 ) {
     data class HandoffPolicy(
         val gapMs: Int,
@@ -34,11 +43,11 @@ class VoiceHandoffController(
     )
 
     fun policy(): HandoffPolicy {
-        val gap = gapProvider().coerceIn(
-            TtsSettings.MIN_ACOUSTIC_GAP_MS,
-            TtsSettings.MAX_ACOUSTIC_GAP_MS
+        val profile = profileProvider()
+        return HandoffPolicy(
+            gapMs = AcousticGapPolicy.gapMs(profile, gapProvider(), failedSpeech = false),
+            failedGapMs = AcousticGapPolicy.gapMs(profile, gapProvider(), failedSpeech = true)
         )
-        return HandoffPolicy(gapMs = gap, failedGapMs = gap / 2)
     }
 
     /**

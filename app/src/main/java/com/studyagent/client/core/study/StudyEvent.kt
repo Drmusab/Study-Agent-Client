@@ -87,6 +87,12 @@ sealed interface StudyEvent {
     data class AudioRouteLost(val cardId: String?) : StudyEvent
     data class AudioRouteRestored(val cardId: String?) : StudyEvent
 
+    /**
+     * The study audio preference cannot be satisfied right now — today only
+     * `HEADSET_REQUIRED` without headphones (§7/§82). Phone Mode never produces this.
+     */
+    data class VoiceRouteBlocked(val reason: String) : StudyEvent
+
     // -- Settings
     data class SettingsChanged(val handsFree: Boolean, val autoPlayQuestion: Boolean, val autoSubmit: Boolean, val listenForSpokenRating: Boolean) : StudyEvent
 

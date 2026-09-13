@@ -89,6 +89,21 @@ interface StudySessionRepository {
     fun discardPendingTranscript()
 
     fun processVoiceCommandDirectly(command: VoiceCommand)
+
+    // ---- Study audio route recovery (§96/§118). Default no-ops keep other implementations
+    // (and the legacy repository) source-compatible.
+
+    /**
+     * User chose *Continue on phone* after headphones disappeared mid-session: pin the phone
+     * route and resume. The current question is repeated — never resumed mid-sentence.
+     */
+    fun continueOnPhone() {}
+
+    /** Manual *Use headphones now* (§42). Returns false when no headset is available. */
+    fun useHeadsetNow(): Boolean = false
+
+    /** User chose *Wait for headphones*: dismiss the prompt, stay paused. */
+    fun dismissAudioRouteAttention() {}
 }
 
 /**

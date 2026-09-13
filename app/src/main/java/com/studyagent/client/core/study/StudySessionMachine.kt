@@ -1,5 +1,14 @@
 package com.studyagent.client.core.study
 
+import com.studyagent.client.core.audio.AudioRouteSnapshot
+import com.studyagent.client.core.audio.DefaultStudyAudioModeResolver
+import com.studyagent.client.core.audio.EffectiveStudyAudioRoute
+import com.studyagent.client.core.audio.PhoneModeDiagnostics
+import com.studyagent.client.core.audio.SelfEchoDetector
+import com.studyagent.client.core.audio.StudyAudioDisconnectPolicy
+import com.studyagent.client.core.audio.StudyAudioMode
+import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
+import com.studyagent.client.core.audio.StudyAudioRouteEvent
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.models.ClientMessage
 import com.studyagent.client.core.models.ConnectionState
@@ -8,9 +17,18 @@ import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudyCard
 import com.studyagent.client.core.models.StudySession
+import com.studyagent.client.core.models.VoiceCommand
 import com.studyagent.client.core.models.StudyState
+import com.studyagent.client.core.voice.stt.RecognitionErrorCode
 import com.studyagent.client.core.voice.stt.RecognitionOutcome
+import com.studyagent.client.core.voice.stt.RecognitionPurpose
+import com.studyagent.client.core.voice.stt.CommandContext
+import com.studyagent.client.core.voice.stt.CommandDecision
 import com.studyagent.client.core.voice.stt.RecognitionTurnResult
+import com.studyagent.client.core.voice.stt.VoiceCommandInterpreter
+import com.studyagent.client.core.voice.StudyVoiceTurnGate
+import com.studyagent.client.core.voice.VoiceTurnBlock
+import com.studyagent.client.core.voice.VoiceTurnDecision
 import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.stt.toSttSettings
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
@@ -33,6 +51,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Authoritative serialized event processor (§6 §73-§75).
@@ -51,7 +70,12 @@ class StudySessionMachine(
     private val settingsFlow: Flow<AppSettings> = kotlinx.coroutines.flow.flowOf(AppSettings()),
     private val scope: CoroutineScope,
     private val clock: () -> Long = System::currentTimeMillis,
-    initialEpoch: Long = 1L
+    initialEpoch: Long = 1L,
+    /**
+     * Study-audio routing (§70/§112). Optional so headless tests can run the machine without a
+     * device: when absent the machine behaves like a bare phone in Auto mode.
+     */
+    private val audioRouteCoordinator: StudyAudioRouteCoordinator? = null
 ) {
     private val tag = "StudySessionMachine"
 
@@ -66,11 +90,42 @@ class StudySessionMachine(
     private val _currentSession = MutableStateFlow<StudySession?>(null)
     val currentSession: StateFlow<StudySession?> = _currentSession.asStateFlow()
 
-    private val _lastRecognizedCommand = MutableSharedFlow<com.studyagent.client.core.models.VoiceCommand>(extraBufferCapacity = 16)
-    val lastRecognizedCommand: SharedFlow<com.studyagent.client.core.models.VoiceCommand> = _lastRecognizedCommand.asSharedFlow()
+    private val _lastRecognizedCommand = MutableSharedFlow<VoiceCommand>(extraBufferCapacity = 16)
+    val lastRecognizedCommand: SharedFlow<VoiceCommand> = _lastRecognizedCommand.asSharedFlow()
 
     private val timeoutJobs = mutableMapOf<String, Job>()
     @Volatile private var currentSettings: AppSettings = AppSettings()
+
+    // ------------------------------------------------------------------ phone-mode voice gate
+    //
+    // Every study-audio route (headphones or phone) goes through this gate before the
+    // microphone opens, so there is exactly one implementation of "speak, silence, listen"
+    // (§15/§59/§113/§114). The gate is what makes Phone Mode safe: TTS completion, drained
+    // queue, route stability, an acoustic gap sized for the speaker, request-generation
+    // validation, STT readiness — in that order.
+
+    private val fallbackRoute: EffectiveStudyAudioRoute =
+        DefaultStudyAudioModeResolver().resolve(StudyAudioMode.AUTO, AudioRouteSnapshot.PHONE_ONLY)
+
+    private val selfEchoDetector = SelfEchoDetector()
+
+    /** Invalidates in-flight delayed microphone starts when a turn is superseded (§102-§104). */
+    private val sttGeneration = AtomicLong(0L)
+    private val sttStartCount = AtomicLong(0L)
+
+    private val voiceTurnGate: StudyVoiceTurnGate = StudyVoiceTurnGate(
+        routeProvider = { audioRouteCoordinator?.effectiveRoute?.value ?: fallbackRoute },
+        configuredGapMs = { currentSettings.ttsAcousticGapMs },
+        speechActive = { speechOrchestrator.isSpeaking.value },
+        queueDepth = { speechOrchestrator.health.value.queueDepth },
+        voicePaused = {
+            val phase = _machineState.value.phase
+            phase is SessionPhase.Paused ||
+                phase is SessionPhase.Pausing ||
+                audioRouteCoordinator?.attention?.value != null
+        },
+        nowMs = { clock() }
+    )
 
     private val machineJob: Job
 
@@ -92,6 +147,7 @@ class StudySessionMachine(
         observeServerMessages()
         observeConnection()
         observeRecognition()
+        observeAudioRoute()
     }
 
     fun dispatch(event: StudyEvent) {
@@ -191,6 +247,13 @@ class StudySessionMachine(
                 startedAtEpochMs = snap.startedAtEpochMs
             )
         }
+        // Route changes that are not losses wait for a turn boundary (§40/§41). Everything
+        // below this point is "no question/answer in flight", so a preferred route (a headset
+        // that just appeared) may be promoted now.
+        if (!isVoicePhase(machine.phase)) {
+            audioRouteCoordinator?.onSafeTurnBoundary()
+        }
+
         // Invariant checks §139: log but don't crash production
         checkInvariants(machine, derivedState)
     }
@@ -207,6 +270,218 @@ class StudySessionMachine(
         if (machine.pendingRatingConfirmation != null && machine.pendingRatingConfirmation.turnId != machine.cardTurn?.turnId) {
             AppLogger.w(tag, "Invariant: pendingRatingConfirmation turn mismatch")
         }
+    }
+
+    /** Fallback metrics store when no coordinator is wired (headless tests). */
+    private val localMetrics = PhoneModeDiagnostics()
+
+    /**
+     * Open the recognizer for a validated turn. Kept separate from the gate so the gate stays
+     * free of orchestration details.
+     */
+    private fun startRecognitionNow(effect: StudyEffect.Voice.StartRecognition) {
+        try {
+            AppLogger.i(tag, "Effect: StartRecognition purpose=${effect.purpose} card=${effect.cardId} id=${effect.effectId}")
+            val factory = com.studyagent.client.core.voice.stt.RecognitionPolicyFactory()
+            val req = factory.createRequest(
+                purpose = effect.purpose,
+                settings = currentSettings.toSttSettings(),
+                cardId = effect.cardId,
+                contextTerms = emptyList()
+            ).copy(id = effect.effectId)
+            val res = recognitionOrchestrator.startRecognition(req)
+            AppLogger.i(tag, "STT start result=$res")
+            sttStartCount.incrementAndGet()
+        } catch (e: Exception) {
+            AppLogger.w(tag, "STT start failed: ${e.message}")
+        }
+        _machineState.value = _machineState.value.copy(activeRecognitionEffectId = effect.effectId)
+    }
+
+    /**
+     * Turn-identity validation for a delayed microphone start (§27/§102/§103/§104). Anything
+     * that happened during the acoustic gap — skip, pause, end, a new card, a manual rating —
+     * invalidates the pending start, so a stale gap can never open the microphone.
+     */
+    private fun isSttStartStillValid(effect: StudyEffect.Voice.StartRecognition, generation: Long): Boolean {
+        if (sttGeneration.get() != generation) return false
+        val state = _machineState.value
+        val cardId = state.cardTurn?.cardId ?: state.session?.currentCard?.id
+        if (effect.cardId != null && cardId != effect.cardId) return false
+        return when (state.phase) {
+            is SessionPhase.Idle,
+            is SessionPhase.Finished,
+            is SessionPhase.Error,
+            is SessionPhase.Paused,
+            is SessionPhase.Pausing -> false
+
+            is SessionPhase.WaitingForAnswer,
+            is SessionPhase.PendingAnswerReview,
+            is SessionPhase.SpeakingQuestion,
+            is SessionPhase.SpeakingHint,
+            is SessionPhase.ShowingAnswer ->
+                effect.purpose == RecognitionPurpose.ANSWER ||
+                    effect.purpose == RecognitionPurpose.PUSH_TO_TALK_ANSWER
+                    // Answers first: that is the only listening window that may open while the
+                    // question is still being spoken (push-to-talk cuts speech short).
+                    || effect.purpose == RecognitionPurpose.SHORT_CONFIRMATION
+
+            is SessionPhase.WaitingForRating,
+            is SessionPhase.SpeakingFeedback,
+            is SessionPhase.SpeakingExplanation,
+            is SessionPhase.HintShowing ->
+                effect.purpose == RecognitionPurpose.RATING ||
+                    effect.purpose == RecognitionPurpose.PUSH_TO_TALK_COMMAND ||
+                    effect.purpose == RecognitionPurpose.SHORT_CONFIRMATION
+
+            is SessionPhase.WaitingForFirstCard,
+            is SessionPhase.SubmittingAnswer,
+            is SessionPhase.SubmittingRating,
+            is SessionPhase.WaitingForEvaluation,
+            is SessionPhase.Starting,
+            is SessionPhase.Resuming,
+            is SessionPhase.Recovering,
+            is SessionPhase.Finishing -> true
+        }
+    }
+
+    /**
+     * Voice commands (§13/§14/§79): interpret with the study context, then let the reducer be
+     * the sole authority on whether the command is legal right now. `NeedsConfirmation` and
+     * `Retry` are deliberately *not* executed — an ambiguous utterance must never re-schedule a
+     * card, and there is no phone-specific confirmation flow (§113).
+     */
+    private fun handleCommandOutcome(outcome: RecognitionOutcome) {
+        val state = _machineState.value
+        val decided = commandInterpreter.interpret(
+            outcome = outcome,
+            context = commandContextFor(state.phase),
+            settings = currentSettings.toSttSettings()
+        )
+        when (decided) {
+            is CommandDecision.Execute -> {
+                if (!decided.parsed.isExecutable) {
+                    AppLogger.d(tag, "Voice command ignored (confidence=${decided.parsed.confidence})")
+                    return
+                }
+                _lastRecognizedCommand.tryEmit(decided.parsed.command)
+                val event = SpokenCommandRouter.toEvent(decided.parsed.command, state.currentCardId)
+                if (event != null) {
+                    dispatch(event)
+                } else {
+                    AppLogger.d(tag, "Voice command has no session event: ${decided.parsed.command.commandName}")
+                }
+            }
+            is CommandDecision.SubmitAnswer -> {
+                dispatch(
+                    StudyEvent.RecognitionCompleted(
+                        outcome.cardId,
+                        _machineState.value.cardTurn?.turnId,
+                        decided.text,
+                        false
+                    )
+                )
+            }
+            is CommandDecision.NeedsConfirmation ->
+                AppLogger.i(tag, "Voice command needs confirmation; not auto-applied (options=${decided.options.size})")
+
+            is CommandDecision.Retry ->
+                AppLogger.d(tag, "Voice command retry: ${decided.reason}")
+
+            is CommandDecision.Ignore ->
+                AppLogger.d(tag, "Voice command ignored: ${decided.reason}")
+        }
+    }
+
+    /** Which window the study loop is in — the interpreter's only input beyond the transcript. */
+    private fun commandContextFor(phase: SessionPhase): CommandContext = when (phase) {
+        is SessionPhase.Idle, is SessionPhase.Starting, is SessionPhase.WaitingForFirstCard ->
+            CommandContext.IDLE
+        is SessionPhase.Paused, is SessionPhase.Pausing -> CommandContext.PAUSED
+        is SessionPhase.WaitingForRating -> CommandContext.RATING_EXPECTED
+        is SessionPhase.SpeakingFeedback,
+        is SessionPhase.SpeakingExplanation,
+        is SessionPhase.HintShowing -> CommandContext.FEEDBACK_SHOWING
+        else -> CommandContext.ANSWER_EXPECTED
+    }
+
+    /**
+     * Reacts to route facts (§36/§39/§44/§96/§97/§118).
+     *
+     * Note what is missing: any reaction to "no headset at app start". That is not an event,
+     * it is the normal Phone Mode environment, and manufacturing a loss from it is exactly the
+     * bug this design removes (§44/§119).
+     */
+    private fun observeAudioRoute() {
+        val coordinator = audioRouteCoordinator ?: return
+        scope.launch {
+            coordinator.events.collect { event -> handleAudioRouteEvent(event) }
+        }
+    }
+
+    private fun handleAudioRouteEvent(event: StudyAudioRouteEvent) {
+        when (event) {
+            is StudyAudioRouteEvent.ExternalHeadsetLost -> {
+                val cardId = _machineState.value.currentCardId
+                // Cancel the interrupted turn safely: speech and recognition both stop, the
+                // card is preserved, and nothing resumes mid-sentence (§38/§96/§97).
+                speechOrchestrator.stopSpeech(StopReason.ROUTE_LOST)
+                recognitionOrchestrator.cancelCurrentTurn("input-route-lost")
+                AppLogger.w(tag, "Audio route lost mid-session (policy=${event.policy})")
+
+                when (event.policy) {
+                    StudyAudioDisconnectPolicy.PAUSE_VOICE -> {
+                        val phase = _machineState.value.phase
+                        if (phase !is SessionPhase.Paused && phase !is SessionPhase.Pausing) {
+                            dispatch(StudyEvent.UserPauseRequested("route-loss-${clock()}"))
+                        }
+                    }
+
+                    StudyAudioDisconnectPolicy.CONTINUE_ON_PHONE -> {
+                        if (cardId != null && isVoicePhase(_machineState.value.phase)) {
+                            // The coordinator has already resolved the phone route; repeat the
+                            // current question on the new route. Exactly once (§97).
+                            dispatch(StudyEvent.AudioRouteRestored(cardId))
+                        }
+                    }
+                }
+            }
+
+            is StudyAudioRouteEvent.ExternalHeadsetConnected ->
+                if (event.applied) {
+                    AppLogger.i(tag, "Headset route applied at a safe boundary")
+                } else {
+                    AppLogger.i(tag, "Headset available; switching at the next turn boundary (§41)")
+                }
+
+            is StudyAudioRouteEvent.RouteChanged -> {
+                if (!event.atSafeBoundary && isVoicePhase(_machineState.value.phase)) {
+                    // Manual switch (§42/§84): repeat the current question on the new route
+                    // rather than swapping hardware mid-word.
+                    val cardId = _machineState.value.currentCardId
+                    if (cardId != null && event.to.generation != event.from.generation) {
+                        dispatch(StudyEvent.AudioRouteRestored(cardId))
+                    }
+                }
+            }
+
+            is StudyAudioRouteEvent.RouteBlocked -> {
+                AppLogger.w(tag, "Study audio route blocked: ${event.route.reason ?: "unspecified"}")
+            }
+        }
+    }
+
+    private fun isVoicePhase(phase: SessionPhase): Boolean = when (phase) {
+        is SessionPhase.SpeakingQuestion,
+        is SessionPhase.WaitingForAnswer,
+        is SessionPhase.PendingAnswerReview,
+        is SessionPhase.SpeakingFeedback,
+        is SessionPhase.WaitingForRating,
+        is SessionPhase.SpeakingHint,
+        is SessionPhase.HintShowing,
+        is SessionPhase.SpeakingExplanation,
+        is SessionPhase.ShowingAnswer -> true
+        else -> false
     }
 
     private fun executeEffects(effects: List<StudyEffect>, triggerEvent: StudyEvent) {
@@ -226,6 +501,10 @@ class StudySessionMachine(
                     scope.launch {
                         val result = speechOrchestrator.speak(effect.request)
                         val cardId = snapshotCardId
+                        if (result is SpeechResult.Completed && effect.request.purpose != com.studyagent.client.core.voice.tts.SpeechPurpose.PREVIEW) {
+                            // The self-echo window opens when the app stops talking (§18).
+                            selfEchoDetector.noteSpoken(effect.request.text, clock())
+                        }
                         when (effect.request.purpose) {
                             com.studyagent.client.core.voice.tts.SpeechPurpose.QUESTION -> dispatch(StudyEvent.QuestionSpeechCompleted(cardId, effect.effectId, result is SpeechResult.Completed))
                             com.studyagent.client.core.voice.tts.SpeechPurpose.FEEDBACK -> dispatch(StudyEvent.FeedbackSpeechCompleted(cardId, effect.effectId, result is SpeechResult.Completed))
@@ -248,28 +527,37 @@ class StudySessionMachine(
                     _machineState.value = _machineState.value.copy(activeSpeechEffectId = null)
                 }
                 is StudyEffect.Voice.StartRecognition -> {
-                    // Real STT start with deduplication and policy (§57)
-                    val now = clock()
-                    val last = _machineState.value // capture for dedup window
-                    // Use simplified dedup via tag-level var; we store lastSttStart in machine state? Use local map.
-                    // For now, directly attempt start via policy factory if settings allow
-                    try {
-                        val settings = currentSettings
-                        AppLogger.i(tag, "Effect: StartRecognition purpose=${effect.purpose} card=${effect.cardId} id=${effect.effectId}")
-                        val factory = com.studyagent.client.core.voice.stt.RecognitionPolicyFactory()
-                        val req = factory.createRequest(
-                            purpose = effect.purpose,
-                            settings = settings.toSttSettings(),
-                            cardId = effect.cardId
-                        ).copy(id = effect.effectId)
-                        val res = recognitionOrchestrator.startRecognition(req)
-                        AppLogger.i(tag, "STT start result=$res")
-                    } catch (e: Exception) {
-                        AppLogger.w(tag, "STT start failed: ${e.message}")
+                    // The microphone never opens from here directly. It opens through the turn
+                    // gate, which re-validates the turn after the acoustic gap (§15/§102-§104).
+                    val generation = sttGeneration.incrementAndGet()
+                    scope.launch {
+                        val ptt = effect.purpose == RecognitionPurpose.PUSH_TO_TALK_ANSWER ||
+                            effect.purpose == RecognitionPurpose.PUSH_TO_TALK_COMMAND
+                        val decision = voiceTurnGate.awaitListenWindow(
+                            stillValid = { isSttStartStillValid(effect, generation) },
+                            waitForSpeechToSettleMs = if (ptt) PTT_SETTLE_BUDGET_MS else 0L
+                        )
+                        when (decision) {
+                            is VoiceTurnDecision.Blocked -> {
+                                AppLogger.d(tag, "STT start blocked (${decision.reason}) purpose=${effect.purpose}")
+                                if (decision.reason == VoiceTurnBlock.NO_MICROPHONE) {
+                                    (audioRouteCoordinator?.metrics ?: localMetrics).recordMicUnavailableSkip()
+                                }
+                            }
+                            is VoiceTurnDecision.Ready -> {
+                                (audioRouteCoordinator?.metrics ?: localMetrics)
+                                    .recordHandoffLatency(decision.handoffLatencyMs)
+                                val profile = (audioRouteCoordinator?.effectiveRoute?.value ?: fallbackRoute).acousticProfile
+                                (audioRouteCoordinator?.metrics ?: localMetrics).recordListenTurn(profile)
+                                startRecognitionNow(effect)
+                            }
+                        }
                     }
-                    _machineState.value = _machineState.value.copy(activeRecognitionEffectId = effect.effectId)
                 }
                 is StudyEffect.Voice.CancelRecognition -> {
+                    // Invalidate any delayed microphone start immediately: the turn this start
+                    // belonged to no longer exists (§102 stale gap / §103 pause / §104 end).
+                    sttGeneration.incrementAndGet()
                     recognitionOrchestrator.cancelCurrentTurn(effect.reason)
                     _machineState.value = _machineState.value.copy(activeRecognitionEffectId = null)
                 }
@@ -366,18 +654,67 @@ class StudySessionMachine(
                 when (result) {
                     is RecognitionTurnResult.Completed -> {
                         val outcome: RecognitionOutcome = result.outcome
-                        // Map to StudyEvent; simplistic: if outcome selectedText is rating-like, mark isCommand
-                        val isCommand = false // interpreter will decide; push as transcript
+                        // Diagnostic only (§18/§52): the transcript is *never* discarded because
+                        // of similarity — a user may legitimately repeat the question's words.
+                        val profile = (audioRouteCoordinator?.effectiveRoute?.value ?: fallbackRoute).acousticProfile
+                        if (profile == com.studyagent.client.core.audio.AcousticProfile.PHONE_SPEAKER &&
+                            selfEchoDetector.isSuspectedSelfEcho(outcome.selectedText, clock())
+                        ) {
+                            (audioRouteCoordinator?.metrics ?: localMetrics).recordSuspectedSelfEcho()
+                            AppLogger.w(tag, "suspected_self_echo purpose=${outcome.purpose} chars=${outcome.selectedText.length}")
+                        }
+                        if (outcome.purpose == RecognitionPurpose.ANSWER ||
+                            outcome.purpose == RecognitionPurpose.PUSH_TO_TALK_ANSWER
+                        ) {
+                            if (outcome.isEmpty) {
+                                (audioRouteCoordinator?.metrics ?: localMetrics).recordNoSpeech()
+                            } else if (outcome.hypotheses.isEmpty() && outcome.selectedText.isBlank()) {
+                                (audioRouteCoordinator?.metrics ?: localMetrics).recordNoMatch()
+                            }
+                        }
                         val turnId = _machineState.value.cardTurn?.turnId
-                        dispatch(StudyEvent.RecognitionCompleted(outcome.cardId, turnId, outcome.selectedText, isCommand))
+                        val commandWindow = outcome.purpose == RecognitionPurpose.RATING ||
+                            outcome.purpose == RecognitionPurpose.PUSH_TO_TALK_COMMAND
+                        if (commandWindow) {
+                            // Rating/command windows go through the one interpreter. Answer
+                            // windows never reach here, so a medical answer that contains
+                            // "good" or "next" can never rate or end the session (§13).
+                            handleCommandOutcome(outcome)
+                        } else {
+                            dispatch(
+                                StudyEvent.RecognitionCompleted(
+                                    outcome.cardId,
+                                    turnId,
+                                    outcome.selectedText,
+                                    isCommand = false
+                                )
+                            )
+                        }
                     }
                     is RecognitionTurnResult.Failed -> {
                         if (result.error.code.name == "CANCELLED") return@collect
+                        when (result.error.code) {
+                            RecognitionErrorCode.NO_SPEECH ->
+                                (audioRouteCoordinator?.metrics ?: localMetrics).recordNoSpeech()
+                            RecognitionErrorCode.NO_MATCH ->
+                                (audioRouteCoordinator?.metrics ?: localMetrics).recordNoMatch()
+                            RecognitionErrorCode.TIMEOUT ->
+                                (audioRouteCoordinator?.metrics ?: localMetrics).recordTimeout()
+                            else -> Unit
+                        }
                         dispatch(StudyEvent.RecognitionFailed(null, result.error.code.name))
                     }
                 }
             }
         }
+    }
+
+    companion object {
+        /**
+         * Push-to-talk is explicit user intent: wait briefly for the cancelled utterance to
+         * stop rather than refusing to listen, then apply the normal acoustic gap (§27).
+         */
+        const val PTT_SETTLE_BUDGET_MS = 600L
     }
 
     fun close() {
