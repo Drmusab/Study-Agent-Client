@@ -127,16 +127,29 @@ class MixedLanguageSegmenter {
     }
 
     /** Majority vote by classified letter count; ties default to English (device default voice). */
+    /**
+     * Dominant language of [text] for single-voice fallback.
+     *
+     * Counted per word (not per char — Latin words carry far more characters than
+     * Arabic ones, so char counts systematically favor English). Ties resolve to
+     * ARABIC, this app's primary language.
+     */
     private fun dominantLanguage(text: String): SegmentLanguage {
         var arabic = 0
         var latin = 0
-        for (ch in text) {
-            when (classifyChar(ch)) {
-                SegmentLanguage.ARABIC -> arabic++
-                SegmentLanguage.ENGLISH -> latin++
-                SegmentLanguage.NEUTRAL -> Unit
+        for (token in text.split(' ')) {
+            var hasArabic = false
+            var hasLatin = false
+            for (ch in token) {
+                when (classifyChar(ch)) {
+                    SegmentLanguage.ARABIC -> hasArabic = true
+                    SegmentLanguage.ENGLISH -> hasLatin = true
+                    SegmentLanguage.NEUTRAL -> Unit
+                }
             }
+            if (hasArabic) arabic++
+            if (hasLatin) latin++
         }
-        return if (arabic > latin) SegmentLanguage.ARABIC else SegmentLanguage.ENGLISH
+        return if (arabic >= latin) SegmentLanguage.ARABIC else SegmentLanguage.ENGLISH
     }
 }

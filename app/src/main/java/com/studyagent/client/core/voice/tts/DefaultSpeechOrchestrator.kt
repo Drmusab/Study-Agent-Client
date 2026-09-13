@@ -369,7 +369,7 @@ class DefaultSpeechOrchestrator(
         if (pumpController?.isActive == true) return
         // Separate controller Job so identity survives the launch/assignment race and we can
         // distinguish "latest pump" from a cancelled predecessor when settling global state.
-        val controller = Job(scope.coroutineContext)
+        val controller = Job(scope.coroutineContext[Job])
         pumpController = controller
         scope.launch(controller) {
             while (isActive) {
@@ -559,7 +559,7 @@ class DefaultSpeechOrchestrator(
         val chosen = TtsVoiceSelector.select(
             voices = voices,
             language = langKey,
-            preferredLocaleTag = localeForLanguage(langKey, cfg).toLanguageTag(),
+            preferredLocaleTag = localeForLanguage(language, cfg).toLanguageTag(),
             selectedVoiceId = selectedId,
             preferOffline = cfg.preferOfflineVoices
         )

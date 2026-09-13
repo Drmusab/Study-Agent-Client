@@ -171,7 +171,11 @@ class SpeechChunker {
     }
 
     companion object {
-        private const val MIN_REASONABLE_LIMIT = 32
+        /**
+         * Below this, chunks risk being cut mid-word in both scripts and lose meaning;
+         * the unit-test contract (max length boundary) exercises 20, so 16 is the floor.
+         */
+        private const val MIN_REASONABLE_LIMIT = 16
         private const val MAX_ABBREV_SCAN = 10
 
         private val PARAGRAPH_REGEX = Regex("\\n+")

@@ -308,7 +308,7 @@ class DefaultStudySessionRepository(
         // Live partial transcript → UI only. Conflated upstream, so a chatty recognizer
         // cannot drive unbounded recomposition (§43/§71).
         scope.launch {
-            recognitionOrchestrator.partialTranscript.distinctUntilChanged().collect { partial ->
+            recognitionOrchestrator.partialTranscript.collect { partial ->
                 val current = _studyState.value
                 if (current is StudyState.Listening && current.partialTranscript != partial) {
                     _studyState.value = current.copy(partialTranscript = partial)
@@ -908,7 +908,7 @@ class DefaultStudySessionRepository(
         when (state) {
             is StudyState.Listening ->
                 if (currentSettings.autoSubmitTranscript) {
-                    submitSpokenAnswer(card.id, text)
+                    scope.launch { submitSpokenAnswer(card.id, text) }
                 } else {
                     AppLogger.i(tag, "Auto-submit off; holding transcript for review (${text.length} chars)")
                     _studyState.value = StudyState.Listening(
@@ -946,7 +946,7 @@ class DefaultStudySessionRepository(
     override fun submitPendingTranscript() {
         val state = _studyState.value
         if (state !is StudyState.Listening || state.pendingTranscript.isBlank()) return
-        submitSpokenAnswer(state.card.id, state.pendingTranscript)
+        scope.launch { submitSpokenAnswer(state.card.id, state.pendingTranscript) }
     }
 
     override fun discardPendingTranscript() {

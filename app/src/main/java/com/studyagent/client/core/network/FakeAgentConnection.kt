@@ -290,6 +290,13 @@ class FakeAgentConnection(
                     )
                 )
             }
+
+            // Protocol v2 dashboard/management requests: the in-process fake
+            // agent does not model dashboard state, so it acknowledges by
+            // staying silent (v1-compatible behavior).
+            else -> {
+                AppLogger.d(tag, "FakeAgent: ignoring v2 management message ${message.type}")
+            }
         }
     }
 

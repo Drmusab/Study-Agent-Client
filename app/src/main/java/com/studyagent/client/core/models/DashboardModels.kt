@@ -315,9 +315,9 @@ data class StudyHistoryPayload(
 sealed interface DataFreshness {
     data object Loading : DataFreshness
     data object Unavailable : DataFreshness
-    data class Live(val updatedAtEpochMs: Long) : DataFreshness
-    data class Cached(val updatedAtEpochMs: Long) : DataFreshness
-    data class Stale(val updatedAtEpochMs: Long) : DataFreshness
+    data class Live(override val updatedAtEpochMs: Long) : DataFreshness
+    data class Cached(override val updatedAtEpochMs: Long) : DataFreshness
+    data class Stale(override val updatedAtEpochMs: Long) : DataFreshness
 
     val updatedAtEpochMs: Long?
         get() = when (this) {
