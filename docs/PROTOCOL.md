@@ -183,3 +183,139 @@ Delivers error diagnostics.
   "details": "Connection refused"
 }
 ```
+
+---
+
+# Protocol v2 — Management & Dashboard Extension
+
+Protocol v2 extends v1 without breaking it. A client sends `hello` with
+`supported_versions: ["1","2"]` and `client_capabilities: ["dashboard","study_control"]`.
+A v2 server answers the hello exchange with a `capabilities` frame; a v1 server stays
+silent, so clients fall back to v1 behavior (basic study, voice loop) and simply do not
+use the management surface.
+
+## 4. Capability negotiation
+
+### 4.1 `capabilities` (server → client)
+```json
+{
+  "protocol_version": "2",
+  "type": "capabilities",
+  "capabilities": ["dashboard","deck_list","study_config","history","component_health","learning_insights","ai_usage","session_progress"],
+  "server_name": "StudyPC-Agent",
+  "server_version": "2.1"
+}
+```
+Capability names are plain strings; unknown names are preserved and ignored. Clients
+must gate every management feature on the advertised set.
+
+## 5. Management requests (client → server)
+
+All requests carry `message_id`. Servers SHOULD echo it in the matching response so
+clients can correlate ACKs (§ACK).
+
+| type | capability | response |
+|---|---|---|
+| `request_dashboard` | `dashboard` | `dashboard_snapshot` |
+| `request_decks` | `deck_list` | `deck_list` |
+| `request_component_health` | `component_health` | `component_health` |
+| `request_study_config` | `study_config` | `study_config` |
+| `update_study_config` | `study_config` | `study_config_updated` (ACK) or `error` |
+| `request_history` (`range`: today/7d/30d) | `history` | `study_history` |
+| `request_learning_insights` | `learning_insights` | `learning_insight` |
+| `request_ai_usage` (`range`: today/month/all_time) | `ai_usage` | `ai_usage_stats` |
+
+`request_dashboard` returns the consolidated snapshot (today stats, active deck, current
+session, goal, recent performance, recommendation, insight, AI usage, component health).
+Dedicated requests exist for refreshing individual panels (history ranges, AI usage
+ranges, decks) without re-fetching everything.
+
+## 6. Management responses (server → client)
+
+### 6.1 `dashboard_snapshot`
+```json
+{
+  "type": "dashboard_snapshot",
+  "message_id": "<echoed request id>",
+  "snapshot": {
+    "generated_at": "2026-09-13T07:42:00.000Z",
+    "active_deck": {"name": "MCCQE::Cardiology", "due_count": 42, "new_count": 8, "learning_count": 5, "total_count": 620, "is_favorite": true},
+    "today": {"cards_reviewed": 427, "new_studied": 32, "due_remaining": 47, "recall_rate": 84.0, "study_time_seconds": 6120, "avg_seconds_per_card": 14.3, "daily_goal_cards": 500, "daily_goal_minutes": 120},
+    "current_session": {"session_id": "s1", "deck": "MCCQE::Cardiology", "cards_reviewed": 37, "total_cards": 183, "recall_rate": 86.0, "elapsed_seconds": 1260, "is_paused": false},
+    "goal": {"deck": "MCCQE::Cardiology", "target_cards": 2000, "learned_cards": 1240, "percent_complete": 62.0, "pace_status": "ahead"},
+    "recent_performance": {"days": [{"date": "2026-09-12", "cards_reviewed": 154}], "rating_distribution": {"again": 3, "hard": 9, "good": 31, "easy": 11}, "range": "7d"},
+    "recommendation": {"recommended_deck": "MCCQE::Cardiology", "recommended_mode": "weak_cards", "estimated_cards": 30, "estimated_minutes": 20, "reason": "Recall fell."},
+    "insight": {"weak_topic": "Cardiology", "weak_subtopic": "Arrhythmias", "recall_rate": 62.0, "advice": "Review 15 minutes.", "generated_at": "..."},
+    "ai_usage": {"range": "today", "evaluations": 427, "input_tokens": 380000, "output_tokens": 96000, "estimated_cost": 1.84, "currency": "$"},
+    "component_health": {"anki": {"name": "anki", "status": "ready"}, "llm": {"name": "llm", "status": "ready"}}
+  }
+}
+```
+All snapshot fields are optional; clients render partial snapshots gracefully and never
+invent missing values.
+
+### 6.2 `deck_list`
+```json
+{"type": "deck_list", "message_id": "...", "decks": [
+  {"name": "MCCQE::Cardiology", "due_count": 42, "new_count": 8, "learning_count": 5, "total_count": 620, "is_favorite": true}
+]}
+```
+Deck names use Anki's `::` nesting; clients display the hierarchy but always send the
+original identifier back to the server.
+
+### 6.3 `component_health`
+```json
+{"type": "component_health", "message_id": "...", "timestamp": "...", "components": [
+  {"name": "anki", "status": "ready", "latency_ms": 12},
+  {"name": "llm", "status": "warning", "message": "quota low"}
+]}
+```
+`status` ∈ `ready | connecting | warning | unavailable | error | unknown`. Clients must
+not infer Anki/LLM readiness from the WebSocket connection; components the server does
+not report are displayed as **Unknown**.
+
+### 6.4 `study_config` / `update_study_config` / `study_config_updated`
+`update_study_config` carries the full configuration object:
+```json
+{"type": "update_study_config", "message_id": "X", "config": {
+  "active_deck": "MCCQE::Cardiology",
+  "study_mode": "due_and_new",
+  "session_target_type": "minutes", "session_target_value": 45,
+  "new_per_day": 20, "review_limit_per_day": null, "learning_handling": "mixed",
+  "evaluation": {"strictness": "balanced", "semantic_matching": true, "require_key_points": true,
+                  "penalize_incorrect": true, "penalize_dangerous": true, "partial_credit": true},
+  "feedback_depth": "normal",
+  "socratic": {"enabled": true, "max_follow_ups": 2, "reveal_after_attempts": 3},
+  "hint_policy": "manual_only",
+  "rating_mode": "suggest", "auto_rate_confidence": 95,
+  "transcript_retention": "score_only"
+}}
+```
+The server MUST answer with `study_config_updated` **echoing `message_id` X** (the ACK,
+optionally echoing the committed config) or an `error` frame. The client commits nothing
+before the ACK and rolls back nothing on rejection — the draft survives either way.
+Unsolicited `study_config_updated` (server-initiated change) is surfaced to the user
+instead of silently overwriting unsaved edits.
+
+### 6.5 `study_history`, `learning_insight`, `ai_usage_stats`
+```json
+{"type": "study_history", "history": {"range": "7d", "days": [{"date": "2026-09-12", "cards_reviewed": 154, "recall_rate": 82.0, "study_time_seconds": 2100}], "rating_distribution": {"again": 3, "hard": 9, "good": 31, "easy": 11}}}
+{"type": "learning_insight", "insights": [{"weak_topic": "Cardiology", "weak_subtopic": "Arrhythmias", "recall_rate": 62.0, "missed_points": ["..."], "advice": "...", "generated_at": "..."}]}
+{"type": "ai_usage_stats", "usage": {"range": "month", "evaluations": 5210, "input_tokens": 4600000, "output_tokens": 1150000, "estimated_cost": 22.6, "currency": "$"}}
+```
+Cost is always server-computed; clients never calculate provider billing.
+
+## 7. Live session pushes
+
+`session_progress` (`current_card_index`, `total_cards`) and `session_stats`
+(`cards_studied`, `recall_rate`, `remaining_due`) update dashboards live between full
+refreshes. `session_finished` MAY include a `details` object (`SessionSummaryPayload`:
+rating distribution, weak topics, `ai_note`) for the post-session summary.
+
+## 8. `start_session` configuration (v2)
+
+`start_session` gains an optional structured `config` object (target, limits,
+evaluation strictness, feedback depth, socratic mode, hint policy, rating mode,
+transcript retention). v1 servers ignore it; v2 servers apply it to the session.
+`mode` values: `review_due`, `new_cards`, `due_and_new`, `weak_cards`,
+`incorrect_cards`, `custom`.

@@ -91,6 +91,16 @@ class PreferencesDataStore(
         val MAX_RECONNECT_ATTEMPTS = intPreferencesKey("max_reconnect_attempts")
         val PING_INTERVAL_SECONDS = longPreferencesKey("ping_interval_seconds")
         val PROFILES_JSON = stringPreferencesKey("profiles_json")
+
+        // Management-layer caches (Protocol v2 dashboard/control). These are
+        // display caches only — the PC Study Agent always remains authoritative.
+        val DASHBOARD_CACHE_JSON = stringPreferencesKey("dashboard_cache_json")
+        val DASHBOARD_CACHE_SAVED_AT = longPreferencesKey("dashboard_cache_saved_at")
+        val DECKS_CACHE_JSON = stringPreferencesKey("decks_cache_json")
+        val DECKS_CACHE_SAVED_AT = longPreferencesKey("decks_cache_saved_at")
+        val CONTROL_CONFIG_JSON = stringPreferencesKey("control_config_json")
+        val CONTROL_CONFIG_SAVED_AT = longPreferencesKey("control_config_saved_at")
+        val CONTROL_DRAFT_JSON = stringPreferencesKey("control_draft_json")
     }
 
     private fun readSettings(prefs: Preferences): AppSettings {
@@ -276,6 +286,82 @@ class PreferencesDataStore(
     suspend fun setSelectedProfileId(profileId: String) {
         context.dataStore.edit { prefs ->
             prefs[Keys.SELECTED_PROFILE_ID] = profileId
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Management-layer cache accessors (dashboard snapshot, decks, study
+    // control config/draft). Stored as raw JSON so the repository layer can
+    // version its own models without touching [AppSettings].
+    // ------------------------------------------------------------------
+
+    val dashboardCacheJson: Flow<String?> = context.dataStore.data
+        .catch { }
+        .map { prefs -> prefs[Keys.DASHBOARD_CACHE_JSON] }
+
+    val dashboardCacheSavedAt: Flow<Long?> = context.dataStore.data
+        .catch { }
+        .map { prefs -> prefs[Keys.DASHBOARD_CACHE_SAVED_AT] }
+
+    val decksCacheJson: Flow<String?> = context.dataStore.data
+        .catch { }
+        .map { prefs -> prefs[Keys.DECKS_CACHE_JSON] }
+
+    val decksCacheSavedAt: Flow<Long?> = context.dataStore.data
+        .catch { }
+        .map { prefs -> prefs[Keys.DECKS_CACHE_SAVED_AT] }
+
+    val controlConfigJson: Flow<String?> = context.dataStore.data
+        .catch { }
+        .map { prefs -> prefs[Keys.CONTROL_CONFIG_JSON] }
+
+    val controlConfigSavedAt: Flow<Long?> = context.dataStore.data
+        .catch { }
+        .map { prefs -> prefs[Keys.CONTROL_CONFIG_SAVED_AT] }
+
+    val controlDraftJson: Flow<String?> = context.dataStore.data
+        .catch { }
+        .map { prefs -> prefs[Keys.CONTROL_DRAFT_JSON] }
+
+    suspend fun setDashboardCache(json: String?, savedAtEpochMs: Long) {
+        context.dataStore.edit { prefs ->
+            if (json.isNullOrBlank()) {
+                prefs.remove(Keys.DASHBOARD_CACHE_JSON)
+                prefs.remove(Keys.DASHBOARD_CACHE_SAVED_AT)
+            } else {
+                prefs[Keys.DASHBOARD_CACHE_JSON] = json
+                prefs[Keys.DASHBOARD_CACHE_SAVED_AT] = savedAtEpochMs
+            }
+        }
+    }
+
+    suspend fun setDecksCache(json: String?, savedAtEpochMs: Long) {
+        context.dataStore.edit { prefs ->
+            if (json.isNullOrBlank()) {
+                prefs.remove(Keys.DECKS_CACHE_JSON)
+                prefs.remove(Keys.DECKS_CACHE_SAVED_AT)
+            } else {
+                prefs[Keys.DECKS_CACHE_JSON] = json
+                prefs[Keys.DECKS_CACHE_SAVED_AT] = savedAtEpochMs
+            }
+        }
+    }
+
+    suspend fun setControlConfigCache(json: String?, savedAtEpochMs: Long) {
+        context.dataStore.edit { prefs ->
+            if (json.isNullOrBlank()) {
+                prefs.remove(Keys.CONTROL_CONFIG_JSON)
+                prefs.remove(Keys.CONTROL_CONFIG_SAVED_AT)
+            } else {
+                prefs[Keys.CONTROL_CONFIG_JSON] = json
+                prefs[Keys.CONTROL_CONFIG_SAVED_AT] = savedAtEpochMs
+            }
+        }
+    }
+
+    suspend fun setControlDraft(json: String?) {
+        context.dataStore.edit { prefs ->
+            if (json.isNullOrBlank()) prefs.remove(Keys.CONTROL_DRAFT_JSON) else prefs[Keys.CONTROL_DRAFT_JSON] = json
         }
     }
 }

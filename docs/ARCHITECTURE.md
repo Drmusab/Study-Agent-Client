@@ -255,3 +255,59 @@ AudioDeviceCallback                    StudyAudioRouteCoordinator
      cancel, backend events, watchdog, retry) are serialized through one monitor, so the
      study loop, the event collector, the watchdog and UI-triggered calls can never
      interleave a check-then-act sequence.
+
+---
+
+## Management Layer (Dashboard + Study Control Center)
+
+Protocol v2 adds an operational command center on top of the voice study loop. Full
+product behavior is documented in `docs/DASHBOARD.md` and `docs/CONTROL_CENTER.md`;
+wire details live in `docs/PROTOCOL.md` (§4–§8).
+
+### Component map
+
+```
+ConnectionRepository (transport, message bus)
+        │                       │
+CapabilityStore ◄──── capabilities frame (negotiation, 4 s fallback to v1)
+        │
+        ├── DefaultDashboardRepository ── DashboardUiState ── HomeScreen
+        │     request_dashboard/decks/health/history/insights/ai_usage
+        │     single-flight coalescing · 8 s timeouts · out-of-order guard
+        │     offline snapshot/deck cache (DataStore) · session push merges
+        │
+        └── DefaultStudyControlRepository ── ControlCenterUiState ── ControlCenterScreen
+              serverConfig ↔ draft ↔ localConfig
+              update_study_config → ACK (message_id echo) / reject / timeout
+              StudyPreset.applyTo / matching (centralized preset logic)
+```
+
+### Data ownership rules
+
+1. The PC Study Agent computes everything analytic (pace, weakness, recommendation,
+   AI cost). Android renders — it never recomputes.
+2. `CapabilityStore` is the single capability authority; Dashboard, Control Center and
+   Connection observe it instead of guessing features.
+3. Dashboard data flows `server → repository → single StateFlow → Compose`. Requests
+   are lifecycle/repository-driven; Compose recomposition never triggers network I/O.
+4. Control configuration commits only on a correlated server ACK; rejection and timeout
+   preserve both the authoritative config and the user's draft.
+5. Session start uses the Control Center's live configuration
+   (`StartStudyRequest(deck, mode, config)`); v1 servers receive the backward-compatible
+   deck + mode only. Duplicate starts are rejected by the session state machine.
+6. Settings (device speech/audio) and Control Center (agent behavior) never overlap;
+   the only link is the explicit preset adapter for local hands-free flags.
+
+### Navigation
+
+Primary destinations via bottom navigation: **Dashboard**, **Study**, **Control**.
+Connection / Settings / Diagnostics remain secondary (Dashboard header). The bottom bar
+hides during immersive study turns so the voice loop is never crowded.
+
+### Testing
+
+Repository behavior (coalescing, out-of-order protection, timeouts, caching, capability
+fallback, config ACK/rejection/timeout/rapid-save, presets, freshness, start payloads)
+is covered by JVM unit tests under `app/src/test/java/com/studyagent/client/data/`.
+The Fake Agent (`FakeAgentConnection`) and `server/mock_pc_agent.py` both implement the
+full v2 management surface, including partial-v2 and v1-only modes for gating tests.

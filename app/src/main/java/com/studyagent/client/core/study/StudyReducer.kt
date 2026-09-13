@@ -174,7 +174,12 @@ object StudyReducer {
         val newEpoch = if (state.phase is SessionPhase.Finished) state.epoch + 1 else if (state.isIdle) state.epoch else state.epoch + 1
         val msgId = event.messageId.ifBlank { UUID.randomUUID().toString() }
         val pending = newPending(PendingAction.ActionType.START_SESSION, state.copy(epoch = newEpoch), msgId, null, null, clockMs)
-        val send = StudyEffect.Network.Send(msgId, ClientMessage.StartSession(messageId = msgId, deck = event.deck, mode = "review_due"))
+        // Mode + config come from the Study Control Center (§75). v1 servers ignore
+        // the structured config field, preserving backward compatibility (§76).
+        val send = StudyEffect.Network.Send(
+            msgId,
+            ClientMessage.StartSession(messageId = msgId, deck = event.deck, mode = event.mode, config = event.config)
+        )
         val newState = state.copy(
             epoch = newEpoch,
             phase = SessionPhase.Starting,
@@ -204,7 +209,7 @@ object StudyReducer {
         }
         val snapshot = StudySessionSnapshot(
             sessionId = event.sessionId,
-            deckName = event.deck ?: "Toronto Notes",
+            deckName = event.deck ?: "Study Session",
             remainingCards = event.totalCards ?: 0,
             totalCardsInQueue = event.totalCards,
             startedAtEpochMs = clockMs

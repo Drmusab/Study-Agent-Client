@@ -34,7 +34,7 @@ object SessionReconciler {
         val newSession = if (local.session == null) {
             StudySessionSnapshot(
                 sessionId = snapshot.sessionId,
-                deckName = snapshot.deckName ?: "Toronto Notes",
+                deckName = snapshot.deckName ?: "Study Session",
                 currentCard = snapshot.currentCard,
                 remainingCards = snapshot.remainingCards ?: 0,
                 totalReviewedInSession = snapshot.reviewedCards ?: 0,

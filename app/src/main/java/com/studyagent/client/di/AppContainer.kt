@@ -23,11 +23,18 @@ import com.studyagent.client.core.voice.tts.TtsEngineAdapter
 import com.studyagent.client.data.preferences.DefaultProfileRepository
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import com.studyagent.client.data.preferences.ProfileRepository
+import com.studyagent.client.data.repository.CapabilityStore
 import com.studyagent.client.data.repository.ConnectionRepository
+import com.studyagent.client.data.repository.DashboardRepository
 import com.studyagent.client.data.repository.DefaultConnectionRepository
+import com.studyagent.client.data.repository.DefaultDashboardRepository
 import com.studyagent.client.data.repository.DefaultDiagnosticsRepository
+import com.studyagent.client.data.repository.DefaultStudyControlRepository
 import com.studyagent.client.data.repository.DefaultStudySessionRepository
 import com.studyagent.client.data.repository.DiagnosticsRepository
+import com.studyagent.client.data.repository.ManagementCacheStorage
+import com.studyagent.client.data.repository.PreferencesManagementCacheStorage
+import com.studyagent.client.data.repository.StudyControlRepository
 import com.studyagent.client.data.repository.StudySessionMachineRepository
 import com.studyagent.client.data.repository.StudySessionRepository
 import kotlinx.coroutines.CoroutineScope
@@ -52,6 +59,15 @@ interface AppContainer {
     val voiceCommandManager: VoiceCommandManager
     val studySessionRepository: StudySessionRepository
     val diagnosticsRepository: DiagnosticsRepository
+
+    /** One authoritative protocol-capability state shared by every screen (§109). */
+    val capabilityStore: CapabilityStore
+
+    /** Dashboard/management data layer (§8). */
+    val dashboardRepository: DashboardRepository
+
+    /** Study Control Center data layer (§9). */
+    val studyControlRepository: StudyControlRepository
 }
 
 /**
@@ -120,6 +136,37 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
     }
 
     override val voiceCommandManager: VoiceCommandManager by lazy { VoiceCommandManager() }
+
+    /** Management-layer cache (dashboard snapshot, decks, study config/draft). */
+    val managementCacheStorage: ManagementCacheStorage by lazy {
+        PreferencesManagementCacheStorage(preferencesDataStore)
+    }
+
+    override val capabilityStore: CapabilityStore by lazy {
+        CapabilityStore(
+            connectionRepository = connectionRepository,
+            scope = CoroutineScope(SupervisorJob() + dispatchers.default)
+        )
+    }
+
+    override val dashboardRepository: DashboardRepository by lazy {
+        DefaultDashboardRepository(
+            connectionRepository = connectionRepository,
+            capabilityStore = capabilityStore,
+            cacheStorage = managementCacheStorage,
+            dispatchers = dispatchers
+        )
+    }
+
+    override val studyControlRepository: StudyControlRepository by lazy {
+        DefaultStudyControlRepository(
+            connectionRepository = connectionRepository,
+            capabilityStore = capabilityStore,
+            cacheStorage = managementCacheStorage,
+            dispatchers = dispatchers
+        )
+    }
+
     /**
      * Hardened machine-backed repository (§151). The legacy [DefaultStudySessionRepository]
      * remains available for tests and as a migration fallback, but the app's
@@ -133,7 +180,9 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             settingsFlow = preferencesDataStore.settingsFlow,
             audioRouteManager = audioRouteManager,
             dispatchers = dispatchers,
-            audioRouteCoordinator = studyAudioRouteCoordinator
+            audioRouteCoordinator = studyAudioRouteCoordinator,
+            // Voice-command starts use the Control Center's live configuration (§75).
+            startRequestProvider = { studyControlRepository.currentStartRequest() }
         )
     }
     /** Legacy repository kept for direct testing and gradual migration. */
