@@ -42,6 +42,7 @@ import com.studyagent.client.ui.navigation.Screen
 import com.studyagent.client.ui.theme.DarkBackground
 import com.studyagent.client.ui.theme.DarkSurface
 import com.studyagent.client.ui.theme.PrimaryBlue
+import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.StudyAgentTheme
 import com.studyagent.client.ui.theme.TextMuted
 import com.studyagent.client.ui.theme.TextPrimary
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = DarkBackground
+                    color = AppColors.appBackground
                 ) {
                     val container = ServiceLocator.appContainer
                     StudyAgentRoot(container = container)
@@ -189,12 +191,16 @@ private fun StudyAgentRoot(container: AppContainer) {
 
     Scaffold(
         containerColor = DarkBackground,
+        containerColor = AppColors.appBackground,
         bottomBar = {
             if (showBottomBar) {
                 NavigationBar(containerColor = DarkSurface) {
+                NavigationBar(containerColor = AppColors.surfacePrimary) {
                     destinations.forEach { destination ->
+                        val selected = currentRoute == destination.route
                         NavigationBarItem(
                             selected = currentRoute == destination.route,
+                            selected = selected,
                             onClick = {
                                 navController.navigate(destination.route) {
                                     popUpTo(navController.graph.findStartDestination().id) {
@@ -209,15 +215,20 @@ private fun StudyAgentRoot(container: AppContainer) {
                                     destination.icon,
                                     contentDescription = destination.label,
                                     tint = if (currentRoute == destination.route) PrimaryBlue else TextMuted
+                                    tint = if (selected) AppColors.actionPrimary else AppColors.contentMuted
                                 )
                             },
                             label = {
                                 Text(
                                     destination.label,
                                     color = if (currentRoute == destination.route) TextPrimary else TextMuted
+                                    color = if (selected) AppColors.contentPrimary else AppColors.contentMute
                                 )
                             },
                             colors = NavigationBarItemDefaults.colors(indicatorColor = DarkSurface)
+                            colors = NavigationBarItemDefaults.colors(
+                                indicatorColor = AppColors.surfaceInteractive
+                            )
                         )
                     }
                 }
