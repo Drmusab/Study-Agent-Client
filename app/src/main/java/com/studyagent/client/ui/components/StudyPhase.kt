@@ -24,6 +24,10 @@ import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -126,6 +130,10 @@ data class PhaseVisual(
 /**
  * Explicit phase chip: icon + text + color, one line, always visible (§23).
  *
+ * The phase transition is animated with a short fade so the user instantly sees
+ * when the turn flips from Speaking → Listening (§72). Colour is never the only
+ * cue — icon and text animate together.
+ *
  * Carries the `study_phase_chip` semantics tag read by the instrumented suite.
  */
 @Composable
@@ -134,28 +142,36 @@ fun StudyPhaseChip(
     modifier: Modifier = Modifier
 ) {
     val visual = PhaseVisual.of(phase)
-    Row(
+    AnimatedContent(
+        targetState = phase,
+        transitionSpec = {
+            fadeIn(animationSpec = androidx.compose.animation.core.tween(180)) togetherWith
+                fadeOut(animationSpec = androidx.compose.animation.core.tween(150))
+        },
+        label = "phaseChip",
         modifier = modifier
             .clip(AppShape.chipShape)
             .background(visual.color.copy(alpha = 0.14f))
             .heightIn(min = 32.dp)
             .padding(horizontal = AppSpacing.SM, vertical = AppSpacing.XS)
             .semantics { contentDescription = "Study phase: ${visual.label}" }
-            .testTag(STUDY_PHASE_CHIP_TEST_TAG),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            imageVector = visual.icon,
-            contentDescription = null,
-            tint = visual.color,
-            modifier = Modifier.size(16.dp)
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = visual.label,
-            style = MaterialTheme.typography.labelLarge,
-            color = visual.color
-        )
+            .testTag(STUDY_PHASE_CHIP_TEST_TAG)
+    ) { targetPhase ->
+        val targetVisual = PhaseVisual.of(targetPhase)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = targetVisual.icon,
+                contentDescription = null,
+                tint = targetVisual.color,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = targetVisual.label,
+                style = MaterialTheme.typography.labelLarge,
+                color = targetVisual.color
+            )
+        }
     }
 }
 

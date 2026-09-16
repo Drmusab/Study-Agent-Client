@@ -87,6 +87,7 @@ fun SettingsScreen(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val englishVoices by viewModel.englishVoices.collectAsStateWithLifecycle()
     val arabicVoices by viewModel.arabicVoices.collectAsStateWithLifecycle()
+    val engines by viewModel.engines.collectAsStateWithLifecycle()
     val previewing by viewModel.previewing.collectAsStateWithLifecycle()
     val recognitionCapabilities by viewModel.recognitionCapabilities.collectAsStateWithLifecycle()
     val persistenceError by viewModel.persistenceError.collectAsStateWithLifecycle()

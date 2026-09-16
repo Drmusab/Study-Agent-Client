@@ -73,7 +73,7 @@ fun ControlSection(
     }
 }
 
-/** Chip-based single selection. Every chip is ≥40dp tall with 8dp gaps (§80). */
+/** Chip-based single selection. Every chip is ≥48dp tall with 8dp gaps (§63/§80). */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun <T> ChoiceChips(
@@ -98,7 +98,7 @@ fun <T> ChoiceChips(
                     selectedLabelColor = AppColors.actionPrimary,
                     labelColor = AppColors.contentSecondary
                 ),
-                modifier = Modifier.heightIn(min = 40.dp)
+                modifier = Modifier.heightIn(min = 48.dp)
             )
         }
     }

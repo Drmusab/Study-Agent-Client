@@ -90,7 +90,7 @@ Never set `fontSize` inline in a screen; pick a style.
 
 `quick 150ms · standard 220ms · slow 300ms`, FastOutSlowIn. `useReducedMotion()` returns
 the system preference (API 30+) and all continuous animation (PTT pulse, wave bars)
-is gated on it. No animation is decorative: everything expresses a state change.
+is gated on it. Card changes use fade + 12dp vertical shift (§71). No animation is decorative: everything expresses a state change.
 
 ---
 
@@ -110,12 +110,12 @@ is gated on it. No animation is decorative: everything expresses a state change.
 | `ChoiceRow(title, selected, onSelect, description?)` | AppControls.kt | Radio row, ≥ 52dp. |
 | `ExpandableSection(title, expanded, onToggle, summary?)` | AppControls.kt | Progressive disclosure with rotated chevron. |
 | `KeyValueRow`, `AppDivider` | AppControls.kt | Dense label/value line; hairline. |
-| `StudyPhaseChip(phase)`, `StudySessionHeader(...)`, `studyPhaseOf(state)` | StudyPhase.kt | The one mapping from `StudyState` to what the user should do. Tag `study_phase_chip`. |
+| `StudyPhaseChip(phase)`, `StudySessionHeader(...)`, `studyPhaseOf(state)` | StudyPhase.kt | The one mapping from `StudyState` to what the user should do. Animated fade on phase change (§72), icon + text + colour, never colour alone. Tag `study_phase_chip`. |
 | `PushToTalkButton(isListening, …, isProcessing)` | PushToTalkButton.kt | 72dp, press-and-hold or tap-toggle, states Idle / Listening / Processing / Disabled, haptics, reduced-motion aware. Tag `PUSH_TO_TALK_TEST_TAG`. |
-| `RatingButtonGroup(onRate, suggestedRating, enabled)` | RatingButtonGroup.kt | 2×2 below `ratingGridBreakpoint`, 1×4 above; ≥ 56dp; suggested rating outlined; tags `ratingTestTag(rating)`. |
-| `ConnectionBadge(state, onClick)` + `connectionVisualOf` | ConnectionBadge.kt | Tappable status chip, ≥ 40dp, icon + text + colour. |
+| `RatingButtonGroup(onRate, suggestedRating, enabled)` | RatingButtonGroup.kt | 2×2 below `ratingGridBreakpoint`, 1×4 above; ≥ 52dp; suggested rating filled with ★ + white text, others tinted; tags `ratingTestTag(rating)`. |
+| `ConnectionBadge(state, onClick)` + `connectionVisualOf` | ConnectionBadge.kt | Tappable status chip, ≥ 48dp, icon + text + colour, `AutoMirrored` semantics. |
 | `AudioRouteIndicator(route?)` | AudioRouteIndicator.kt | Neutral "Headphones / Phone audio" chip; phone is a normal route, not a warning. |
-| `VoiceWaveVisualizer(isActive, color)` | VoiceWaveVisualizer.kt | Activity indicator driven by a boolean — the RMS level flow is **not** collected by screens. |
+| `VoiceWaveVisualizer(isActive, color)` | VoiceWaveVisualizer.kt | Activity indicator driven by a boolean — the RMS level flow is **not** collected by screens. 7-bar wave, reduced-motion aware. |
 
 Control-Center-only helpers (`control/components/ControlComponents.kt`): `ControlSection`,
 `ChoiceChips`, `StepperRow`, `SwitchRow`, `SliderRow`, `ExpandableAdvanced` — thin
