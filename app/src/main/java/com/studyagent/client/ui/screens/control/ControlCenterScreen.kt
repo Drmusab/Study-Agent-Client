@@ -74,6 +74,9 @@ import com.studyagent.client.ui.theme.StatusRed
 import com.studyagent.client.ui.theme.TextMuted
 import com.studyagent.client.ui.theme.TextPrimary
 import com.studyagent.client.ui.theme.TextSecondary
+import com.studyagent.client.ui.theme.AppColors
+import com.studyagent.client.ui.theme.AppShape
+import com.studyagent.client.ui.theme.AppSpacing
 
 /**
  * Study Control Center (§45): how the PC Study Agent studies — deck, mode,
@@ -108,6 +111,9 @@ fun ControlCenterScreen(
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBackground)
             )
         },
+        containerColor = AppColors.appBackground,
+        topBar = { StudyAgentTopBar(title = "Study Control", onBack = onNavigateBack) },
+
         bottomBar = {
             ApplyBar(
                 state = state,
@@ -118,11 +124,13 @@ fun ControlCenterScreen(
         }
     ) { innerPadding ->
         LazyColumn(
+        BoxWithConstraints(
             modifier = modifier
                 .fillMaxSize()
                 .padding(innerPadding),
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(innerPadding)
         ) {
             // Server-pushed change while the draft is dirty (§115).
             if (state.serverChangedWhileDirty) {
@@ -154,6 +162,32 @@ fun ControlCenterScreen(
                                 }
                             }
                         }
+            val contentWidth = maxWidth.coerceAtMost(AppSpacing.dashboardMaxWidth)
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .width(contentWidth)
+                    .align(Alignment.TopCenter),
+                contentPadding = PaddingValues(
+                    start = AppSpacing.contentGutter,
+                    end = AppSpacing.contentGutter,
+                    top = AppSpacing.XS,
+                    bottom = AppSpacing.LG
+                ),
+                verticalArrangement = Arrangement.spacedBy(AppSpacing.screenSectionGap)
+            ) {
+                // Server-pushed change while the draft is dirty (§115).
+                if (state.serverChangedWhileDirty) {
+                    item(key = "pushNotice") {
+                        InfoBanner(
+                            message = "You have unsaved edits. Reload the server configuration or keep your draft.",
+                            tone = BannerTone.WARNING,
+                            title = "Configuration changed on the Study Agent",
+                            actionLabel = "Reload",
+                            onAction = { viewModel.reloadServerConfig() },
+                            dismissible = true,
+                            onDismiss = { viewModel.keepMyDraft() }
+                        )
                     }
                 }
             }
@@ -176,6 +210,25 @@ fun ControlCenterScreen(
                         text = "A session is in progress. Changes below apply to your next session.",
                         color = StatusAmber
                     )
+                // Active session: primary controls first (§82), edits apply next session (§80).
+                if (state.sessionActive) {
+                    item(key = "activeSession") {
+                        ActiveSessionControl(
+                            isPaused = state.sessionPaused,
+                            onPause = { viewModel.pauseSession() },
+                            onResume = {
+                                viewModel.resumeSession()
+                                onNavigateToStudy()
+                            },
+                            onEnd = { viewModel.endSession() }
+                        )
+                    }
+                    item(key = "nextSessionNotice") {
+                        InfoPanel(
+                            text = "A session is in progress. Changes below apply to your next session.",
+                            color = AppColors.statusWarning
+                        )
+                    }
                 }
             }
 
@@ -186,6 +239,14 @@ fun ControlCenterScreen(
                             "Your choices are stored on this device and applied when a session starts.",
                         color = StatusAmber
                     )
+                if (state.isLegacyV1) {
+                    item(key = "v1notice") {
+                        InfoPanel(
+                            text = "This Study Agent speaks Protocol v1: remote configuration is not available. " +
+                                "Your choices are stored on this device and applied when a session starts.",
+                            color = AppColors.statusWarning
+                        )
+                    }
                 }
             }
 
@@ -207,7 +268,26 @@ fun ControlCenterScreen(
                             "Custom configuration",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextMuted
+                // Control summary (§121) — configuration at a glance.
+                item(key = "summary") { ControlSummary(state = state) }
+
+                // Presets (§70).
+                item(key = "presets") {
+                    ControlSection(title = "Preset") {
+                        ChoiceChips(
+                            options = StudyPreset.entries.filter { it != StudyPreset.CUSTOM },
+                            selected = state.selectedPreset,
+                            onSelect = { preset -> presetPreview = preset },
+                            label = { it.displayName }
                         )
+                        if (state.selectedPreset == StudyPreset.CUSTOM) {
+                            Spacer(modifier = Modifier.height(AppSpacing.XS))
+                            Text(
+                                "Custom configuration",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AppColors.contentMuted
+                            )
+                        }
                     }
                 }
             }
@@ -232,6 +312,27 @@ fun ControlCenterScreen(
                         onSelect = { mode -> viewModel.updateDraft { it.copy(studyMode = mode) } },
                         label = { it.displayName }
                     )
+                // Deck & mode (§55/§56).
+                item(key = "deckMode") {
+                    val nextSessionBadge = if (state.sessionActive) "Applies next session" else null
+                    ControlSection(title = "Deck & Mode", badge = nextSessionBadge) {
+                        FieldDeckSelector(
+                            state = state,
+                            onOpenPicker = { showDeckPicker = true },
+                            manualDeckText = manualDeckText,
+                            onManualDeckChange = { manualDeckText = it },
+                            onManualDeckSubmit = { name -> if (name.isNotBlank()) viewModel.selectDeck(name.trim()) }
+                        )
+                        Spacer(modifier = Modifier.height(AppSpacing.SM))
+                        Text("Study Mode", style = MaterialTheme.typography.bodyMedium, color = AppColors.contentPrimary)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        ChoiceChips(
+                            options = StudyMode.entries,
+                            selected = state.draftConfig.studyMode,
+                            onSelect = { mode -> viewModel.updateDraft { it.copy(studyMode = mode) } },
+                            label = { it.displayName }
+                        )
+                    }
                 }
             }
 
@@ -254,7 +355,26 @@ fun ControlCenterScreen(
                             onValueChange = { v -> viewModel.updateDraft { it.copy(sessionTargetValue = v) } },
                             range = 1..999,
                             step = 5
+                // Session target (§57-§60).
+                item(key = "session") {
+                    val draft = state.draftConfig
+                    ControlSection(title = "Session", badge = if (state.sessionActive) "Applies next session" else null) {
+                        Text("Target", style = MaterialTheme.typography.bodyMedium, color = AppColors.contentPrimary)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        ChoiceChips(
+                            options = SessionTargetType.entries,
+                            selected = draft.sessionTargetType,
+                            onSelect = { type -> viewModel.updateDraft { it.copy(sessionTargetType = type) } },
+                            label = { it.displayName }
                         )
+                        when (draft.sessionTargetType) {
+                            SessionTargetType.CARDS -> StepperRow(
+                                label = "Target cards",
+                                value = draft.sessionTargetValue,
+                                onValueChange = { v -> viewModel.updateDraft { it.copy(sessionTargetValue = v) } },
+                                range = 1..999,
+                                step = 5
+                            )
 
                         SessionTargetType.MINUTES -> StepperRow(
                             label = "Target minutes",
@@ -263,6 +383,13 @@ fun ControlCenterScreen(
                             range = 1..240,
                             step = 5
                         )
+                            SessionTargetType.MINUTES -> StepperRow(
+                                label = "Target minutes",
+                                value = draft.sessionTargetValue,
+                                onValueChange = { v -> viewModel.updateDraft { it.copy(sessionTargetValue = v) } },
+                                range = 1..240,
+                                step = 5
+                            )
 
                         SessionTargetType.FINISH_DUE -> Unit
                     }
@@ -279,6 +406,7 @@ fun ControlCenterScreen(
                         checked = draft.reviewLimitPerDay == null,
                         onCheckedChange = { useDefault ->
                             viewModel.updateDraft { it.copy(reviewLimitPerDay = if (useDefault) null else 200) }
+                            SessionTargetType.FINISH_DUE -> Unit
                         }
                     )
                     draft.reviewLimitPerDay?.let { limit ->
@@ -288,6 +416,37 @@ fun ControlCenterScreen(
                             onValueChange = { v -> viewModel.updateDraft { it.copy(reviewLimitPerDay = v) } },
                             range = 0..9999,
                             step = 10
+                            label = "New cards",
+                            description = "Session-level Study Agent limit — does not change your Anki deck options.",
+                            value = draft.newPerDay,
+                            onValueChange = { v -> viewModel.updateDraft { it.copy(newPerDay = v) } },
+                            range = 0..999,
+                            step = 5
+                        )
+                        SwitchRow(
+                            label = "Use Anki default review limit",
+                            checked = draft.reviewLimitPerDay == null,
+                            onCheckedChange = { useDefault ->
+                                viewModel.updateDraft { it.copy(reviewLimitPerDay = if (useDefault) null else 200) }
+                            }
+                        )
+                        draft.reviewLimitPerDay?.let { limit ->
+                            StepperRow(
+                                label = "Review limit",
+                                value = limit,
+                                onValueChange = { v -> viewModel.updateDraft { it.copy(reviewLimitPerDay = v) } },
+                                range = 0..9999,
+                                step = 10
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(AppSpacing.XS))
+                        Text("Learning cards", style = MaterialTheme.typography.bodyMedium, color = AppColors.contentPrimary)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        ChoiceChips(
+                            options = LearningHandling.entries,
+                            selected = draft.learningHandling,
+                            onSelect = { handling -> viewModel.updateDraft { it.copy(learningHandling = handling) } },
+                            label = { it.displayName }
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
@@ -332,6 +491,17 @@ fun ControlCenterScreen(
                             onCheckedChange = { v ->
                                 viewModel.updateDraft { it.copy(evaluation = it.evaluation.copy(semanticMatching = v)) }
                             }
+                // Evaluation (§61/§62).
+                item(key = "evaluation") {
+                    val draft = state.draftConfig
+                    ControlSection(title = "Evaluation") {
+                        ChoiceChips(
+                            options = EvaluationStrictness.entries,
+                            selected = draft.evaluation.strictness,
+                            onSelect = { strictness ->
+                                viewModel.updateDraft { it.copy(evaluation = it.evaluation.copy(strictness = strictness)) }
+                            },
+                            label = { it.displayName }
                         )
                         SwitchRow(
                             label = "Require key points",
@@ -339,6 +509,11 @@ fun ControlCenterScreen(
                             onCheckedChange = { v ->
                                 viewModel.updateDraft { it.copy(evaluation = it.evaluation.copy(requireKeyPoints = v)) }
                             }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            strictnessDescription(draft.evaluation.strictness),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.contentMuted
                         )
                         SwitchRow(
                             label = "Penalize incorrect statements",
@@ -346,6 +521,17 @@ fun ControlCenterScreen(
                             onCheckedChange = { v ->
                                 viewModel.updateDraft {
                                     it.copy(evaluation = it.evaluation.copy(penalizeIncorrectStatements = v))
+                        Spacer(modifier = Modifier.height(AppSpacing.XS))
+                        ExpandableAdvanced(
+                            title = "Advanced evaluation",
+                            expanded = advancedEvaluationExpanded,
+                            onToggle = { advancedEvaluationExpanded = !advancedEvaluationExpanded }
+                        ) {
+                            SwitchRow(
+                                label = "Semantic matching",
+                                checked = draft.evaluation.semanticMatching,
+                                onCheckedChange = { v ->
+                                    viewModel.updateDraft { it.copy(evaluation = it.evaluation.copy(semanticMatching = v)) }
                                 }
                             }
                         )
@@ -355,20 +541,266 @@ fun ControlCenterScreen(
                             onCheckedChange = { v ->
                                 viewModel.updateDraft {
                                     it.copy(evaluation = it.evaluation.copy(penalizeDangerousMisconceptions = v))
+                            )
+                            SwitchRow(
+                                label = "Require key points",
+                                checked = draft.evaluation.requireKeyPoints,
+                                onCheckedChange = { v ->
+                                    viewModel.updateDraft { it.copy(evaluation = it.evaluation.copy(requireKeyPoints = v)) }
                                 }
                             }
+                            )
+                            SwitchRow(
+                                label = "Penalize incorrect statements",
+                                checked = draft.evaluation.penalizeIncorrectStatements,
+                                onCheckedChange = { v ->
+                                    viewModel.updateDraft {
+                                        it.copy(evaluation = it.evaluation.copy(penalizeIncorrectStatements = v))
+                                    }
+                                }
+                            )
+                            SwitchRow(
+                                label = "Penalize dangerous misconceptions",
+                                checked = draft.evaluation.penalizeDangerousMisconceptions,
+                                onCheckedChange = { v ->
+                                    viewModel.updateDraft {
+                                        it.copy(evaluation = it.evaluation.copy(penalizeDangerousMisconceptions = v))
+                                    }
+                                }
+                            )
+                            SwitchRow(
+                                label = "Partial credit",
+                                checked = draft.evaluation.partialCredit,
+                                onCheckedChange = { v ->
+                                    viewModel.updateDraft { it.copy(evaluation = it.evaluation.copy(partialCredit = v)) }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // Teaching style (§63-§65).
+                item(key = "teaching") {
+                    val draft = state.draftConfig
+                    ControlSection(title = "Teaching") {
+                        Text("Feedback", style = MaterialTheme.typography.bodyMedium, color = AppColors.contentPrimary)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        ChoiceChips(
+                            options = FeedbackDepth.entries,
+                            selected = draft.feedbackDepth,
+                            onSelect = { depth -> viewModel.updateDraft { it.copy(feedbackDepth = depth) } },
+                            label = { it.displayName }
                         )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            feedbackDescription(draft.feedbackDepth),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.contentMuted
+                        )
+                        Spacer(modifier = Modifier.height(AppSpacing.XS))
                         SwitchRow(
                             label = "Partial credit",
                             checked = draft.evaluation.partialCredit,
                             onCheckedChange = { v ->
                                 viewModel.updateDraft { it.copy(evaluation = it.evaluation.copy(partialCredit = v)) }
+                            label = "Socratic mode",
+                            description = "The agent asks follow-up questions before revealing answers.",
+                            checked = draft.socratic.enabled,
+                            onCheckedChange = { enabled ->
+                                viewModel.updateDraft { it.copy(socratic = it.socratic.copy(enabled = enabled)) }
                             }
+                        )
+                        if (draft.socratic.enabled) {
+                            StepperRow(
+                                label = "Max follow-ups",
+                                value = draft.socratic.maxFollowUps,
+                                onValueChange = { v ->
+                                    viewModel.updateDraft { it.copy(socratic = it.socratic.copy(maxFollowUps = v)) }
+                                },
+                                range = 1..5
+                            )
+                            StepperRow(
+                                label = "Reveal answer after attempts",
+                                value = draft.socratic.revealAfterAttempts,
+                                onValueChange = { v ->
+                                    viewModel.updateDraft { it.copy(socratic = it.socratic.copy(revealAfterAttempts = v)) }
+                                },
+                                range = 1..10
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(AppSpacing.XS))
+                        Text("Hints", style = MaterialTheme.typography.bodyMedium, color = AppColors.contentPrimary)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        ChoiceChips(
+                            options = HintPolicy.entries,
+                            selected = draft.hintPolicy,
+                            onSelect = { policy -> viewModel.updateDraft { it.copy(hintPolicy = policy) } },
+                            label = { it.displayName }
                         )
                     }
                 }
             }
 
+            // Teaching style (§63-§65).
+            item(key = "teaching") {
+                val draft = state.draftConfig
+                ControlSection(title = "Teaching") {
+                    Text("Feedback", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    ChoiceChips(
+                        options = FeedbackDepth.entries,
+                        selected = draft.feedbackDepth,
+                        onSelect = { depth -> viewModel.updateDraft { it.copy(feedbackDepth = depth) } },
+                        label = { it.displayName }
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        feedbackDescription(draft.feedbackDepth),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    SwitchRow(
+                        label = "Socratic mode",
+                        description = "The agent asks follow-up questions before revealing answers.",
+                        checked = draft.socratic.enabled,
+                        onCheckedChange = { enabled ->
+                            viewModel.updateDraft { it.copy(socratic = it.socratic.copy(enabled = enabled)) }
+                        }
+                    )
+                    if (draft.socratic.enabled) {
+                        StepperRow(
+                            label = "Max follow-ups",
+                            value = draft.socratic.maxFollowUps,
+                            onValueChange = { v ->
+                                viewModel.updateDraft { it.copy(socratic = it.socratic.copy(maxFollowUps = v)) }
+                            },
+                            range = 1..5
+                // Rating (§66-§68).
+                item(key = "rating") {
+                    val draft = state.draftConfig
+                    ControlSection(title = "Rating") {
+                        ChoiceChips(
+                            options = AutoRatingMode.entries,
+                            selected = draft.ratingMode,
+                            onSelect = { mode -> viewModel.updateDraft { it.copy(ratingMode = mode) } },
+                            label = { it.displayName }
+                        )
+                        StepperRow(
+                            label = "Reveal answer after attempts",
+                            value = draft.socratic.revealAfterAttempts,
+                            onValueChange = { v ->
+                                viewModel.updateDraft { it.copy(socratic = it.socratic.copy(revealAfterAttempts = v)) }
+                            },
+                            range = 1..10
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            ratingDescription(draft.ratingMode),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.contentMuted
+                        )
+                        if (draft.ratingMode == AutoRatingMode.AUTO_CONFIDENT) {
+                            Spacer(modifier = Modifier.height(AppSpacing.XS))
+                            SliderRow(
+                                label = "Confidence threshold",
+                                description = "Only high-confidence evaluations are rated automatically.",
+                                value = draft.autoRateConfidence,
+                                range = 50..100,
+                                onValueChange = { v -> viewModel.updateDraft { it.copy(autoRateConfidence = v) } },
+                                valueLabel = "${draft.autoRateConfidence}%"
+                            )
+                        }
+                        if (draft.ratingMode == AutoRatingMode.AUTOMATIC) {
+                            Spacer(modifier = Modifier.height(AppSpacing.XS))
+                            Text(
+                                "Ratings will be applied without confirmation and will affect Anki scheduling.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = AppColors.statusWarning
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text("Hints", style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    ChoiceChips(
+                        options = HintPolicy.entries,
+                        selected = draft.hintPolicy,
+                        onSelect = { policy -> viewModel.updateDraft { it.copy(hintPolicy = policy) } },
+                        label = { it.displayName }
+                    )
+                }
+            }
+
+            // Rating (§66-§68).
+            item(key = "rating") {
+                val draft = state.draftConfig
+                ControlSection(title = "Rating") {
+                    ChoiceChips(
+                        options = AutoRatingMode.entries,
+                        selected = draft.ratingMode,
+                        onSelect = { mode -> viewModel.updateDraft { it.copy(ratingMode = mode) } },
+                        label = { it.displayName }
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        ratingDescription(draft.ratingMode),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted
+                    )
+                    if (draft.ratingMode == AutoRatingMode.AUTO_CONFIDENT) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        SliderRow(
+                            label = "Confidence threshold",
+                            description = "Only high-confidence evaluations are rated automatically.",
+                            value = draft.autoRateConfidence,
+                            range = 50..100,
+                            onValueChange = { v -> viewModel.updateDraft { it.copy(autoRateConfidence = v) } },
+                            valueLabel = "${draft.autoRateConfidence}%"
+                // Privacy (§69).
+                item(key = "privacy") {
+                    val draft = state.draftConfig
+                    ControlSection(title = "Privacy") {
+                        ChoiceChips(
+                            options = TranscriptRetention.entries,
+                            selected = draft.transcriptRetention,
+                            onSelect = { retention -> viewModel.updateDraft { it.copy(transcriptRetention = retention) } },
+                            label = { it.displayName }
+                        )
+                    }
+                    if (draft.ratingMode == AutoRatingMode.AUTOMATIC) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "Ratings will be applied without confirmation and will affect Anki scheduling.",
+                            retentionDescription(draft.transcriptRetention),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = StatusAmber
+                            color = AppColors.contentMuted
+                        )
+                    }
+                }
+            }
+
+            // Privacy (§69).
+            item(key = "privacy") {
+                val draft = state.draftConfig
+                ControlSection(title = "Privacy") {
+                    ChoiceChips(
+                        options = TranscriptRetention.entries,
+                        selected = draft.transcriptRetention,
+                        onSelect = { retention -> viewModel.updateDraft { it.copy(transcriptRetention = retention) } },
+                        label = { it.displayName }
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        retentionDescription(draft.transcriptRetention),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextMuted
+                    )
+                }
+            }
+        }
+    }
             // Teaching style (§63-§65).
             item(key = "teaching") {
                 val draft = state.draftConfig
@@ -811,4 +1243,31 @@ private fun retentionDescription(retention: TranscriptRetention): String = when 
     TranscriptRetention.NONE -> "Nothing you say is stored on the Study Agent."
     TranscriptRetention.SCORE_ONLY -> "Only the evaluation score is kept. Recommended for privacy."
     TranscriptRetention.FULL -> "Full transcripts are stored for analytics — review your privacy preferences."
+}
+
+
+// ---------------------------------------------------------------------------
+// Previews (fake static data only — no repositories, §90)
+// ---------------------------------------------------------------------------
+
+@Preview(name = "Apply bar — unsaved", showBackground = true, backgroundColor = 0xFF0F172A)
+@Composable
+private fun ApplyBarPreview() {
+    ApplyBar(
+        state = ControlCenterUiState(hasUnsavedChanges = true),
+        onApply = {},
+        onDiscard = {},
+        onReset = {}
+    )
+}
+
+@Preview(name = "Apply bar — saved", showBackground = true, backgroundColor = 0xFF0F172A)
+@Composable
+private fun ApplyBarSavedPreview() {
+    ApplyBar(
+        state = ControlCenterUiState(lastSavedAt = 1L, savedLocallyOnly = false),
+        onApply = {},
+        onDiscard = {},
+        onReset = {}
+    )
 }
