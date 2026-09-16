@@ -10,7 +10,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -25,28 +24,31 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import com.studyagent.client.ui.theme.AccentTeal
-import com.studyagent.client.ui.theme.PrimaryBlue
 import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.useReducedMotion
 
+/**
+ * Seven-bar voice activity indicator.
+ *
+ * Animates **only** while [isActive] and reduce-motion is off; otherwise renders
+ * flat bars. It deliberately does not consume the raw RMS level — the level stream
+ * is high-frequency and would recompose whichever tree it is read in. If you need a
+ * level-driven meter, read the level inside a tiny leaf composable (see
+ * `StudyScreen.AudioLevelMeter`).
+ */
 @Composable
 fun VoiceWaveVisualizer(
     isActive: Boolean,
-    color: Color = PrimaryBlue,
-    modifier: Modifier = Modifier
     color: Color = AppColors.voiceListening,
     modifier: Modifier = Modifier,
     description: String = "Voice activity"
 ) {
-    val heights = waveHeights(isActive)
     val reducedMotion = useReducedMotion()
     val heights = waveHeights(isActive && !reducedMotion)
 
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(36.dp),
             .height(36.dp)
             .semantics { contentDescription = if (isActive) description else "Voice idle" },
         horizontalArrangement = Arrangement.Center,
@@ -59,7 +61,6 @@ fun VoiceWaveVisualizer(
                     .width(4.dp)
                     .height((36 * heightFraction).dp)
                     .clip(RoundedCornerShape(2.dp))
-                    .background(if (isActive) color else Color.Gray.copy(alpha = 0.3f))
                     .background(if (isActive) color else AppColors.voiceIdle)
             )
         }
@@ -67,19 +68,13 @@ fun VoiceWaveVisualizer(
 }
 
 /**
- * Bar height fractions for the waveform.
- *
- * The animation is created **only while the voice loop is active** (§58/§144). A visualizer that
- * kept animating on an idle Study screen would request a frame every 16 ms for as long as the
- * screen is open — a battery cost that shows nothing — and would leave the window permanently
- * non-idle for the instrumented tests (§177).
+ * Bar height fractions for the waveform. The infinite transition is created only while
+ * active so an idle Study screen does not request a frame every 16 ms.
  */
 @Composable
 private fun waveHeights(isActive: Boolean): List<Float> {
     if (!isActive) return IDLE_WAVE_HEIGHTS
-
     val transition = rememberInfiniteTransition(label = "wave")
-
     val h1 by transition.animateFloat(
         initialValue = 0.2f, targetValue = 0.9f,
         animationSpec = infiniteRepeatable(tween(400, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "h1"
@@ -100,7 +95,6 @@ private fun waveHeights(isActive: Boolean): List<Float> {
         initialValue = 0.4f, targetValue = 0.85f,
         animationSpec = infiniteRepeatable(tween(430, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "h5"
     )
-
     return listOf(h1, h2, h3, h4, h5, h2, h1)
 }
 

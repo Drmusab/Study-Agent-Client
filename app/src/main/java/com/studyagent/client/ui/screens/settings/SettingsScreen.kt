@@ -8,28 +8,23 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,12 +44,18 @@ import com.studyagent.client.core.voice.tts.TtsSettings
 import com.studyagent.client.core.voice.tts.TtsVoiceInfo
 import com.studyagent.client.core.voice.tts.VoiceLatency
 import com.studyagent.client.core.voice.tts.VoiceQuality
-import com.studyagent.client.ui.theme.AccentTeal
-import com.studyagent.client.ui.theme.DarkBackground
-import com.studyagent.client.ui.theme.DarkSurface
-import com.studyagent.client.ui.theme.TextMuted
-import com.studyagent.client.ui.theme.TextPrimary
-import com.studyagent.client.ui.theme.TextSecondary
+import com.studyagent.client.ui.components.AppCard
+import com.studyagent.client.ui.components.BannerTone
+import com.studyagent.client.ui.components.ChoiceRow
+import com.studyagent.client.ui.components.InfoBanner
+import com.studyagent.client.ui.components.InlineTextButton
+import com.studyagent.client.ui.components.KeyValueRow
+import com.studyagent.client.ui.components.SecondaryButton
+import com.studyagent.client.ui.components.SectionHeader
+import com.studyagent.client.ui.components.SettingRow
+import com.studyagent.client.ui.components.StudyAgentTopBar
+import com.studyagent.client.ui.theme.AppColors
+import com.studyagent.client.ui.theme.AppSpacing
 import kotlin.math.roundToInt
 
 /** Semantics tag for the settings list, so a test can scroll to a row that is not composed yet. */
@@ -89,57 +90,44 @@ fun SettingsScreen(
     val previewing by viewModel.previewing.collectAsStateWithLifecycle()
     val recognitionCapabilities by viewModel.recognitionCapabilities.collectAsStateWithLifecycle()
     val persistenceError by viewModel.persistenceError.collectAsStateWithLifecycle()
-    var showResetConfirmation by remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showResetConfirmation by rememberSaveable { mutableStateOf(false) }
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
 
     Scaffold(
-        containerColor = DarkBackground,
+        containerColor = AppColors.appBackground,
         topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onNavigateBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
-                }
-                Text(
-                    text = "Settings",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = TextPrimary
-                )
-            }
+            StudyAgentTopBar(title = "Settings", onBack = onNavigateBack)
         }
     ) { innerPadding ->
-        LazyColumn(
+        BoxWithConstraints(
             modifier = modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 18.dp)
-                .testTag(SETTINGS_LIST_TEST_TAG),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            if (persistenceError != null) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = persistenceError ?: "Couldn't save settings",
-                                color = MaterialTheme.colorScheme.onErrorContainer,
-                                modifier = Modifier.weight(1f)
-                            )
-                            OutlinedButton(onClick = viewModel::clearPersistenceError) {
-                                Text("Dismiss")
-                            }
-                        }
-                    }
+        val contentWidth = maxWidth.coerceAtMost(AppSpacing.dashboardMaxWidth)
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .width(contentWidth)
+                .align(Alignment.TopCenter)
+                .testTag(SETTINGS_LIST_TEST_TAG),
+            contentPadding = PaddingValues(
+                start = AppSpacing.contentGutter,
+                end = AppSpacing.contentGutter,
+                top = AppSpacing.XS,
+                bottom = AppSpacing.XL
+            ),
+            verticalArrangement = Arrangement.spacedBy(AppSpacing.SM)
+        ) {
+            persistenceError?.let { error ->
+                item(key = "persistence-error") {
+                    InfoBanner(
+                        title = "Couldn't save settings",
+                        message = error,
+                        tone = BannerTone.DANGER,
+                        dismissible = true,
+                        onDismiss = viewModel::clearPersistenceError
+                    )
                 }
             }
 
@@ -147,26 +135,21 @@ fun SettingsScreen(
             //
             // Headphones are an enhancement, never a requirement. Automatic is the default and
             // studies happily on a bare phone; only "Headphones Required" ever blocks a start.
-            item { SectionHeader("STUDY AUDIO") }
+            item(key = "study-audio") { SettingsSectionLabel("Study audio") }
 
             item {
                 SettingsCard {
                     Text(
                         text = "Audio Mode",
                         style = MaterialTheme.typography.titleSmall,
-                        color = TextPrimary
+                        color = AppColors.contentPrimary
                     )
                     StudyAudioMode.entries.forEach { mode ->
                         LanguageRadioItem(
                             title = mode.displayName,
+                            description = mode.description,
                             selected = settings.studyAudioMode == mode,
                             onClick = { viewModel.updateSettings { it.copy(studyAudioMode = mode) } }
-                        )
-                        Text(
-                            text = mode.description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextMuted,
-                            modifier = Modifier.padding(start = 8.dp, top = 2.dp)
                         )
                     }
 
@@ -174,13 +157,13 @@ fun SettingsScreen(
                     Text(
                         text = "When headphones disconnect",
                         style = MaterialTheme.typography.titleSmall,
-                        color = TextPrimary
+                        color = AppColors.contentPrimary
                     )
                     Text(
                         text = "Applies only when headphones disappear mid-session. Starting " +
                             "without headphones always uses the phone.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted
+                        color = AppColors.contentMuted
                     )
                     LanguageRadioItem(
                         title = "Pause voice study (recommended)",
@@ -203,15 +186,46 @@ fun SettingsScreen(
                 }
             }
 
-            // ------------------------------------------------ Speech recognition (STT)
-            item { SectionHeader("SPEECH RECOGNITION") }
+            item(key = "study-experience") { SettingsSectionLabel("Study experience") }
+
+            item {
+            SettingsCard {
+                    SettingToggleItem(
+                        title = "Hands-Free Automatic Mode",
+                        description = "Cycle automatically through question -> answer -> feedback -> rating",
+                        checked = settings.handsFreeMode,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(handsFreeMode = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Auto-play Question",
+                        description = "Read new questions aloud immediately upon arrival",
+                        checked = settings.autoPlayQuestion,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoPlayQuestion = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Auto-play Feedback",
+                        description = "Read AI evaluation and comments aloud",
+                        checked = settings.autoPlayFeedback,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoPlayFeedback = v) } }
+                    )
+                    SettingToggleItem(
+                        title = "Show Live Transcript",
+                        description = "Display speech-to-text words on screen in real time",
+                        checked = settings.showTranscriptOnScreen,
+                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(showTranscriptOnScreen = v) } }
+                    )
+                }
+            }
+
+
+            item(key = "speech-recognition") { SettingsSectionLabel("Speech recognition") }
 
             item {
                 SettingsCard {
                     Text(
                         text = "Language",
                         style = MaterialTheme.typography.titleSmall,
-                        color = TextPrimary
+                        color = AppColors.contentPrimary
                     )
                     LanguageRadioItem(
                         title = "Auto — English + Arabic",
@@ -232,7 +246,7 @@ fun SettingsScreen(
                         text = "Auto uses on-device language detection where the recognizer " +
                             "supports it, and otherwise falls back to English.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted,
+                        color = AppColors.contentMuted,
                         modifier = Modifier.padding(start = 8.dp, top = 2.dp)
                     )
                 }
@@ -243,7 +257,7 @@ fun SettingsScreen(
                     Text(
                         text = "Recognition",
                         style = MaterialTheme.typography.titleSmall,
-                        color = TextPrimary
+                        color = AppColors.contentPrimary
                     )
                     // Vendor-neutral labels: the app never claims a specific provider,
                     // because it does not control which one is installed.
@@ -311,7 +325,7 @@ fun SettingsScreen(
                     Text(
                         text = "Answer Length",
                         style = MaterialTheme.typography.titleSmall,
-                        color = TextPrimary
+                        color = AppColors.contentPrimary
                     )
                     AnswerEndpointProfile.entries.forEach { profile ->
                         LanguageRadioItem(
@@ -325,52 +339,7 @@ fun SettingsScreen(
                 }
             }
 
-            item {
-                SettingsCard {
-                    Text(
-                        text = "Advanced",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = TextPrimary
-                    )
-                    SettingToggleItem(
-                        title = "Live Partial Transcript",
-                        description = "Show words as they are recognised, before the final result",
-                        checked = settings.sttShowPartialTranscript,
-                        onCheckedChange = { v ->
-                            viewModel.updateSettings { it.copy(sttShowPartialTranscript = v) }
-                        }
-                    )
-                    SettingToggleItem(
-                        title = "Medical Vocabulary Biasing",
-                        description = "Hint the recognizer with terms from the current question " +
-                            "(epidural hematoma, midline shift, GCS, ICP...)",
-                        checked = settings.sttMedicalBiasing,
-                        onCheckedChange = { v ->
-                            viewModel.updateSettings { it.copy(sttMedicalBiasing = v) }
-                        }
-                    )
-                    SettingToggleItem(
-                        title = "Log Full Transcripts (developer)",
-                        description = "Writes recognised answer text to the log. Leave off: study " +
-                            "answers can contain personal or clinical detail.",
-                        checked = settings.sttDebugTranscriptLogging,
-                        onCheckedChange = { v ->
-                            viewModel.updateSettings { it.copy(sttDebugTranscriptLogging = v) }
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-                    CapabilitySummary(
-                        capabilities = recognitionCapabilities,
-                        settings = settings,
-                        onDownload = { locale -> viewModel.requestSpeechModelDownload(locale) },
-                        onRefresh = { viewModel.refreshRecognitionCapabilities() }
-                    )
-                }
-            }
-
-            // ------------------------------------------------ Voice output (TTS)
-            item { SectionHeader("VOICE OUTPUT (TTS)") }
+            item(key = "voice-output-tts") { SettingsSectionLabel("Voice output") }
 
             item {
                 SettingsCard {
@@ -415,24 +384,22 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        OutlinedButton(
+                        SecondaryButton(
+                            text = if (previewing == SegmentLanguage.ENGLISH) "Playing…" else "Preview English",
                             onClick = { viewModel.previewVoice(SegmentLanguage.ENGLISH) },
                             enabled = previewing == null,
                             modifier = Modifier
                                 .weight(1f)
                                 .semantics { contentDescription = "Preview English voice" }
-                        ) {
-                            Text(if (previewing == SegmentLanguage.ENGLISH) "Playing..." else "Preview English")
-                        }
-                        OutlinedButton(
+                        )
+                        SecondaryButton(
+                            text = if (previewing == SegmentLanguage.ARABIC) "جارٍ التشغيل…" else "Preview Arabic",
                             onClick = { viewModel.previewVoice(SegmentLanguage.ARABIC) },
                             enabled = previewing == null,
                             modifier = Modifier
                                 .weight(1f)
                                 .semantics { contentDescription = "Preview Arabic voice" }
-                        ) {
-                            Text(if (previewing == SegmentLanguage.ARABIC) "جارٍ التشغيل..." else "Preview Arabic")
-                        }
+                        )
                     }
                 }
             }
@@ -469,7 +436,7 @@ fun SettingsScreen(
                     Text(
                         text = "Pitch: ${(pendingPitch * 100).roundToInt()}%",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = TextPrimary
+                        color = AppColors.contentPrimary
                     )
                     Slider(
                         value = pendingPitch,
@@ -482,178 +449,204 @@ fun SettingsScreen(
                 }
             }
 
-            // ------------------------------------------------ Advanced speech behavior
-            item { SectionHeader("ADVANCED SPEECH") }
 
-            item {
-            SettingsCard {
-                    SettingToggleItem(
-                        title = "Automatic Language Detection",
-                        description = "Switch voices inside mixed Arabic/English cards",
-                        checked = settings.ttsAutoLanguageDetection,
-                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(ttsAutoLanguageDetection = v) } }
-                    )
-                    SettingToggleItem(
-                        title = "Medical Pronunciation",
-                        description = "Spell abbreviations (G C S), verbalize units (milliliters) and ranges",
-                        checked = settings.ttsMedicalPronunciation,
-                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(ttsMedicalPronunciation = v) } }
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "Headphone disconnect behaviour is configured under STUDY AUDIO.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-                    var pendingGap by remember(settings.ttsAcousticGapMs) {
-                        mutableFloatStateOf(
-                            settings.ttsAcousticGapMs.toFloat().coerceIn(
-                                TtsSettings.MIN_ACOUSTIC_GAP_MS.toFloat(),
-                                TtsSettings.MAX_ACOUSTIC_GAP_MS.toFloat()
-                            )
-                        )
-                    }
-                    Text(
-                        text = "Mic handoff gap: ${pendingGap.roundToInt()} ms",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextPrimary
-                    )
-                    Text(
-                        text = "Pause between speech end and microphone activation (echo protection)",
-                        style = MaterialTheme.typography.bodySmall, color = TextSecondary
-                    )
-                    Slider(
-                        value = pendingGap,
-                        onValueChange = { pendingGap = it },
-                        onValueChangeFinished = {
-                            viewModel.updateSettings {
-                                it.copy(ttsAcousticGapMs = pendingGap.roundToInt())
-                            }
-                        },
-                        valueRange = TtsSettings.MIN_ACOUSTIC_GAP_MS.toFloat()..TtsSettings.MAX_ACOUSTIC_GAP_MS.toFloat()
+            // Basic vs Advanced (§36): everyday controls first; engineering knobs behind one switch.
+            item(key = "advanced-toggle") {
+                SettingsCard {
+                    SettingRow(
+                        title = "Show advanced settings",
+                        description = "Recognition tuning, speech timing, capability checks and network options.",
+                        checked = showAdvanced,
+                        onCheckedChange = { showAdvanced = it },
+                        switchModifier = Modifier.testTag(settingSwitchTestTag("Show advanced settings"))
                     )
                 }
             }
 
-            // ------------------------------------------------ Study experience
-            item { SectionHeader("STUDY EXPERIENCE") }
 
-            item {
-            SettingsCard {
-                    SettingToggleItem(
-                        title = "Hands-Free Automatic Mode",
-                        description = "Cycle automatically through question -> answer -> feedback -> rating",
-                        checked = settings.handsFreeMode,
-                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(handsFreeMode = v) } }
-                    )
-                    SettingToggleItem(
-                        title = "Auto-play Question",
-                        description = "Read new questions aloud immediately upon arrival",
-                        checked = settings.autoPlayQuestion,
-                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoPlayQuestion = v) } }
-                    )
-                    SettingToggleItem(
-                        title = "Auto-play Feedback",
-                        description = "Read AI evaluation and comments aloud",
-                        checked = settings.autoPlayFeedback,
-                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoPlayFeedback = v) } }
-                    )
-                    SettingToggleItem(
-                        title = "Show Live Transcript",
-                        description = "Display speech-to-text words on screen in real time",
-                        checked = settings.showTranscriptOnScreen,
-                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(showTranscriptOnScreen = v) } }
-                    )
+            if (showAdvanced) {
+                item(key = "advanced-recognition") { SettingsSectionLabel("Advanced recognition") }
+
+                item {
+                    SettingsCard {
+                        SettingToggleItem(
+                            title = "Live Partial Transcript",
+                            description = "Show words as they are recognised, before the final result",
+                            checked = settings.sttShowPartialTranscript,
+                            onCheckedChange = { v ->
+                                viewModel.updateSettings { it.copy(sttShowPartialTranscript = v) }
+                            }
+                        )
+                        SettingToggleItem(
+                            title = "Medical Vocabulary Biasing",
+                            description = "Hint the recognizer with terms from the current question " +
+                                "(epidural hematoma, midline shift, GCS, ICP...)",
+                            checked = settings.sttMedicalBiasing,
+                            onCheckedChange = { v ->
+                                viewModel.updateSettings { it.copy(sttMedicalBiasing = v) }
+                            }
+                        )
+                        SettingToggleItem(
+                            title = "Log Full Transcripts (developer)",
+                            description = "Writes recognised answer text to the log. Leave off: study " +
+                                "answers can contain personal or clinical detail.",
+                            checked = settings.sttDebugTranscriptLogging,
+                            onCheckedChange = { v ->
+                                viewModel.updateSettings { it.copy(sttDebugTranscriptLogging = v) }
+                            }
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        CapabilitySummary(
+                            capabilities = recognitionCapabilities,
+                            settings = settings,
+                            onDownload = { locale -> viewModel.requestSpeechModelDownload(locale) },
+                            onRefresh = { viewModel.refreshRecognitionCapabilities() }
+                        )
+                    }
+                }
+
+
+                item(key = "advanced-speech") { SettingsSectionLabel("Advanced speech") }
+
+                item {
+                SettingsCard {
+                        SettingToggleItem(
+                            title = "Automatic Language Detection",
+                            description = "Switch voices inside mixed Arabic/English cards",
+                            checked = settings.ttsAutoLanguageDetection,
+                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(ttsAutoLanguageDetection = v) } }
+                        )
+                        SettingToggleItem(
+                            title = "Medical Pronunciation",
+                            description = "Spell abbreviations (G C S), verbalize units (milliliters) and ranges",
+                            checked = settings.ttsMedicalPronunciation,
+                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(ttsMedicalPronunciation = v) } }
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Headphone disconnect behaviour is configured under Study audio.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.contentMuted
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        var pendingGap by remember(settings.ttsAcousticGapMs) {
+                            mutableFloatStateOf(
+                                settings.ttsAcousticGapMs.toFloat().coerceIn(
+                                    TtsSettings.MIN_ACOUSTIC_GAP_MS.toFloat(),
+                                    TtsSettings.MAX_ACOUSTIC_GAP_MS.toFloat()
+                                )
+                            )
+                        }
+                        Text(
+                            text = "Mic handoff gap: ${pendingGap.roundToInt()} ms",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AppColors.contentPrimary
+                        )
+                        Text(
+                            text = "Pause between speech end and microphone activation (echo protection)",
+                            style = MaterialTheme.typography.bodySmall, color = AppColors.contentSecondary
+                        )
+                        Slider(
+                            value = pendingGap,
+                            onValueChange = { pendingGap = it },
+                            onValueChangeFinished = {
+                                viewModel.updateSettings {
+                                    it.copy(ttsAcousticGapMs = pendingGap.roundToInt())
+                                }
+                            },
+                            valueRange = TtsSettings.MIN_ACOUSTIC_GAP_MS.toFloat()..TtsSettings.MAX_ACOUSTIC_GAP_MS.toFloat()
+                        )
+                    }
+                }
+
+
+                item(key = "network-advanced") { SettingsSectionLabel("Network & advanced") }
+
+                item {
+                SettingsCard {
+                        SettingToggleItem(
+                            title = "Auto Reconnect",
+                            description = "Automatically reconnect with exponential backoff if network drops",
+                            checked = settings.autoReconnect,
+                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoReconnect = v) } }
+                        )
+                        SettingToggleItem(
+                            title = "Diagnostics Logging",
+                            description = "Store sanitized session logs for troubleshooting",
+                            checked = settings.debugLogging,
+                            onCheckedChange = { v -> viewModel.updateSettings { it.copy(debugLogging = v) } }
+                        )
+
+                        var pendingReconnectAttempts by remember(settings.maxReconnectAttempts) {
+                            mutableFloatStateOf(
+                                settings.maxReconnectAttempts.toFloat().coerceIn(
+                                    AppSettingsPolicy.MIN_RECONNECT_ATTEMPTS.toFloat(),
+                                    AppSettingsPolicy.MAX_RECONNECT_ATTEMPTS.toFloat()
+                                )
+                            )
+                        }
+                        Text(
+                            text = "Reconnect attempts: ${pendingReconnectAttempts.roundToInt()}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AppColors.contentPrimary
+                        )
+                        Slider(
+                            value = pendingReconnectAttempts,
+                            onValueChange = { pendingReconnectAttempts = it },
+                            onValueChangeFinished = {
+                                viewModel.updateSettings {
+                                    it.copy(maxReconnectAttempts = pendingReconnectAttempts.roundToInt())
+                                }
+                            },
+                            valueRange = AppSettingsPolicy.MIN_RECONNECT_ATTEMPTS.toFloat()..AppSettingsPolicy.MAX_RECONNECT_ATTEMPTS.toFloat()
+                        )
+
+                        var pendingPingInterval by remember(settings.pingIntervalSeconds) {
+                            mutableFloatStateOf(
+                                settings.pingIntervalSeconds.toFloat().coerceIn(
+                                    AppSettingsPolicy.MIN_PING_INTERVAL_SECONDS.toFloat(),
+                                    AppSettingsPolicy.MAX_PING_INTERVAL_SECONDS.toFloat()
+                                )
+                            )
+                        }
+                        Text(
+                            text = "Ping interval: ${pendingPingInterval.roundToInt()} seconds",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = AppColors.contentPrimary
+                        )
+                        Slider(
+                            value = pendingPingInterval,
+                            onValueChange = { pendingPingInterval = it },
+                            onValueChangeFinished = {
+                                viewModel.updateSettings {
+                                    it.copy(pingIntervalSeconds = pendingPingInterval.roundToInt().toLong())
+                                }
+                            },
+                            valueRange = AppSettingsPolicy.MIN_PING_INTERVAL_SECONDS.toFloat()..AppSettingsPolicy.MAX_PING_INTERVAL_SECONDS.toFloat()
+                        )
+
+                        Spacer(modifier = Modifier.height(AppSpacing.XS))
+                        InlineTextButton(text = "Reset device settings", onClick = { showResetConfirmation = true })
+                    }
                 }
             }
 
-            // ------------------------------------------------ Network & advanced
-            item { SectionHeader("NETWORK & ADVANCED") }
-
-            item {
-            SettingsCard {
-                    SettingToggleItem(
-                        title = "Auto Reconnect",
-                        description = "Automatically reconnect with exponential backoff if network drops",
-                        checked = settings.autoReconnect,
-                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(autoReconnect = v) } }
-                    )
-                    SettingToggleItem(
-                        title = "Diagnostics Logging",
-                        description = "Store sanitized session logs for troubleshooting",
-                        checked = settings.debugLogging,
-                        onCheckedChange = { v -> viewModel.updateSettings { it.copy(debugLogging = v) } }
-                    )
-
-                    var pendingReconnectAttempts by remember(settings.maxReconnectAttempts) {
-                        mutableFloatStateOf(
-                            settings.maxReconnectAttempts.toFloat().coerceIn(
-                                AppSettingsPolicy.MIN_RECONNECT_ATTEMPTS.toFloat(),
-                                AppSettingsPolicy.MAX_RECONNECT_ATTEMPTS.toFloat()
-                            )
-                        )
-                    }
-                    Text(
-                        text = "Reconnect attempts: ${pendingReconnectAttempts.roundToInt()}",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextPrimary
-                    )
-                    Slider(
-                        value = pendingReconnectAttempts,
-                        onValueChange = { pendingReconnectAttempts = it },
-                        onValueChangeFinished = {
-                            viewModel.updateSettings {
-                                it.copy(maxReconnectAttempts = pendingReconnectAttempts.roundToInt())
-                            }
-                        },
-                        valueRange = AppSettingsPolicy.MIN_RECONNECT_ATTEMPTS.toFloat()..AppSettingsPolicy.MAX_RECONNECT_ATTEMPTS.toFloat()
-                    )
-
-                    var pendingPingInterval by remember(settings.pingIntervalSeconds) {
-                        mutableFloatStateOf(
-                            settings.pingIntervalSeconds.toFloat().coerceIn(
-                                AppSettingsPolicy.MIN_PING_INTERVAL_SECONDS.toFloat(),
-                                AppSettingsPolicy.MAX_PING_INTERVAL_SECONDS.toFloat()
-                            )
-                        )
-                    }
-                    Text(
-                        text = "Ping interval: ${pendingPingInterval.roundToInt()} seconds",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = TextPrimary
-                    )
-                    Slider(
-                        value = pendingPingInterval,
-                        onValueChange = { pendingPingInterval = it },
-                        onValueChangeFinished = {
-                            viewModel.updateSettings {
-                                it.copy(pingIntervalSeconds = pendingPingInterval.roundToInt().toLong())
-                            }
-                        },
-                        valueRange = AppSettingsPolicy.MIN_PING_INTERVAL_SECONDS.toFloat()..AppSettingsPolicy.MAX_PING_INTERVAL_SECONDS.toFloat()
-                    )
-
-                    TextButton(onClick = { showResetConfirmation = true }) {
-                        Text("Reset device settings", color = AccentTeal)
-                    }
-                }
-            }
-
-            item { Spacer(modifier = Modifier.height(24.dp)) }
+        }
         }
     }
 
     if (showResetConfirmation) {
         AlertDialog(
             onDismissRequest = { showResetConfirmation = false },
-            title = { Text("Reset device settings?", color = TextPrimary) },
+            containerColor = AppColors.surfaceElevated,
+            title = { Text("Reset device settings?", color = AppColors.contentPrimary) },
             text = {
                 Text(
                     "This restores device preferences to defaults. Profiles, tokens, and cached Agent data are kept.",
-                    color = TextSecondary
+                    color = AppColors.contentSecondary
                 )
             },
             confirmButton = {
@@ -662,11 +655,11 @@ fun SettingsScreen(
                         viewModel.resetAppSettings()
                         showResetConfirmation = false
                     }
-                ) { Text("Reset", color = AccentTeal) }
+                ) { Text("Reset", color = AppColors.actionAccent) }
             },
             dismissButton = {
                 TextButton(onClick = { showResetConfirmation = false }) {
-                    Text("Cancel", color = TextSecondary)
+                    Text("Cancel", color = AppColors.contentSecondary)
                 }
             }
         )
@@ -676,22 +669,14 @@ fun SettingsScreen(
 // ---------------------------------------------------------------- composables
 
 @Composable
-private fun SectionHeader(title: String) {
-    Text(
-        text = title,
-        style = MaterialTheme.typography.labelMedium,
-        color = AccentTeal
-    )
+private fun SettingsSectionLabel(title: String) {
+    SectionHeader(title = title, color = AppColors.actionAccent, modifier = Modifier.padding(top = AppSpacing.XS))
 }
 
 @Composable
 private fun SettingsCard(content: @Composable () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+    AppCard {
+        Column(modifier = Modifier.padding(AppSpacing.cardPadding)) {
             content()
         }
     }
@@ -703,7 +688,7 @@ private fun EnginePicker(
     selectedEngineId: String?,
     onSelect: (String?) -> Unit
 ) {
-    Text(text = "TTS Engine", style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+    Text(text = "TTS Engine", style = MaterialTheme.typography.titleSmall, color = AppColors.contentPrimary)
     Spacer(modifier = Modifier.height(4.dp))
     LanguageRadioItem(
         title = "System default",
@@ -722,7 +707,7 @@ private fun EnginePicker(
             text = "Saved engine is currently unavailable. System default is used temporarily; " +
                 "your preference is retained.",
             style = MaterialTheme.typography.bodySmall,
-            color = TextMuted,
+            color = AppColors.contentMuted,
             modifier = Modifier.padding(start = 8.dp, top = 2.dp)
         )
     }
@@ -735,7 +720,7 @@ private fun VoicePicker(
     selectedVoiceId: String?,
     onSelect: (String?) -> Unit
 ) {
-    Text(text = title, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
+    Text(text = title, style = MaterialTheme.typography.titleSmall, color = AppColors.contentPrimary)
     Spacer(modifier = Modifier.height(4.dp))
     LanguageRadioItem(
         title = "Auto — Recommended",
@@ -746,7 +731,7 @@ private fun VoicePicker(
         Text(
             text = "Installed voices appear here once the speech engine is ready.",
             style = MaterialTheme.typography.bodySmall,
-            color = TextMuted,
+            color = AppColors.contentMuted,
             modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 4.dp)
         )
     }
@@ -755,7 +740,7 @@ private fun VoicePicker(
             text = "Saved voice is currently unavailable. A compatible fallback is used; " +
                 "your preference is retained.",
             style = MaterialTheme.typography.bodySmall,
-            color = TextMuted,
+            color = AppColors.contentMuted,
             modifier = Modifier.padding(start = 8.dp, top = 2.dp, bottom = 4.dp)
         )
     }
@@ -785,7 +770,7 @@ private fun RateSlider(label: String, value: Float, onChange: (Float) -> Unit) {
     Text(
         text = "$label: ${(pendingValue * 100).roundToInt()}%",
         style = MaterialTheme.typography.bodyMedium,
-        color = TextPrimary
+        color = AppColors.contentPrimary
     )
     Slider(
         value = pendingValue,
@@ -801,27 +786,16 @@ private fun RateSlider(label: String, value: Float, onChange: (Float) -> Unit) {
 private fun LanguageRadioItem(
     title: String,
     selected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    description: String? = null
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        RadioButton(
-            selected = selected,
-            onClick = onClick
-        )
-        Text(
-            text = title,
-            style = MaterialTheme.typography.bodyLarge,
-            color = TextPrimary,
-            modifier = Modifier.padding(start = 8.dp)
-        )
-    }
+    ChoiceRow(title = title, selected = selected, onSelect = onClick, description = description)
 }
 
+/**
+ * One switch row. The switch carries [settingSwitchTestTag] so instrumented tests can address a
+ * setting by identity rather than by list position.
+ */
 @Composable
 private fun SettingToggleItem(
     title: String,
@@ -829,23 +803,13 @@ private fun SettingToggleItem(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(text = title, style = MaterialTheme.typography.titleSmall, color = TextPrimary)
-            Text(text = description, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            modifier = Modifier.testTag(settingSwitchTestTag(title))
-        )
-    }
+    SettingRow(
+        title = title,
+        description = description,
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        switchModifier = Modifier.testTag(settingSwitchTestTag(title))
+    )
 }
 
 /**
@@ -895,20 +859,16 @@ private fun CapabilitySummary(
     CapabilityRow("Arabic model", arabicState)
 
     if (englishState == NEEDS_DOWNLOAD) {
-        OutlinedButton(onClick = { onDownload(settings.sttEnglishLocale) }) {
-            Text("Download English model", color = TextPrimary)
-        }
+        Spacer(modifier = Modifier.height(AppSpacing.XS))
+        SecondaryButton(text = "Download English model", onClick = { onDownload(settings.sttEnglishLocale) })
     }
     if (arabicState == NEEDS_DOWNLOAD) {
-        OutlinedButton(onClick = { onDownload(settings.sttArabicLocale) }) {
-            Text("Download Arabic model", color = TextPrimary)
-        }
+        Spacer(modifier = Modifier.height(AppSpacing.XS))
+        SecondaryButton(text = "Download Arabic model", onClick = { onDownload(settings.sttArabicLocale) })
     }
 
     Spacer(modifier = Modifier.height(8.dp))
-    OutlinedButton(onClick = onRefresh) {
-        Text("Re-check capabilities", color = TextPrimary)
-    }
+    SecondaryButton(text = "Re-check capabilities", onClick = onRefresh)
 }
 
 private const val NEEDS_DOWNLOAD = "Supported, not installed"
@@ -933,13 +893,5 @@ private fun maybe(value: Boolean?): String = when (value) {
 
 @Composable
 private fun CapabilityRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Text(text = label, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
-        Text(text = value, style = MaterialTheme.typography.bodySmall, color = TextPrimary)
-    }
+    KeyValueRow(label = label, value = value)
 }

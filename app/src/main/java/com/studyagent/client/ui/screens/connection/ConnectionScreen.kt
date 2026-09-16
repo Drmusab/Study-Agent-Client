@@ -18,117 +18,74 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.runtime.collectAsState
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.ServerProfile
-import com.studyagent.client.ui.theme.AccentTeal
-import com.studyagent.client.ui.theme.DarkBackground
-import com.studyagent.client.ui.theme.DarkSurface
-import com.studyagent.client.ui.theme.DarkSurfaceElevated
-import com.studyagent.client.ui.theme.PrimaryBlue
-import com.studyagent.client.ui.theme.StatusAmber
-import com.studyagent.client.ui.theme.StatusGreen
-import com.studyagent.client.ui.theme.StatusRed
-import com.studyagent.client.ui.theme.TextMuted
-import com.studyagent.client.ui.theme.TextPrimary
-import com.studyagent.client.ui.theme.TextSecondary
 import com.studyagent.client.ui.components.AppCard
 import com.studyagent.client.ui.components.AppHeroCard
+import com.studyagent.client.ui.components.BannerTone
+import com.studyagent.client.ui.components.InfoBanner
+import com.studyagent.client.ui.components.InlineTextButton
+import com.studyagent.client.ui.components.PrimaryButton
+import com.studyagent.client.ui.components.SecondaryButton
+import com.studyagent.client.ui.components.SectionHeader
+import com.studyagent.client.ui.components.SettingRow
 import com.studyagent.client.ui.components.StudyAgentTopBar
+import com.studyagent.client.ui.components.connectionVisualOf
 import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.AppShape
 import com.studyagent.client.ui.theme.AppSpacing
 import com.studyagent.client.ui.theme.AppTextStyle
 import java.util.UUID
 
+/**
+ * Connection screen (§40): status first, one primary action, then the saved profiles.
+ * Raw transport errors are summarised here; details stay in Diagnostics.
+ */
 @Composable
 fun ConnectionScreen(
     viewModel: ConnectionViewModel,
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val connectionState by viewModel.connectionState.collectAsState()
-    val profiles by viewModel.profiles.collectAsState()
-    val activeProfile by viewModel.activeProfile.collectAsState()
-    val settings by viewModel.settings.collectAsState()
     val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val activeProfile by viewModel.activeProfile.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
-    var showProfileDialog by remember { mutableStateOf(false) }
+    var showProfileDialog by rememberSaveable { mutableStateOf(false) }
     var editingProfile by remember { mutableStateOf<ServerProfile?>(null) }
 
     Scaffold(
-        containerColor = DarkBackground,
         containerColor = AppColors.appBackground,
         topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onNavigateBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
-                }
-                Text(
-                    text = "PC Connection",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = TextPrimary
-                )
-                IconButton(onClick = {
-                    editingProfile = null
-                    showProfileDialog = true
-                }) {
-                    Icon(Icons.Default.Add, contentDescription = "Add Profile", tint = AccentTeal)
             StudyAgentTopBar(
                 title = "PC Connection",
                 onBack = onNavigateBack,
@@ -140,54 +97,18 @@ fun ConnectionScreen(
                         Icon(
                             Icons.Default.Add,
                             contentDescription = "Add Profile",
-                            tint = AppColors.voiceSpeaking
+                            tint = AppColors.contentPrimary
                         )
                     }
+                }
+            )
         }
     ) { innerPadding ->
-        LazyColumn(
-            modifier = modifier
         BoxWithConstraints(
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Live Status Card
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
-                ) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = "STATUS",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextMuted
-                        )
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            val dotColor = when (connectionState) {
-                                is ConnectionState.Connected -> StatusGreen
-                                is ConnectionState.Connecting, is ConnectionState.Reconnecting -> StatusAmber
-                                is ConnectionState.Disconnected -> TextMuted
-                                else -> StatusRed
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .size(12.dp)
-                                    .clip(CircleShape)
-                                    .background(dotColor)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = connectionState.label,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = TextPrimary
-                            )
-                        }
             val contentWidth = maxWidth.coerceAtMost(AppSpacing.dashboardMaxWidth)
             LazyColumn(
                 modifier = Modifier
@@ -202,363 +123,60 @@ fun ConnectionScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(AppSpacing.screenSectionGap)
             ) {
-                // Live status card — the hero of this screen (§99).
-                item {
+                // Status hero: the one dominant card on this screen.
+                item(key = "status") {
                     StatusHeroCard(
                         connectionState = connectionState,
+                        activeProfile = activeProfile,
                         onConnect = { viewModel.connect(activeProfile) },
                         onDisconnect = { viewModel.disconnect() }
                     )
                 }
 
-                        if (connectionState is ConnectionState.Connected) {
-                            val conn = connectionState as ConnectionState.Connected
-                            conn.latencyMs?.let { lat ->
-                                Spacer(modifier = Modifier.height(6.dp))
-                // Mock / Fake Agent Mode Toggle
-                item {
-                    AppCard {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(AppSpacing.cardPadding),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = AppSpacing.SM)) {
-                                Text(
-                                    text = "Mock Agent (development)",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = AppColors.contentPrimary
-                                )
-                                Text(
-                                    text = "Roundtrip Latency: ${lat}ms",
-                                    text = "Test the full study loop without connecting to a PC or LLM",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = AccentTeal
-                                    color = AppColors.contentMuted
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            if (connectionState.isConnected) {
-                                OutlinedButton(
-                                    onClick = { viewModel.disconnect() },
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Text("Disconnect", color = StatusRed)
-                                }
-                            } else {
-                                Button(
-                                    onClick = { viewModel.connect(activeProfile) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Text("Connect Now")
-                                }
-                            }
-                        }
+                // Failure explanation (§77): what happened + what to do. No stack traces.
+                connectionProblem(connectionState)?.let { (title, message) ->
+                    item(key = "problem") {
+                        InfoBanner(
+                            title = title,
+                            message = message,
+                            tone = BannerTone.WARNING,
+                            actionLabel = "Retry",
+                            onAction = { viewModel.connect(activeProfile) }
+                        )
                     }
                 }
-            }
 
-            // Mock / Fake Agent Mode Toggle
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Use Fake Agent (Mock Mode)",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = TextPrimary
-                            )
-                            Text(
-                                text = "Test full study loop without connecting to PC/LLM",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
-                            Switch(
+                item(key = "profiles-header") {
+                    SectionHeader(title = "Saved server profiles")
+                }
+
+                items(profiles, key = { it.id }) { profile ->
+                    ProfileRow(
+                        profile = profile,
+                        isSelected = activeProfile?.id == profile.id,
+                        canDelete = profiles.size > 1,
+                        onSelect = { viewModel.selectProfile(profile.id) },
+                        onEdit = {
+                            editingProfile = profile
+                            showProfileDialog = true
+                        },
+                        onDelete = { viewModel.deleteProfile(profile.id) }
+                    )
+                }
+
+                // Developer toggle: last, clearly labelled, not a primary action.
+                item(key = "mock") {
+                    AppCard {
+                        Column(modifier = Modifier.padding(horizontal = AppSpacing.cardPadding, vertical = AppSpacing.XS)) {
+                            SettingRow(
+                                title = "Mock Agent (development)",
+                                description = "Run the full study loop without a PC or AI evaluator.",
                                 checked = settings?.useFakeAgent ?: false,
                                 onCheckedChange = { viewModel.toggleFakeAgent(it) }
                             )
                         }
-                        Switch(
-                            checked = settings?.useFakeAgent ?: false,
-                            onCheckedChange = { viewModel.toggleFakeAgent(it) }
-                        )
                     }
                 }
-            }
-
-            // Profile List Header
-            item {
-                Text(
-                    text = "SAVED SERVER PROFILES",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = AccentTeal
-                )
-            }
-                // Profile List Header
-                item {
-                    Text(
-                        text = "SAVED SERVER PROFILES",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = AppColors.voiceSpeaking
-                    )
-                }
-
-            items(profiles) { profile ->
-                val isSelected = activeProfile?.id == profile.id
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable {
-                            viewModel.selectProfile(profile.id)
-                        },
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (isSelected) DarkSurfaceElevated else DarkSurface
-                    ),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                items(profiles, key = { it.id }) { profile ->
-                    val isSelected = activeProfile?.id == profile.id
-                    AppCard(
-                        color = if (isSelected) AppColors.surfaceElevated else AppColors.surfacePrimary
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = profile.name,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = TextPrimary
-                                )
-                                if (isSelected) {
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(PrimaryBlue.copy(alpha = 0.2f))
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text("ACTIVE", style = MaterialTheme.typography.labelSmall, color = PrimaryBlue)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(AppShape.cardShape)
-                                .clickable {
-                                    viewModel.selectProfile(profile.id)
-                                }
-                                .padding(AppSpacing.cardPadding)
-                                .semantics {
-                                    contentDescription = "Server profile ${profile.name}, " +
-                                        if (isSelected) "active" else "tap to select"
-                                },
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = AppSpacing.XS)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = profile.name,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = AppColors.contentPrimary
-                                    )
-                                    if (isSelected) {
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(AppShape.chipShape)
-                                                .background(AppColors.actionPrimary.copy(alpha = 0.18f))
-                                                .padding(horizontal = 8.dp, vertical = 2.dp)
-                                        ) {
-                                            Text(
-                                                "ACTIVE",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = AppColors.statusInfo
-                                            )
-                                        }
-                                    }
-                                }
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = profile.toWebSocketUrl(),
-                                    style = AppTextStyle.monoValue,
-                                    color = AppColors.contentMuted
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = profile.toWebSocketUrl(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary
-                            )
-                        }
-
-                        Row {
-                            IconButton(onClick = {
-                                editingProfile = profile
-                                showProfileDialog = true
-                            }) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit", tint = TextSecondary)
-                            }
-                            if (profiles.size > 1) {
-                                IconButton(onClick = { viewModel.deleteProfile(profile.id) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = StatusRed)
-                            Row {
-                                IconButton(onClick = {
-                                    editingProfile = profile
-                                    showProfileDialog = true
-                                }, modifier = Modifier.heightIn(min = 48.dp).width(48.dp)) {
-                                    Icon(Icons.Default.Edit, contentDescription = "Edit", tint = AppColors.contentSecondary)
-                                }
-                                if (profiles.size > 1) {
-                                    IconButton(
-                                        onClick = { viewModel.deleteProfile(profile.id) },
-                                        modifier = Modifier.heightIn(min = 48.dp).width(48.dp)
-                                    ) {
-                                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = AppColors.statusDanger)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(20.dp))
-            }
-        }
-    }
-
-            // Mock / Fake Agent Mode Toggle
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Use Fake Agent (Mock Mode)",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = TextPrimary
-                            )
-                            Text(
-                                text = "Test full study loop without connecting to PC/LLM",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
-                            )
-                        }
-                        Switch(
-                            checked = settings?.useFakeAgent ?: false,
-                            onCheckedChange = { viewModel.toggleFakeAgent(it) }
-                        )
-                    }
-                }
-            }
-
-            // Profile List Header
-            item {
-                Text(
-                    text = "SAVED SERVER PROFILES",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = AccentTeal
-                )
-            }
-
-            items(profiles) { profile ->
-                val isSelected = activeProfile?.id == profile.id
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(16.dp))
-                        .clickable {
-                            viewModel.selectProfile(profile.id)
-                        },
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (isSelected) DarkSurfaceElevated else DarkSurface
-                    ),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = profile.name,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = TextPrimary
-                                )
-                                if (isSelected) {
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(PrimaryBlue.copy(alpha = 0.2f))
-                                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                                    ) {
-                                        Text("ACTIVE", style = MaterialTheme.typography.labelSmall, color = PrimaryBlue)
-                                    }
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = profile.toWebSocketUrl(),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary
-                            )
-                        }
-
-                        Row {
-                            IconButton(onClick = {
-                                editingProfile = profile
-                                showProfileDialog = true
-                            }) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit", tint = TextSecondary)
-                            }
-                            if (profiles.size > 1) {
-                                IconButton(onClick = { viewModel.deleteProfile(profile.id) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = StatusRed)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(20.dp))
             }
         }
     }
@@ -574,6 +192,20 @@ fun ConnectionScreen(
         )
     }
 }
+
+/** Short, human explanation for a failed state — or null when there is nothing to explain. */
+private fun connectionProblem(state: ConnectionState): Pair<String, String>? = when (state) {
+    is ConnectionState.AuthenticationFailed ->
+        "Authentication failed" to "The Study Agent rejected the auth token. Check the token in the profile and try again."
+    is ConnectionState.ServerUnavailable ->
+        "Study Agent not reachable" to "Make sure the Study Agent is running on your PC and both devices are on the same network."
+    is ConnectionState.NetworkUnavailable ->
+        "No network" to "Turn on Wi-Fi or connect to the same network as your PC."
+    is ConnectionState.Error ->
+        "Connection problem" to "Couldn't keep the connection open. Details are in Diagnostics."
+    else -> null
+}
+
 // ---------------------------------------------------------------------------
 // Status hero
 // ---------------------------------------------------------------------------
@@ -581,72 +213,138 @@ fun ConnectionScreen(
 @Composable
 private fun StatusHeroCard(
     connectionState: ConnectionState,
+    activeProfile: ServerProfile?,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val (dotColor, title) = when (connectionState) {
-        is ConnectionState.Connected ->
-            AppColors.statusSuccess to "Connected"
-        is ConnectionState.Connecting, is ConnectionState.Reconnecting ->
-            AppColors.statusWarning to connectionState.label
-        is ConnectionState.Disconnected ->
-            AppColors.statusNeutral to "Disconnected"
-        else ->
-            AppColors.statusDanger to connectionState.label
+    val visual = connectionVisualOf(connectionState)
+    val busy = connectionState is ConnectionState.Connecting || connectionState is ConnectionState.Reconnecting
+    val detail: String? = when (connectionState) {
+        is ConnectionState.Connected -> buildString {
+            append(connectionState.serverName ?: "${connectionState.host}:${connectionState.port}")
+            connectionState.latencyMs?.let { append(" • ").append(it).append(" ms") }
+        }
+        is ConnectionState.Connecting -> "${connectionState.host}:${connectionState.port}"
+        is ConnectionState.Reconnecting -> "Attempt ${connectionState.attempt} of ${connectionState.maxAttempts}"
+        else -> activeProfile?.let { "${it.name} • ${it.toWebSocketUrl()}" }
     }
 
     AppHeroCard(modifier = modifier) {
         Column(modifier = Modifier.padding(AppSpacing.heroCardPadding)) {
-            Text(
-                text = "STATUS",
-                style = MaterialTheme.typography.labelMedium,
-                color = AppColors.contentMuted
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(12.dp)
-                        .clip(CircleShape)
-                        .background(dotColor)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.semantics { contentDescription = "Connection status: ${visual.status}" }
+            ) {
+                Icon(
+                    imageVector = visual.icon,
+                    contentDescription = null,
+                    tint = visual.color,
+                    modifier = Modifier.size(28.dp)
                 )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = AppColors.contentPrimary
-                )
-            }
-
-            if (connectionState is ConnectionState.Connected) {
-                connectionState.latencyMs?.let { lat ->
-                    Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.width(AppSpacing.SM))
+                Column {
                     Text(
-                        text = "Roundtrip latency: ${lat}ms",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = AppColors.voiceSpeaking
+                        text = visual.status,
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = AppColors.contentPrimary
                     )
+                    if (detail != null) {
+                        Text(
+                            text = detail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.contentSecondary
+                        )
+                    }
                 }
             }
-
             Spacer(modifier = Modifier.height(AppSpacing.MD))
             if (connectionState.isConnected) {
-                OutlinedButton(
+                SecondaryButton(
+                    text = "Disconnect",
                     onClick = onDisconnect,
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = AppShape.buttonShape
-                ) {
-                    Text("Disconnect", color = AppColors.statusDanger)
-                }
+                    contentColor = AppColors.statusDanger,
+                    modifier = Modifier.fillMaxWidth()
+                )
             } else {
-                Button(
+                PrimaryButton(
+                    text = if (busy) "Connecting…" else "Connect",
                     onClick = onConnect,
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = AppShape.buttonShape,
-                    colors = ButtonDefaults.buttonColors(containerColor = AppColors.actionPrimaryStrong)
-                ) {
-                    Text("Connect", color = Color.White)
+                    loading = busy,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Profile row
+// ---------------------------------------------------------------------------
+
+@Composable
+private fun ProfileRow(
+    profile: ServerProfile,
+    isSelected: Boolean,
+    canDelete: Boolean,
+    onSelect: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    AppCard(color = if (isSelected) AppColors.surfaceElevated else AppColors.surfacePrimary) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(AppShape.cardShape)
+                .clickable(onClick = onSelect, role = Role.RadioButton)
+                .heightIn(min = 64.dp)
+                .padding(start = AppSpacing.cardPadding, end = AppSpacing.XXS)
+                .semantics {
+                    contentDescription = "Server profile ${profile.name}, " +
+                        if (isSelected) "active" else "tap to select"
+                },
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(vertical = AppSpacing.SM, horizontal = 0.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = profile.name,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = AppColors.contentPrimary
+                    )
+                    if (isSelected) {
+                        Spacer(modifier = Modifier.width(AppSpacing.XS))
+                        Box(
+                            modifier = Modifier
+                                .clip(AppShape.chipShape)
+                                .background(AppColors.statusInfoFill)
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                "Active",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = AppColors.statusInfo
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = profile.toWebSocketUrl(),
+                    style = AppTextStyle.monoValue,
+                    color = AppColors.contentSecondary
+                )
+            }
+            IconButton(onClick = onEdit) {
+                Icon(Icons.Default.Edit, contentDescription = "Edit ${profile.name}", tint = AppColors.contentSecondary)
+            }
+            if (canDelete) {
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Default.Delete, contentDescription = "Delete ${profile.name}", tint = AppColors.statusDanger)
                 }
             }
         }
@@ -670,23 +368,26 @@ private fun ProfileDialog(
     var useTls by remember { mutableStateOf(initialProfile?.useTls ?: false) }
     var token by remember { mutableStateOf(initialProfile?.authToken ?: "") }
 
+    val portValid = portText.toIntOrNull()?.let { it in 1..65535 } == true
+    val hostValid = host.isNotBlank()
+
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = AppColors.surfaceElevated,
+        containerColor = AppColors.surfacePrimary,
         shape = AppShape.dialogShape,
         title = {
-            Text(if (initialProfile == null) "Add Server Profile" else "Edit Server Profile")
             Text(
                 if (initialProfile == null) "Add Server Profile" else "Edit Server Profile",
+                style = MaterialTheme.typography.titleLarge,
                 color = AppColors.contentPrimary
             )
+        },
         text = {
-             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.XS)) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Profile Name") },
+                    label = { Text("Profile name") },
                     singleLine = true,
                     shape = AppShape.fieldShape,
                     modifier = Modifier.fillMaxWidth()
@@ -694,18 +395,21 @@ private fun ProfileDialog(
                 OutlinedTextField(
                     value = host,
                     onValueChange = { host = it },
-                    label = { Text("Host / IP (LAN or Tailscale)") },
+                    label = { Text("Host or IP (LAN or Tailscale)") },
                     singleLine = true,
+                    isError = !hostValid,
                     shape = AppShape.fieldShape,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)) {
                     OutlinedTextField(
                         value = portText,
-                        onValueChange = { portText = it },
+                        onValueChange = { portText = it.filter { c -> c.isDigit() }.take(5) },
                         label = { Text("Port") },
                         singleLine = true,
+                        isError = !portValid,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        shape = AppShape.fieldShape,
                         modifier = Modifier.weight(1f)
                     )
                     OutlinedTextField(
@@ -720,35 +424,28 @@ private fun ProfileDialog(
                 OutlinedTextField(
                     value = token,
                     onValueChange = { token = it },
-                    label = { Text("Auth Token (Optional)") },
+                    label = { Text("Auth token (optional)") },
                     singleLine = true,
                     shape = AppShape.fieldShape,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Secure WSS / TLS", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "Secure WSS / TLS",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = AppColors.contentPrimary
-                    )
-                    Switch(checked = useTls, onCheckedChange = { useTls = it })
-                }
+                SettingRow(
+                    title = "Secure connection (WSS / TLS)",
+                    checked = useTls,
+                    onCheckedChange = { useTls = it }
+                )
             }
         },
         confirmButton = {
-            Button(
+            PrimaryButton(
+                text = "Save",
+                enabled = portValid && hostValid,
                 onClick = {
-                    val port = portText.toIntOrNull() ?: 8765
                     val profile = ServerProfile(
                         id = initialProfile?.id ?: UUID.randomUUID().toString(),
                         name = name.trim().ifEmpty { "PC Agent" },
                         host = host.trim(),
-                        port = port,
+                        port = portText.toIntOrNull() ?: 8765,
                         path = path.trim().ifEmpty { "/ws" },
                         useTls = useTls,
                         authToken = token.trim().ifEmpty { null },
@@ -756,28 +453,24 @@ private fun ProfileDialog(
                     )
                     onSave(profile)
                 }
-            ) {
-                Text("Save")
-            }
+            )
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
+            InlineTextButton(text = "Cancel", onClick = onDismiss, color = AppColors.contentSecondary)
         }
     )
 }
 
-
 // ---------------------------------------------------------------------------
-// Previews (fake static data only — no repositories, §90)
+// Previews (fake static data only)
 // ---------------------------------------------------------------------------
 
 @Preview(name = "Status hero — connected", showBackground = true, backgroundColor = 0xFF0F172A)
 @Composable
 private fun StatusHeroConnectedPreview() {
     StatusHeroCard(
-        connectionState = ConnectionState.Connected("192.168.1.100", 8765, serverName = "Musab's PC", latencyMs = 12L),
+        connectionState = ConnectionState.Connected("192.168.1.100", 8765, serverName = "Study PC", latencyMs = 12L),
+        activeProfile = null,
         onConnect = {},
         onDisconnect = {}
     )
@@ -788,7 +481,8 @@ private fun StatusHeroConnectedPreview() {
 private fun StatusHeroOfflinePreview() {
     StatusHeroCard(
         connectionState = ConnectionState.ServerUnavailable("refused"),
+        activeProfile = null,
         onConnect = {},
         onDisconnect = {}
     )
-}             
+}

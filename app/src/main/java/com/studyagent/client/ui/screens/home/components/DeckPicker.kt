@@ -14,20 +14,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,21 +32,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import com.studyagent.client.core.models.DeckSummary
+import com.studyagent.client.ui.components.InlineTextButton
 import com.studyagent.client.ui.screens.home.DashboardUiMapper
-import com.studyagent.client.ui.theme.AccentTeal
-import com.studyagent.client.ui.theme.DarkBackground
-import com.studyagent.client.ui.theme.DarkSurface
-import com.studyagent.client.ui.theme.DarkSurfaceElevated
-import com.studyagent.client.ui.theme.PrimaryBlue
-import com.studyagent.client.ui.theme.StatusAmber
-import com.studyagent.client.ui.theme.TextMuted
-import com.studyagent.client.ui.theme.TextPrimary
-import com.studyagent.client.ui.theme.TextSecondary
+import com.studyagent.client.ui.theme.AppColors
+import com.studyagent.client.ui.theme.AppShape
+import com.studyagent.client.ui.theme.AppSpacing
 
 // ---------------------------------------------------------------------------
 // Active deck card (§27). Deck data is server-sourced; the raw deck identifier
@@ -72,48 +64,48 @@ fun ActiveDeckCard(
         modifier = modifier,
         action = {
             if (decksSupported) {
-                TextButton(onClick = onChangeDeck) {
-                    Text("Change", color = PrimaryBlue)
-                }
+                InlineTextButton(text = "Change", onClick = onChangeDeck)
             }
         }
     ) {
         when {
             deckUnavailable -> {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Warning, contentDescription = null, tint = StatusAmber, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = null,
+                        tint = AppColors.statusWarning,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(AppSpacing.XS))
                     Text(
                         text = "Selected deck unavailable",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = StatusAmber
+                        color = AppColors.statusWarning
                     )
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.XXS))
                 Text(
                     text = "\"$selectedDeckName\" is no longer reported by the Study Agent. Choose another deck.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = TextMuted
+                    color = AppColors.contentSecondary
                 )
             }
-
             selectedDeck != null -> DeckDetails(selectedDeck)
-
             selectedDeckName != null -> {
                 Text(
                     text = DashboardUiMapper.deckDisplayName(selectedDeckName),
                     style = MaterialTheme.typography.headlineSmall,
-                    color = TextPrimary
+                    color = AppColors.contentPrimary
                 )
                 DashboardUiMapper.deckHierarchy(selectedDeckName)?.let { hierarchy ->
-                    Text(hierarchy, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+                    Text(hierarchy, style = MaterialTheme.typography.bodySmall, color = AppColors.contentMuted)
                 }
             }
-
             else -> Text(
                 text = if (decksSupported) "No deck selected" else "Deck selection is managed by the Study Agent",
                 style = MaterialTheme.typography.bodyMedium,
-                color = TextMuted
+                color = AppColors.contentSecondary
             )
         }
     }
@@ -124,15 +116,15 @@ private fun DeckDetails(deck: DeckSummary) {
     Text(
         text = DashboardUiMapper.deckDisplayName(deck.name),
         style = MaterialTheme.typography.headlineSmall,
-        color = TextPrimary
+        color = AppColors.contentPrimary
     )
     DashboardUiMapper.deckHierarchy(deck.name)?.let { hierarchy ->
-        Text(hierarchy, style = MaterialTheme.typography.bodySmall, color = TextMuted)
+        Text(hierarchy, style = MaterialTheme.typography.bodySmall, color = AppColors.contentMuted)
     }
-    Spacer(modifier = Modifier.height(12.dp))
+    Spacer(modifier = Modifier.height(AppSpacing.SM))
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
-        StatItem("Due", "${deck.dueCount}", valueColor = PrimaryBlue)
-        StatItem("New", "${deck.newCount}", valueColor = AccentTeal)
+        StatItem("Due", "${deck.dueCount}", valueColor = AppColors.actionPrimary)
+        StatItem("New", "${deck.newCount}", valueColor = AppColors.actionAccent)
         StatItem("Learning", "${deck.learningCount}")
         StatItem("Total", "${deck.totalCount}")
     }
@@ -152,7 +144,6 @@ fun DeckPickerDialog(
     modifier: Modifier = Modifier
 ) {
     var query by remember { mutableStateOf(TextFieldValue("")) }
-
     val filtered = remember(query.text, decks) {
         val q = query.text.trim().lowercase()
         val matching = if (q.isEmpty()) decks else decks.filter { it.name.lowercase().contains(q) }
@@ -163,51 +154,61 @@ fun DeckPickerDialog(
         )
     }
 
-    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Card(
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
             modifier = modifier
                 .fillMaxWidth()
                 .heightIn(max = 520.dp),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = DarkSurface)
+            shape = AppShape.dialogShape,
+            color = AppColors.surfacePrimary
         ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text("Choose Deck", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                Spacer(modifier = Modifier.height(12.dp))
+            Column(modifier = Modifier.padding(AppSpacing.MD)) {
+                Text("Choose Deck", style = MaterialTheme.typography.titleLarge, color = AppColors.contentPrimary)
+                Spacer(modifier = Modifier.height(AppSpacing.SM))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(DarkSurfaceElevated)
-                        .padding(horizontal = 12.dp),
+                        .clip(AppShape.fieldShape)
+                        .background(AppColors.surfaceElevated)
+                        .padding(horizontal = AppSpacing.SM),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.Search, contentDescription = null, tint = TextMuted, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = null,
+                        tint = AppColors.contentMuted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(AppSpacing.XS))
                     BasicTextField(
                         value = query,
                         onValueChange = { query = it },
                         singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = TextPrimary),
-                        cursorBrush = SolidColor(PrimaryBlue),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(color = AppColors.contentPrimary),
+                        cursorBrush = SolidColor(AppColors.actionPrimary),
                         decorationBox = { inner ->
                             if (query.text.isEmpty()) {
-                                Text("Search decks…", style = MaterialTheme.typography.bodyMedium, color = TextMuted)
+                                Text(
+                                    "Search decks…",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = AppColors.contentMuted
+                                )
                             }
                             inner()
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .padding(vertical = 12.dp)
+                            .padding(vertical = AppSpacing.SM)
+                            .semantics { contentDescription = "Search decks" }
                     )
                 }
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.XS))
                 if (filtered.isEmpty()) {
                     Text(
                         text = if (decks.isEmpty()) "No decks reported by the Study Agent." else "No decks match your search.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted,
-                        modifier = Modifier.padding(vertical = 24.dp)
+                        color = AppColors.contentMuted,
+                        modifier = Modifier.padding(vertical = AppSpacing.XL)
                     )
                 } else {
                     LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
@@ -220,10 +221,13 @@ fun DeckPickerDialog(
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(8.dp))
-                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
-                    Text("Cancel", color = TextSecondary)
-                }
+                Spacer(modifier = Modifier.height(AppSpacing.XS))
+                InlineTextButton(
+                    text = "Cancel",
+                    onClick = onDismiss,
+                    color = AppColors.contentSecondary,
+                    modifier = Modifier.align(Alignment.End)
+                )
             }
         }
     }
@@ -235,15 +239,17 @@ private fun DeckPickerRow(deck: DeckSummary, isSelected: Boolean, onClick: () ->
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (isSelected) DarkSurfaceElevated else DarkSurface)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 12.dp)
+            .clip(AppShape.fieldShape)
+            .background(if (isSelected) AppColors.surfaceElevated else AppColors.surfacePrimary)
+            .clickable(onClick = onClick, role = Role.Button)
+            .heightIn(min = 52.dp)
+            .padding(horizontal = AppSpacing.SM, vertical = AppSpacing.SM)
             .semantics {
                 contentDescription = buildString {
                     append(deck.name)
                     append(", ${deck.dueCount} due, ${deck.newCount} new")
                     if (deck.isFavorite) append(", favorite")
+                    if (isSelected) append(", selected")
                 }
             },
         verticalAlignment = Alignment.CenterVertically
@@ -251,21 +257,26 @@ private fun DeckPickerRow(deck: DeckSummary, isSelected: Boolean, onClick: () ->
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (deck.isFavorite) {
-                    Icon(Icons.Default.Star, contentDescription = "Favorite", tint = StatusAmber, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        Icons.Default.Star,
+                        contentDescription = null,
+                        tint = AppColors.statusWarning,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(modifier = Modifier.width(AppSpacing.XXS))
                 }
                 Text(
                     text = DashboardUiMapper.deckDisplayName(deck.name),
                     style = MaterialTheme.typography.bodyLarge,
-                    color = if (isSelected) PrimaryBlue else TextPrimary
+                    color = if (isSelected) AppColors.actionPrimary else AppColors.contentPrimary
                 )
             }
             if (hierarchy != null) {
-                Text(hierarchy, style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                Text(hierarchy, style = MaterialTheme.typography.labelSmall, color = AppColors.contentMuted)
             }
         }
-        Text("${deck.dueCount} due", style = MaterialTheme.typography.bodySmall, color = PrimaryBlue)
-        Spacer(modifier = Modifier.width(12.dp))
-        Text("${deck.newCount} new", style = MaterialTheme.typography.bodySmall, color = AccentTeal)
+        Text("${deck.dueCount} due", style = MaterialTheme.typography.bodySmall, color = AppColors.actionPrimary)
+        Spacer(modifier = Modifier.width(AppSpacing.SM))
+        Text("${deck.newCount} new", style = MaterialTheme.typography.bodySmall, color = AppColors.actionAccent)
     }
 }

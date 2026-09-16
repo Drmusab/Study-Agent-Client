@@ -1,23 +1,24 @@
 package com.studyagent.client.ui.screens.study
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lightbulb
@@ -28,52 +29,70 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyagent.client.core.audio.EffectiveStudyAudioMode
 import com.studyagent.client.core.audio.StudyAudioMode
+import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.StudyState
+import com.studyagent.client.ui.components.AppCard
+import com.studyagent.client.ui.components.AppHeroCard
 import com.studyagent.client.ui.components.AudioRouteIndicator
+import com.studyagent.client.ui.components.BannerTone
 import com.studyagent.client.ui.components.ConnectionBadge
+import com.studyagent.client.ui.components.DestructiveButton
+import com.studyagent.client.ui.components.ExpandableSection
+import com.studyagent.client.ui.components.InfoBanner
+import com.studyagent.client.ui.components.PrimaryButton
 import com.studyagent.client.ui.components.PushToTalkButton
 import com.studyagent.client.ui.components.RatingButtonGroup
-import com.studyagent.client.ui.components.StudyStateHeader
+import com.studyagent.client.ui.components.STUDY_PHASE_CHIP_TEST_TAG
+import com.studyagent.client.ui.components.SecondaryButton
+import com.studyagent.client.ui.components.SectionHeader
+import com.studyagent.client.ui.components.StudySessionHeader
 import com.studyagent.client.ui.components.VoiceWaveVisualizer
-import com.studyagent.client.ui.theme.AccentTeal
-import com.studyagent.client.ui.theme.DarkBackground
-import com.studyagent.client.ui.theme.DarkSurface
-import com.studyagent.client.ui.theme.DarkSurfaceElevated
-import com.studyagent.client.ui.theme.PrimaryBlue
-import com.studyagent.client.ui.theme.StatusAmber
-import com.studyagent.client.ui.theme.StatusGreen
-import com.studyagent.client.ui.theme.StatusRed
-import com.studyagent.client.ui.theme.TextMuted
-import com.studyagent.client.ui.theme.TextPrimary
-import com.studyagent.client.ui.theme.TextSecondary
+import com.studyagent.client.ui.components.studyPhaseOf
+import com.studyagent.client.ui.theme.AppColors
+import com.studyagent.client.ui.theme.AppShape
+import com.studyagent.client.ui.theme.AppSpacing
 
+/**
+ * Study Session (§22–§30). Layout, top to bottom:
+ *
+ * 1. Top bar — back, connection badge, effective audio route (neutral wording).
+ * 2. Session header — deck, progress and the single explicit phase chip.
+ * 3. Route notices — pending headset switch / unexpected headset loss (cards, not dialogs).
+ * 4. Paused transform — a visible "Paused" card with Resume; the question dims behind it.
+ * 5. Question hero — the largest text on screen, with a small voice-activity indicator.
+ * 6. Progressive disclosure — transcript, review, evaluation (summary + expandable detail),
+ *    hint, explanation, error and completion cards appear only when they have content.
+ * 7. Pinned controls — Push to Talk, quick tools, large rating buttons, Pause / End.
+ *
+ * All voice state comes from the ViewModel; nothing here touches STT/TTS/routing directly.
+ * The RMS level flow is deliberately *not* collected here — the visualizer only needs
+ * `isActive`, so a hot microphone never recomposes the screen.
+ */
 @Composable
 fun StudyScreen(
     viewModel: StudyViewModel,
@@ -81,38 +100,43 @@ fun StudyScreen(
     onNavigateToConnection: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val studyState by viewModel.studyState.collectAsState()
-    val session by viewModel.currentSession.collectAsState()
-    val connectionState by viewModel.connectionState.collectAsState()
-    val isListening by viewModel.isListening.collectAsState()
-    val isSpeaking by viewModel.isSpeaking.collectAsState()
-    val studyAudioRoute = viewModel.studyAudioRoute?.collectAsState()?.value
-    val audioRouteAttention = viewModel.audioRouteAttention?.collectAsState()?.value
-    val pendingAudioRoute = viewModel.pendingAudioRoute?.collectAsState()?.value
-    val appSettings = viewModel.appSettings.collectAsState().value
-    var phoneNoticeDismissed by remember { mutableStateOf(false) }
+    val studyState by viewModel.studyState.collectAsStateWithLifecycle()
+    val session by viewModel.currentSession.collectAsStateWithLifecycle()
+    val connectionState by viewModel.connectionState.collectAsStateWithLifecycle()
+    val isListening by viewModel.isListening.collectAsStateWithLifecycle()
+    val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
+    val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
+    // Route flows are optional (no coordinator in some test/fake wirings): collect safely.
+    val studyAudioRoute = viewModel.studyAudioRoute?.collectAsStateWithLifecycle()?.value
+    val audioRouteAttention = viewModel.audioRouteAttention?.collectAsStateWithLifecycle()?.value
+    val pendingAudioRoute = viewModel.pendingAudioRoute?.collectAsStateWithLifecycle()?.value
+    var phoneNoticeDismissed by rememberSaveable { mutableStateOf(false) }
 
-    // One-time education (§31): only when actually running on the phone, only once, and only
-    // after the user has started studying. No blocking dialog in Auto mode.
-    // §31: informational, once, and only when the phone route is a *fallback* — a user who
-    // explicitly picked Phone in Settings does not need to be told what they chose.
+    val phase = remember(studyState) { studyPhaseOf(studyState) }
+    val currentCard = studyState.currentCardOrNull ?: session?.currentCard
+    val isPaused = studyState is StudyState.Paused
+
+    // One-time education (§31): only when the phone route is a *fallback*, only once, and
+    // only after the user has started studying. Never a blocking dialog in Auto mode.
     val showPhoneNotice = !phoneNoticeDismissed &&
         studyAudioRoute?.effective == EffectiveStudyAudioMode.PHONE &&
-        studyAudioRoute?.preference != StudyAudioMode.PHONE &&
+        studyAudioRoute.preference != StudyAudioMode.PHONE &&
         appSettings?.phoneAudioNoticeAcknowledged == false &&
         studyState !is StudyState.Idle
 
     if (showPhoneNotice) {
         AlertDialog(
             onDismissRequest = { phoneNoticeDismissed = true },
+            containerColor = AppColors.surfaceElevated,
+            titleContentColor = AppColors.contentPrimary,
+            textContentColor = AppColors.contentSecondary,
             title = { Text("Using phone audio") },
             text = {
                 Text(
                     "No headphones connected. Study Agent will use your phone speaker and " +
                         "microphone, so you can study with only your phone.\n\n" +
-                        "Phone speaker mode may be audible to people nearby. " +
-                        "Headphones improve privacy and may improve recognition, and you can " +
-                        "connect them at any time."
+                        "Phone speaker mode may be audible to people nearby. Headphones improve " +
+                        "privacy and may improve recognition, and you can connect them at any time."
                 )
             },
             confirmButton = {
@@ -127,438 +151,251 @@ fun StudyScreen(
         )
     }
 
-    val currentCard = studyState.currentCardOrNull ?: session?.currentCard
-    val isPaused = studyState is StudyState.Paused
-
     Scaffold(
-        containerColor = DarkBackground,
+        containerColor = AppColors.appBackground,
         topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onNavigateBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = TextPrimary)
-                }
-                ConnectionBadge(
-                    connectionState = connectionState,
-                    onClick = onNavigateToConnection
-                )
-                // Effective route (§81) — compact, neutral wording, no error styling.
-                AudioRouteIndicator(route = studyAudioRoute)
-            }
+            StudyTopBar(
+                onBack = onNavigateBack,
+                connectionBadge = {
+                    ConnectionBadge(connectionState = connectionState, onClick = onNavigateToConnection)
+                },
+                routeIndicator = { AudioRouteIndicator(route = studyAudioRoute) }
+            )
         }
     ) { innerPadding ->
-        Column(
+        BoxWithConstraints(
             modifier = modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.SpaceBetween
         ) {
+            val contentWidth = maxWidth.coerceAtMost(AppSpacing.studyMaxWidth)
             Column(
                 modifier = Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
+                    .fillMaxSize()
+                    .width(contentWidth)
+                    .align(Alignment.TopCenter)
+                    .padding(horizontal = AppSpacing.contentGutter)
             ) {
-                // Header
-                StudyStateHeader(
-                    deckName = session?.deckName ?: "Study Session",
-                    cardNumber = session?.cardNumber ?: 0,
-                    remainingCards = session?.remainingCards ?: 0,
-                    state = studyState
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Phone-performance phase (§58): 🔊 Speaking / 🎤 Listening / … — never both,
-                // because the voice loop is half-duplex on every route.
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                // ---------------- Scrollable content ----------------
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.SM)
                 ) {
-                    PhaseChip(
-                        isSpeaking = isSpeaking,
-                        isListening = isListening || studyState is StudyState.Listening
+                    Spacer(modifier = Modifier.height(0.dp))
+
+                    StudySessionHeader(
+                        deckName = session?.deckName ?: "Study Session",
+                        cardNumber = session?.cardNumber ?: 0,
+                        remainingCards = session?.remainingCards ?: 0,
+                        phase = phase
                     )
-                    // A headset became available mid-turn (§41/§42): the switch waits for the
-                    // boundary by default, and the user can ask for it now.
+
+                    // A better route is waiting for the turn boundary (§41/§42).
                     if (pendingAudioRoute != null) {
-                        OutlinedButton(onClick = { viewModel.onUseHeadsetNow() }) {
-                            Text("Use headphones now")
-                        }
-                    }
-                }
-
-                // Unexpected headset loss (§96/§118). Only shown when the configured behaviour
-                // is "pause voice study" — Phone Mode itself never raises this.
-                if (audioRouteAttention != null) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text(
-                                text = "AUDIO ROUTE",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextMuted
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = audioRouteAttention?.message ?: "Audio route changed.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Button(
-                                    onClick = { viewModel.onContinueOnPhone() },
-                                    modifier = Modifier.weight(1f)
-                                ) { Text("Continue on phone") }
-                                OutlinedButton(
-                                    onClick = { viewModel.onWaitForHeadset() },
-                                    modifier = Modifier.weight(1f)
-                                ) { Text("Wait for headphones") }
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Question Card
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurface)
-                ) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            text = "QUESTION",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = AccentTeal
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = currentCard?.question ?: "Press 'Start' to begin loading cards from PC agent...",
-                            style = MaterialTheme.typography.titleLarge.copy(fontSize = 20.sp, lineHeight = 28.sp),
-                            color = TextPrimary
-                        )
-
-                        // Voice Waveform
-                        Spacer(modifier = Modifier.height(16.dp))
-                        VoiceWaveVisualizer(
-                            isActive = isListening || isSpeaking,
-                            color = if (isSpeaking) AccentTeal else PrimaryBlue
+                        InfoBanner(
+                            title = "Headphones connected",
+                            message = "Study Agent will switch to headphones after this turn.",
+                            tone = BannerTone.INFO,
+                            actionLabel = "Use headphones now",
+                            onAction = { viewModel.onUseHeadsetNow() }
                         )
                     }
-                }
 
-                // Real-time Transcript display
-                val transcriptText = when (val s = studyState) {
-                    is StudyState.Listening -> s.partialTranscript
-                    is StudyState.Evaluating -> s.userTranscript
-                    else -> ""
-                }
-
-                AnimatedVisibility(visible = transcriptText.isNotBlank()) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text(
-                                text = "YOUR TRANSCRIPT",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextMuted
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "\"$transcriptText\"",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = TextPrimary
-                            )
-                        }
+                    // Unexpected headset loss under the "pause voice study" policy (§96/§118).
+                    if (audioRouteAttention != null) {
+                        HeadsetLostCard(
+                            message = audioRouteAttention.message,
+                            canContinueOnPhone = audioRouteAttention.canContinueOnPhone,
+                            canWaitForHeadset = audioRouteAttention.canWaitForHeadset,
+                            onContinueOnPhone = { viewModel.onContinueOnPhone() },
+                            onWaitForHeadset = { viewModel.onWaitForHeadset() }
+                        )
                     }
-                }
 
-                // Transcript review (§19/§73): shown only when auto-submit is off and a
-                // recognition turn has completed. Deliberately lightweight — submit or retry,
-                // not a text editor.
-                val pendingTranscript = (studyState as? StudyState.Listening)?.pendingTranscript.orEmpty()
-                AnimatedVisibility(visible = pendingTranscript.isNotBlank()) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
-                    ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
-                            Text(
-                                text = "REVIEW YOUR ANSWER",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = TextMuted
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "\"$pendingTranscript\"",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = TextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = { viewModel.onDiscardPendingTranscript() },
-                                    modifier = Modifier.weight(1f)
-                                ) { Text("Listen again") }
-                                Button(
-                                    onClick = { viewModel.onSubmitPendingTranscript() },
-                                    modifier = Modifier.weight(1f)
-                                ) { Text("Submit") }
-                            }
-                        }
+                    // Paused transform (§27): impossible to miss, one obvious way back.
+                    if (isPaused) {
+                        PausedCard(onResume = { viewModel.onResumeSession() })
                     }
-                }
 
-                // AI Evaluation / Feedback Box
-                val evaluation = when (val s = studyState) {
-                    is StudyState.ShowingFeedback -> s.evaluation
-                    is StudyState.WaitingForRating -> s.evaluation
-                    else -> null
-                }
+                    // Error surface (§30): plain language here; details live in Diagnostics.
+                    (studyState as? StudyState.Error)?.let { error ->
+                        InfoBanner(
+                            title = if (error.recoverable) "Something went wrong" else "Session stopped",
+                            message = error.message,
+                            tone = BannerTone.DANGER,
+                            actionLabel = if (!connectionState.isConnected) "Connection" else null,
+                            onAction = if (!connectionState.isConnected) onNavigateToConnection else null
+                        )
+                    }
 
-                AnimatedVisibility(visible = evaluation != null) {
-                    evaluation?.let { eval ->
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = 12.dp),
-                            shape = RoundedCornerShape(18.dp),
-                            colors = CardDefaults.cardColors(containerColor = DarkSurface)
-                        ) {
-                            Column(modifier = Modifier.padding(18.dp)) {
+                    // Question hero.
+                    QuestionCard(
+                        question = currentCard?.question,
+                        loadingMessage = (studyState as? StudyState.Loading)?.message,
+                        isListening = isListening || studyState is StudyState.Listening,
+                        isSpeaking = isSpeaking,
+                        dimmed = isPaused
+                    )
+
+                    // Live / final transcript.
+                    val transcriptText = when (val s = studyState) {
+                        is StudyState.Listening -> s.partialTranscript
+                        is StudyState.Evaluating -> s.userTranscript
+                        else -> ""
+                    }
+                    AnimatedVisibility(visible = transcriptText.isNotBlank()) {
+                        QuoteCard(
+                            heading = if (studyState is StudyState.Evaluating) "Your answer" else "Hearing…",
+                            text = transcriptText
+                        )
+                    }
+
+                    // Transcript review (§19/§73): submit or listen again — not a text editor.
+                    val pendingTranscript = (studyState as? StudyState.Listening)?.pendingTranscript.orEmpty()
+                    AnimatedVisibility(visible = pendingTranscript.isNotBlank()) {
+                        AppCard(color = AppColors.surfaceElevated) {
+                            Column(modifier = Modifier.padding(AppSpacing.cardPadding)) {
+                                SectionHeader(title = "Review your answer")
+                                Spacer(modifier = Modifier.height(AppSpacing.XS))
+                                Text(
+                                    text = "\u201C$pendingTranscript\u201D",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = AppColors.contentPrimary
+                                )
+                                Spacer(modifier = Modifier.height(AppSpacing.SM))
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
                                 ) {
-                                    Text(
-                                        text = "AI FEEDBACK",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = PrimaryBlue
+                                    SecondaryButton(
+                                        text = "Listen again",
+                                        onClick = { viewModel.onDiscardPendingTranscript() },
+                                        modifier = Modifier.weight(1f)
                                     )
-                                    eval.score?.let { score ->
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(if (score >= 80) StatusGreen.copy(alpha = 0.2f) else StatusAmber.copy(alpha = 0.2f))
-                                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                                        ) {
-                                            Text(
-                                                text = "Score: $score%",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = if (score >= 80) StatusGreen else StatusAmber
-                                            )
-                                        }
-                                    }
-                                }
-
-                                if (eval.shortFeedback.isNotBlank()) {
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Text(
-                                        text = eval.shortFeedback,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = TextPrimary
+                                    PrimaryButton(
+                                        text = "Submit",
+                                        onClick = { viewModel.onSubmitPendingTranscript() },
+                                        modifier = Modifier.weight(1f)
                                     )
-                                }
-
-                                // Correct points
-                                if (eval.correctPoints.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.height(10.dp))
-                                    for (pt in eval.correctPoints) {
-                                        Row(modifier = Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(Icons.Default.CheckCircle, contentDescription = null, tint = StatusGreen, modifier = Modifier.size(16.dp))
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(text = pt, style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
-                                        }
-                                    }
-                                }
-
-                                // Missing points
-                                if (eval.missingPoints.isNotEmpty()) {
-                                    Spacer(modifier = Modifier.height(6.dp))
-                                    for (pt in eval.missingPoints) {
-                                        Row(modifier = Modifier.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(Icons.Default.Warning, contentDescription = null, tint = StatusAmber, modifier = Modifier.size(16.dp))
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(text = "Missed: $pt", style = MaterialTheme.typography.bodyMedium, color = StatusAmber)
-                                        }
-                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Hint box
-                if (studyState is StudyState.HintShowing) {
-                    val hint = (studyState as StudyState.HintShowing).hintText
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
-                    ) {
-                        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Lightbulb, contentDescription = null, tint = StatusAmber)
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(text = hint, style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+                    // Evaluation: short verdict first, key points behind one tap (§25).
+                    val evaluation = when (val s = studyState) {
+                        is StudyState.ShowingFeedback -> s.evaluation
+                        is StudyState.WaitingForRating -> s.evaluation
+                        else -> null
+                    }
+                    AnimatedVisibility(visible = evaluation != null) {
+                        evaluation?.let { EvaluationCard(evaluation = it) }
+                    }
+
+                    (studyState as? StudyState.HintShowing)?.let { s ->
+                        IconNoteCard(
+                            heading = "Hint",
+                            text = s.hintText,
+                            icon = Icons.Default.Lightbulb,
+                            tint = AppColors.statusWarning
+                        )
+                    }
+                    (studyState as? StudyState.ExplanationShowing)?.let { s ->
+                        IconNoteCard(
+                            heading = "Explanation",
+                            text = s.explanationText,
+                            icon = Icons.Default.Info,
+                            tint = AppColors.voiceSpeaking
+                        )
+                    }
+                    (studyState as? StudyState.SessionFinished)?.let { s ->
+                        AppCard {
+                            Column(modifier = Modifier.padding(AppSpacing.cardPadding)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = AppColors.statusSuccess,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(AppSpacing.XS))
+                                    Text(
+                                        text = "Session complete",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = AppColors.contentPrimary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(AppSpacing.XS))
+                                Text(
+                                    text = s.summary
+                                        ?: "You reviewed ${s.cardsReviewed} card${if (s.cardsReviewed == 1) "" else "s"}.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = AppColors.contentSecondary
+                                )
+                            }
                         }
                     }
+
+                    Spacer(modifier = Modifier.height(AppSpacing.XS))
                 }
 
-                // Explanation box
-                if (studyState is StudyState.ExplanationShowing) {
-                    val exp = (studyState as StudyState.ExplanationShowing).explanationText
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
-                    ) {
-                        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Info, contentDescription = null, tint = AccentTeal)
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(text = exp, style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-            }
-
-            // Bottom controls
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 16.dp)
-            ) {
-                // Push-to-Talk button
-                PushToTalkButton(
-                    isListening = isListening,
-                    onPressStart = { viewModel.onPushToTalkDown() },
-                    onPressEnd = { viewModel.onPushToTalkUp() },
-                    onTapToggle = { viewModel.onPushToTalkToggle() }
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Quick study tools
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                // ---------------- Pinned controls ----------------
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = AppSpacing.XS, bottom = AppSpacing.MD),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.SM)
                 ) {
-                    FilledTonalButton(
-                        onClick = { viewModel.onRepeatQuestion() },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Default.Replay, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Repeat", fontSize = 12.sp)
+                    PushToTalkButton(
+                        isListening = isListening,
+                        isProcessing = studyState is StudyState.Evaluating,
+                        onPressStart = { viewModel.onPushToTalkDown() },
+                        onPressEnd = { viewModel.onPushToTalkUp() },
+                        onTapToggle = { viewModel.onPushToTalkToggle() }
+                    )
+
+                    QuickToolsRow(
+                        onRepeat = { viewModel.onRepeatQuestion() },
+                        onHint = { viewModel.onRequestHint() },
+                        onExplain = { viewModel.onRequestExplanation() },
+                        onSkip = { viewModel.onSkipCard() }
+                    )
+
+                    val suggestedRating = when (val s = studyState) {
+                        is StudyState.WaitingForRating -> s.suggestedRating
+                        is StudyState.ShowingFeedback -> s.evaluation.suggestedRating
+                        else -> null
                     }
+                    RatingButtonGroup(
+                        onRate = { rating -> viewModel.onRateCard(rating) },
+                        suggestedRating = suggestedRating,
+                        enabled = studyState !is StudyState.Idle && studyState !is StudyState.SessionFinished
+                    )
 
-                    FilledTonalButton(
-                        onClick = { viewModel.onRequestHint() },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
                     ) {
-                        Icon(Icons.Default.Lightbulb, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Hint", fontSize = 12.sp)
-                    }
-
-                    FilledTonalButton(
-                        onClick = { viewModel.onRequestExplanation() },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Explain", fontSize = 12.sp)
-                    }
-
-                    FilledTonalButton(
-                        onClick = { viewModel.onSkipCard() },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Default.SkipNext, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Skip", fontSize = 12.sp)
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Rating buttons
-                val suggestedRating = when (val s = studyState) {
-                    is StudyState.WaitingForRating -> s.suggestedRating
-                    is StudyState.ShowingFeedback -> s.evaluation.suggestedRating
-                    else -> null
-                }
-                RatingButtonGroup(
-                    onRate = { rating -> viewModel.onRateCard(rating) },
-                    suggestedRating = suggestedRating,
-                    enabled = studyState !is StudyState.Idle && studyState !is StudyState.SessionFinished
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                // Session controls
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            if (isPaused) viewModel.onResumeSession() else viewModel.onPauseSession()
-                        },
-                        modifier = Modifier.testTag(StudyScreenTags.PAUSE_TOGGLE),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(if (isPaused) "Resume" else "Pause")
-                    }
-
-                    OutlinedButton(
-                        onClick = { viewModel.onEndSession() },
-                        modifier = Modifier.testTag(StudyScreenTags.END_SESSION),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Icon(Icons.Default.Stop, contentDescription = null, tint = StatusRed)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("End Session", color = StatusRed)
+                        SecondaryButton(
+                            text = if (isPaused) "Resume" else "Pause",
+                            icon = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
+                            onClick = {
+                                if (isPaused) viewModel.onResumeSession() else viewModel.onPauseSession()
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag(StudyScreenTags.PAUSE_TOGGLE)
+                        )
+                        DestructiveButton(
+                            text = "End Session",
+                            icon = Icons.Default.Stop,
+                            onClick = { viewModel.onEndSession() },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag(StudyScreenTags.END_SESSION)
+                        )
                     }
                 }
             }
@@ -571,32 +408,309 @@ fun StudyScreen(
  * visible labels stay the source of truth for users and for accessibility.
  */
 object StudyScreenTags {
-    const val PHASE_CHIP = "study_phase_chip"
+    const val PHASE_CHIP = STUDY_PHASE_CHIP_TEST_TAG
     const val PAUSE_TOGGLE = "study_pause_toggle"
     const val END_SESSION = "study_end_session"
 }
 
-/**
- * Explicit phase chip (§58): speaking vs listening, never both. The half-duplex invariant is
- * enforced in the voice layer; the UI simply refuses to claim something impossible.
- */
+// ---------------------------------------------------------------------------
+// Private pieces
+// ---------------------------------------------------------------------------
+
 @Composable
-private fun PhaseChip(
-    isSpeaking: Boolean,
-    isListening: Boolean,
-    modifier: Modifier = Modifier
+private fun StudyTopBar(
+    onBack: () -> Unit,
+    connectionBadge: @Composable () -> Unit,
+    routeIndicator: @Composable () -> Unit
 ) {
-    val (label, tint) = when {
-        isSpeaking -> "🔊 Speaking" to AccentTeal
-        isListening -> "🎤 Listening" to PrimaryBlue
-        else -> "⏸ Idle" to TextMuted
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = AppSpacing.XS, vertical = AppSpacing.XS),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onBack) {
+            Icon(
+                Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "Back",
+                tint = AppColors.contentPrimary
+            )
+        }
+        connectionBadge()
+        routeIndicator()
     }
-    Text(
-        text = label,
-        style = MaterialTheme.typography.labelMedium,
-        color = tint,
-        modifier = modifier
-            .semantics { contentDescription = label }
-            .testTag(StudyScreenTags.PHASE_CHIP)
-    )
+}
+
+@Composable
+private fun PausedCard(onResume: () -> Unit) {
+    AppCard(color = AppColors.statusWarningFill) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(AppSpacing.cardPadding),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Pause,
+                contentDescription = null,
+                tint = AppColors.statusWarning,
+                modifier = Modifier.size(24.dp)
+            )
+            Spacer(modifier = Modifier.width(AppSpacing.SM))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Paused",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = AppColors.contentPrimary
+                )
+                Text(
+                    text = "Microphone and speech are stopped.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppColors.contentSecondary
+                )
+            }
+            Spacer(modifier = Modifier.width(AppSpacing.SM))
+            PrimaryButton(text = "Resume", icon = Icons.Default.PlayArrow, onClick = onResume)
+        }
+    }
+}
+
+@Composable
+private fun HeadsetLostCard(
+    message: String,
+    canContinueOnPhone: Boolean,
+    canWaitForHeadset: Boolean,
+    onContinueOnPhone: () -> Unit,
+    onWaitForHeadset: () -> Unit
+) {
+    AppCard(color = AppColors.surfaceElevated) {
+        Column(modifier = Modifier.padding(AppSpacing.cardPadding)) {
+            SectionHeader(title = "Headphones disconnected", color = AppColors.statusWarning)
+            Spacer(modifier = Modifier.height(AppSpacing.XS))
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = AppColors.contentPrimary
+            )
+            Spacer(modifier = Modifier.height(AppSpacing.SM))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
+            ) {
+                if (canContinueOnPhone) {
+                    PrimaryButton(
+                        text = "Continue on phone",
+                        onClick = onContinueOnPhone,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                if (canWaitForHeadset) {
+                    SecondaryButton(
+                        text = "Wait for headphones",
+                        onClick = onWaitForHeadset,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuestionCard(
+    question: String?,
+    loadingMessage: String?,
+    isListening: Boolean,
+    isSpeaking: Boolean,
+    dimmed: Boolean
+) {
+    AppHeroCard(modifier = Modifier.alpha(if (dimmed) 0.6f else 1f)) {
+        Column(modifier = Modifier.padding(AppSpacing.heroCardPadding)) {
+            SectionHeader(title = "Question", color = AppColors.voiceSpeaking)
+            Spacer(modifier = Modifier.height(AppSpacing.XS))
+            Text(
+                text = question
+                    ?: loadingMessage
+                    ?: "Press 'Start' to begin loading cards from your Study Agent.",
+                style = MaterialTheme.typography.headlineSmall,
+                color = if (question != null) AppColors.contentPrimary else AppColors.contentSecondary
+            )
+            Spacer(modifier = Modifier.height(AppSpacing.MD))
+            // Activity only — the RMS level is intentionally not plumbed into this screen.
+            VoiceWaveVisualizer(
+                isActive = isListening || isSpeaking,
+                color = if (isSpeaking) AppColors.voiceSpeaking else AppColors.voiceListening,
+                description = when {
+                    isSpeaking -> "Speaking"
+                    isListening -> "Listening"
+                    else -> "Voice idle"
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun QuoteCard(heading: String, text: String) {
+    AppCard(color = AppColors.surfaceElevated) {
+        Column(modifier = Modifier.padding(AppSpacing.cardPadding)) {
+            SectionHeader(title = heading)
+            Spacer(modifier = Modifier.height(AppSpacing.XS))
+            Text(
+                text = "\u201C$text\u201D",
+                style = MaterialTheme.typography.bodyLarge,
+                color = AppColors.contentPrimary
+            )
+        }
+    }
+}
+
+@Composable
+private fun IconNoteCard(heading: String, text: String, icon: ImageVector, tint: Color) {
+    AppCard(color = AppColors.surfaceElevated) {
+        Row(
+            modifier = Modifier.padding(AppSpacing.cardPadding),
+            verticalAlignment = Alignment.Top
+        ) {
+            Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+            Spacer(modifier = Modifier.width(AppSpacing.SM))
+            Column {
+                Text(text = heading, style = MaterialTheme.typography.labelLarge, color = tint)
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(text = text, style = MaterialTheme.typography.bodyMedium, color = AppColors.contentPrimary)
+            }
+        }
+    }
+}
+
+@Composable
+private fun EvaluationCard(evaluation: Evaluation) {
+    var detailsExpanded by rememberSaveable(evaluation) { mutableStateOf(false) }
+    val hasDetails = evaluation.correctPoints.isNotEmpty() ||
+        evaluation.missingPoints.isNotEmpty() ||
+        evaluation.incorrectPoints.isNotEmpty()
+    val score = evaluation.score
+    val scoreColor = when {
+        score == null -> AppColors.contentSecondary
+        score >= 80 -> AppColors.statusSuccess
+        score >= 50 -> AppColors.statusWarning
+        else -> AppColors.statusDanger
+    }
+
+    AppCard {
+        Column(modifier = Modifier.padding(AppSpacing.cardPadding)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                SectionHeader(title = "Feedback", color = AppColors.actionPrimary, modifier = Modifier.weight(1f))
+                if (score != null) {
+                    Text(
+                        text = "$score%",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = scoreColor
+                    )
+                }
+            }
+            if (evaluation.shortFeedback.isNotBlank()) {
+                Spacer(modifier = Modifier.height(AppSpacing.XS))
+                Text(
+                    text = evaluation.shortFeedback,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = AppColors.contentPrimary
+                )
+            }
+            if (hasDetails) {
+                Spacer(modifier = Modifier.height(AppSpacing.XS))
+                ExpandableSection(
+                    title = "Key points",
+                    summary = buildString {
+                        if (evaluation.correctPoints.isNotEmpty()) append("${evaluation.correctPoints.size} correct")
+                        if (evaluation.missingPoints.isNotEmpty()) {
+                            if (isNotEmpty()) append(" • ")
+                            append("${evaluation.missingPoints.size} missed")
+                        }
+                        if (evaluation.incorrectPoints.isNotEmpty()) {
+                            if (isNotEmpty()) append(" • ")
+                            append("${evaluation.incorrectPoints.size} incorrect")
+                        }
+                    },
+                    expanded = detailsExpanded,
+                    onToggle = { detailsExpanded = !detailsExpanded }
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.XXS)) {
+                        evaluation.correctPoints.forEach { pt ->
+                            PointRow(pt, Icons.Default.CheckCircle, AppColors.statusSuccess, AppColors.contentPrimary)
+                        }
+                        evaluation.missingPoints.forEach { pt ->
+                            PointRow("Missed: $pt", Icons.Default.Warning, AppColors.statusWarning, AppColors.statusWarning)
+                        }
+                        evaluation.incorrectPoints.forEach { pt ->
+                            PointRow("Incorrect: $pt", Icons.Default.Cancel, AppColors.statusDanger, AppColors.statusDanger)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PointRow(text: String, icon: ImageVector, iconTint: Color, textColor: Color) {
+    Row(verticalAlignment = Alignment.Top) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = iconTint,
+            modifier = Modifier
+                .padding(top = 2.dp)
+                .size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(text = text, style = MaterialTheme.typography.bodyMedium, color = textColor)
+    }
+}
+
+/** Four secondary tools; labels stay short and single-line so the row survives font scaling. */
+@Composable
+private fun QuickToolsRow(
+    onRepeat: () -> Unit,
+    onHint: () -> Unit,
+    onExplain: () -> Unit,
+    onSkip: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
+    ) {
+        QuickTool("Repeat", Icons.Default.Replay, onRepeat, Modifier.weight(1f))
+        QuickTool("Hint", Icons.Default.Lightbulb, onHint, Modifier.weight(1f))
+        QuickTool("Explain", Icons.Default.Info, onExplain, Modifier.weight(1f))
+        QuickTool("Skip", Icons.Default.SkipNext, onSkip, Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun QuickTool(label: String, icon: ImageVector, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    FilledTonalButton(
+        onClick = onClick,
+        modifier = modifier.heightIn(min = 48.dp),
+        shape = AppShape.buttonShape,
+        contentPadding = PaddingValues(horizontal = AppSpacing.XS, vertical = AppSpacing.XS),
+        colors = ButtonDefaults.filledTonalButtonColors(
+            containerColor = AppColors.surfaceInteractive,
+            contentColor = AppColors.contentPrimary
+        )
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
 }
