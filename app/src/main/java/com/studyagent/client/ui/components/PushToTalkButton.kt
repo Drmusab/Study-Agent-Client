@@ -14,13 +14,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicNone
@@ -35,8 +33,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -47,13 +43,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.sp
-import com.studyagent.client.ui.theme.DarkSurfaceElevated
-import com.studyagent.client.ui.theme.PrimaryBlue
-import com.studyagent.client.ui.theme.PrimaryBlueVariant
-import com.studyagent.client.ui.theme.StatusRed
-import com.studyagent.client.ui.theme.TextPrimary
 import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.AppShape
 import com.studyagent.client.ui.theme.AppSpacing
@@ -62,39 +51,44 @@ import com.studyagent.client.ui.theme.useReducedMotion
 /**
  * Semantics tag for the push-to-talk control.
  *
- * Exposed so the instrumented tests select the button by identity instead of by its visible copy
- * (§141). Nothing in the app reads it.
+ * Exposed so the instrumented tests select the button by identity instead of by its
+ * visible copy. Nothing in the app reads it.
  */
 const val PUSH_TO_TALK_TEST_TAG = "push_to_talk"
 
+/**
+ * Primary voice control on the Study screen (§27).
+ *
+ * Four visual states, each distinguished by colour **and** icon **and** text:
+ *  - ready       (blue, mic, "Push to Talk / Hold or tap")
+ *  - listening   (red, mic, "Listening… / Release to submit") + gentle pulse
+ *  - processing  (tinted, spinner, "Processing…")
+ *  - disabled    (muted, mic-off outline, "Unavailable right now")
+ *
+ * The pulse only runs while listening and is skipped entirely when the system
+ * reduce-motion setting is on (§84). Press/release/tap give a short haptic tick.
+ */
 @Composable
 fun PushToTalkButton(
     isListening: Boolean,
     onPressStart: () -> Unit,
     onPressEnd: () -> Unit,
     onTapToggle: () -> Unit,
-    modifier: Modifier = Modifier
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
     isProcessing: Boolean = false
 ) {
-    // The pulse exists to show an active microphone, so it is only created while listening (§58).
-    // An idle push-to-talk button that keeps animating would request a frame every 16 ms for as
-    // long as the Study screen is open: a battery cost with no information on screen, and a
-    // permanently non-idle window for the instrumented tests (§144/§177).
-        val scale = if (isListening) {
     val reducedMotion = useReducedMotion()
     val view = LocalView.current
     val haptics = LocalHapticFeedback.current
 
-    val scale = if (isListening && !reducedMotion) { {
+    // Only create the infinite transition while it carries information (active mic).
+    val scale = if (isListening && !reducedMotion) {
         val infiniteTransition = rememberInfiniteTransition(label = "pulse")
         val pulseScale by infiniteTransition.animateFloat(
             initialValue = 1.0f,
-            targetValue = 1.08f,
-            targetValue = 1.04f,
+            targetValue = 1.03f,
             animationSpec = infiniteRepeatable(
-                animation = tween(700, easing = FastOutSlowInEasing),
                 animation = tween(900, easing = FastOutSlowInEasing),
                 repeatMode = RepeatMode.Reverse
             ),
@@ -104,50 +98,42 @@ fun PushToTalkButton(
     } else {
         1.0f
     }
-    val bgColor = if (isListening) StatusRed else PrimaryBlue
-            val (container, content, iconTint) = when {
-        !enabled -> Triple(
-            AppColors.surfaceInteractive.copy(alpha = 0.6f),
-            AppColors.contentMuted,
-            AppColors.contentMuted
-        )
-        isProcessing -> Triple(
-            AppColors.voiceListening.copy(alpha = 0.18f),
-            AppColors.statusInfo,
-            AppColors.statusInfo
-        )
-        isListening -> Triple(
-            AppColors.statusDangerStrong,
-            Color.White,
-            Color.White
-        )
-        else -> Triple(
-            AppColors.actionPrimaryStrong,
-            Color.White,
-            Color.White
-        )
+
+    val (container, content) = when {
+        !enabled -> AppColors.surfaceInteractive.copy(alpha = 0.6f) to AppColors.contentMuted
+        isProcessing -> AppColors.statusInfoFill to AppColors.statusInfo
+        isListening -> AppColors.statusDangerStrong to Color.White
+        else -> AppColors.actionPrimaryStrong to Color.White
     }
 
     fun tick() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            haptics.performHapticFeedback(HapticFeedbackType.TICK)
+            haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
         } else {
             @Suppress("DEPRECATION")
             view.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY)
         }
     }
 
+    val title = when {
+        isProcessing -> "Processing…"
+        isListening -> "Listening…"
+        else -> "Push to Talk"
+    }
+    val hint = when {
+        !enabled -> "Unavailable right now"
+        isProcessing -> "Finishing your answer"
+        isListening -> "Release to submit"
+        else -> "Hold or tap"
+    }
+
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .height(72.dp)
-            // Stable hook for the instrumented tests (§141) — matching on the visible label would
-            // break the moment the copy changes.
+            .heightIn(min = 72.dp)
             .testTag(PUSH_TO_TALK_TEST_TAG)
             .scale(scale)
-            .clip(RoundedCornerShape(24.dp))
-            .pointerInput(isListening) {
-            .clip(AppShape.buttonShape)
+            .clip(AppShape.heroCardShape)
             .pointerInput(isListening, enabled) {
                 if (!enabled) return@pointerInput
                 detectTapGestures(
@@ -170,95 +156,57 @@ fun PushToTalkButton(
                     isListening -> "Listening. Release to submit"
                     else -> "Push to talk. Hold or tap to start"
                 }
-                color = bgColor,
-        shadowElevation = 8.dp
+            },
         color = container,
         shadowElevation = if (enabled && !isProcessing) 4.dp else 0.dp
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 24.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = AppSpacing.XL),
+                .padding(horizontal = AppSpacing.XL, vertical = AppSpacing.SM),
             verticalAlignment = Alignment.CenterVertically
         ) {
-             Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.2f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = if (isListening) Icons.Default.Mic else Icons.Default.MicNone,
-                    contentDescription = "Push to talk",
-                    tint = TextPrimary,
-                    modifier = Modifier.size(26.dp)
-            when {
-                isProcessing -> {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(28.dp),
-                        strokeWidth = 2.5.dp,
-                        color = iconTint
+            if (isProcessing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(28.dp),
+                    strokeWidth = 2.5.dp,
+                    color = content
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(content.copy(alpha = 0.18f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (enabled) Icons.Default.Mic else Icons.Default.MicNone,
+                        contentDescription = null,
+                        tint = content,
+                        modifier = Modifier.size(26.dp)
                     )
-                    Spacer(modifier = Modifier.width(AppSpacing.SM))
-                }
-                else -> {
-                    Box(
-                        modifier = Modifier
-                            .size(44.dp)
-                            .clip(CircleShape)
-                            .background(Color.White.copy(alpha = 0.2f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = when {
-                                !enabled -> Icons.Default.MicNone
-                                isListening -> Icons.Default.Mic
-                                else -> Icons.Default.Mic
-                            },
-                            contentDescription = null,
-                            tint = iconTint,
-                            modifier = Modifier.size(26.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(AppSpacing.SM))
                 }
             }
+            Spacer(modifier = Modifier.width(AppSpacing.SM))
             Column {
                 Text(
-                    text = when {
-                        !enabled -> "Push to Talk"
-                        isProcessing -> "Processing…"
-                        isListening -> "Listening…"
-                        else -> "Push to Talk"
-                    },
+                    text = title,
                     style = MaterialTheme.typography.titleMedium,
                     color = content
                 )
                 Text(
-                    text = when {
-                        !enabled -> "Unavailable right now"
-                        isProcessing -> "Finishing your answer"
-                        isListening -> "Release to submit"
-                        else -> "Hold or tap"
-                    },
+                    text = hint,
                     style = MaterialTheme.typography.bodySmall,
                     color = content.copy(alpha = 0.85f)
                 )
             }
-            Spacer(modifier = Modifier.width(16.dp))
-            Text(
-                text = if (isListening) "Listening... (Release to submit)" else "Push to Talk (Hold or Tap)",
-                style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp),
-                color = TextPrimary
-            )
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Previews (fake static data only — no repositories, §90)
+// Previews (fake static data only — no repositories)
 // ---------------------------------------------------------------------------
 
 @Preview(name = "PTT — ready", showBackground = true, backgroundColor = 0xFF0F172A)

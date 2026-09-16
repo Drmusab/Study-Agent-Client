@@ -48,7 +48,7 @@ class StudyViewModel(
      * A better route that is waiting for a turn boundary (§41) — e.g. headphones plugged in
      * mid-question. The UI can offer an explicit immediate switch.
      */
-    val pendingAudioRoute: StateFlow<EffectiveStudyAudioRoute>? = studyAudioRouteCoordinator?.pendingRoute
+    val pendingAudioRoute: StateFlow<EffectiveStudyAudioRoute?>? = studyAudioRouteCoordinator?.pendingRoute
 
     /** Full recognition lifecycle — the study screen renders this, not a bare boolean. */
     val recognitionState = recognitionOrchestrator.state

@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Lock
@@ -25,26 +24,20 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.studyagent.client.core.audio.EffectiveStudyAudioMode
 import com.studyagent.client.core.audio.EffectiveStudyAudioRoute
-import com.studyagent.client.ui.theme.AccentTeal
-import com.studyagent.client.ui.theme.DarkSurfaceElevated
-import com.studyagent.client.ui.theme.TextSecondary
 import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.AppShape
 import com.studyagent.client.ui.theme.AppSpacing
 
 /**
- * Compact effective-route chip (§32/§33/§68/§80).
+ * Compact effective-route chip (§33/§68).
  *
  * Shows what the app is *actually doing*:
- *  - 🎧 Headset / 🎧 Headphones + phone mic
- *  - 📱 Phone (speaker + built-in microphone)
- *  - 🔒 Headphones required (the only state that blocks voice study)
- *  - Headset / Headphones + phone mic
- *  - Phone (speaker + built-in microphone)
+ *  - Headphones / Headphones + phone mic
+ *  - Phone audio (speaker + built-in microphone)
  *  - Headphones required (the only state that blocks voice study)
  *
- * Phone Mode is rendered in the same neutral style as everything else. It is a normal route,
- * not a warning, so there is no red/error styling and no "Connect headphones to continue".
+ * Phone audio is rendered in the same neutral style as everything else. It is a normal
+ * route, not a warning, so there is no red styling.
  */
 @Composable
 fun AudioRouteIndicator(
@@ -57,33 +50,26 @@ fun AudioRouteIndicator(
 
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .background(DarkSurfaceElevated)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
             .clip(AppShape.chipShape)
             .background(AppColors.surfaceElevated)
             .heightIn(min = 32.dp)
             .padding(horizontal = AppSpacing.SM, vertical = AppSpacing.XS)
-            .semantics { contentDescription = "Audio route: $label, $detail" },
+            .semantics { contentDescription = "Audio route: $label${detail?.let { ", $it" } ?: ""}" },
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             imageVector = when (effective) {
                 EffectiveStudyAudioMode.HEADSET,
                 EffectiveStudyAudioMode.HYBRID -> Icons.Default.Headphones
-
                 EffectiveStudyAudioMode.PHONE -> Icons.Default.PhoneAndroid
                 EffectiveStudyAudioMode.BLOCKED -> Icons.Default.Lock
                 EffectiveStudyAudioMode.UNKNOWN -> Icons.Default.VolumeUp
             },
-            contentDescription = "Study audio route",
             contentDescription = null,
             tint = when (effective) {
                 EffectiveStudyAudioMode.HEADSET,
-                EffectiveStudyAudioMode.HYBRID -> AccentTeal
                 EffectiveStudyAudioMode.HYBRID -> AppColors.voiceSpeaking
-
-                else -> TextSecondary
+                EffectiveStudyAudioMode.BLOCKED -> AppColors.statusWarning
                 else -> AppColors.contentSecondary
             },
             modifier = Modifier.size(16.dp)
@@ -92,7 +78,6 @@ fun AudioRouteIndicator(
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = TextSecondary
             color = AppColors.contentSecondary
         )
         if (detail != null) {
@@ -100,14 +85,13 @@ fun AudioRouteIndicator(
             Text(
                 text = "• $detail",
                 style = MaterialTheme.typography.labelSmall,
-                color = TextSecondary
                 color = AppColors.contentMuted
             )
         }
     }
 }
 
-/** One-line clarifier so "Phone" is unambiguous about both directions (§67/§81). */
+/** One-line clarifier so "Phone" is unambiguous about both directions (§67). */
 private fun describeRoute(route: EffectiveStudyAudioRoute): String = when (route.effective) {
     EffectiveStudyAudioMode.PHONE -> "speaker + mic"
     EffectiveStudyAudioMode.HEADSET -> "mic included"

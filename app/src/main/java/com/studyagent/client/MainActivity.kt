@@ -8,44 +8,19 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.School
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.Icon
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import androidx.navigation.NavGraph.Companion.findStartDestination
-import androidx.navigation.compose.currentBackStackEntryAsState
-import androidx.navigation.compose.rememberNavController
 import com.studyagent.client.core.audio.HeadsetBroadcastReceiver
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.models.StudyState
-import com.studyagent.client.di.AppContainer
 import com.studyagent.client.di.ServiceLocator
 import com.studyagent.client.service.StudySessionForegroundService
-import com.studyagent.client.ui.navigation.AppNavHost
-import com.studyagent.client.ui.navigation.Screen
-import com.studyagent.client.ui.theme.DarkBackground
-import com.studyagent.client.ui.theme.DarkSurface
-import com.studyagent.client.ui.theme.PrimaryBlue
 import com.studyagent.client.ui.theme.AppColors
+import com.studyagent.client.ui.navigation.StudyAgentRoot
 import com.studyagent.client.ui.theme.StudyAgentTheme
-import com.studyagent.client.ui.theme.TextMuted
-import com.studyagent.client.ui.theme.TextPrimary
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -74,7 +49,6 @@ class MainActivity : ComponentActivity() {
             StudyAgentTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = DarkBackground
                     color = AppColors.appBackground
                 ) {
                     val container = ServiceLocator.appContainer
@@ -155,90 +129,5 @@ class MainActivity : ComponentActivity() {
                 AppLogger.w(tag, "Error unregistering headset receiver: ${e.message}")
             }
         }
-    }
-}
-
-private data class PrimaryDestination(
-    val route: String,
-    val label: String,
-    val icon: ImageVector
-)
-
-/**
- * Root scaffold with the primary navigation (§47): Dashboard / Study / Control.
- * Connection, Settings and Diagnostics remain secondary, reached from the
- * Dashboard header. The bar hides during immersive study turns so voice study
- * is never crowded.
- */
-@Composable
-private fun StudyAgentRoot(container: AppContainer) {
-    val navController = rememberNavController()
-    val backStackEntry by navController.currentBackStackEntryAsState()
-    val currentRoute = backStackEntry?.destination?.route
-    val studyState by container.studySessionRepository.studyState.collectAsState()
-
-    val immersiveStudy = currentRoute == Screen.Study.route && when (studyState) {
-        is StudyState.Idle, is StudyState.SessionFinished, is StudyState.Error -> false
-        else -> true
-    }
-    val showBottomBar = currentRoute in Screen.primaryRoutes && !immersiveStudy
-
-    val destinations = listOf(
-        PrimaryDestination(Screen.Home.route, "Dashboard", Icons.Default.Dashboard),
-        PrimaryDestination(Screen.Study.route, "Study", Icons.Default.School),
-        PrimaryDestination(Screen.Control.route, "Control", Icons.Default.Tune)
-    )
-
-    Scaffold(
-        containerColor = DarkBackground,
-        containerColor = AppColors.appBackground,
-        bottomBar = {
-            if (showBottomBar) {
-                NavigationBar(containerColor = DarkSurface) {
-                NavigationBar(containerColor = AppColors.surfacePrimary) {
-                    destinations.forEach { destination ->
-                        val selected = currentRoute == destination.route
-                        NavigationBarItem(
-                            selected = currentRoute == destination.route,
-                            selected = selected,
-                            onClick = {
-                                navController.navigate(destination.route) {
-                                    popUpTo(navController.graph.findStartDestination().id) {
-                                        saveState = true
-                                    }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
-                            },
-                            icon = {
-                                Icon(
-                                    destination.icon,
-                                    contentDescription = destination.label,
-                                    tint = if (currentRoute == destination.route) PrimaryBlue else TextMuted
-                                    tint = if (selected) AppColors.actionPrimary else AppColors.contentMuted
-                                )
-                            },
-                            label = {
-                                Text(
-                                    destination.label,
-                                    color = if (currentRoute == destination.route) TextPrimary else TextMuted
-                                    color = if (selected) AppColors.contentPrimary else AppColors.contentMute
-                                )
-                            },
-                            colors = NavigationBarItemDefaults.colors(indicatorColor = DarkSurface)
-                            colors = NavigationBarItemDefaults.colors(
-                                indicatorColor = AppColors.surfaceInteractive
-                            )
-                        )
-                    }
-                }
-            }
-        }
-    ) { innerPadding ->
-        AppNavHost(
-            container = container,
-            navController = navController,
-            modifier = Modifier.padding(innerPadding)
-        )
     }
 }
