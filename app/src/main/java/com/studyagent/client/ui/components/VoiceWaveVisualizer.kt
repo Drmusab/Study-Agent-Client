@@ -22,22 +22,33 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.studyagent.client.ui.theme.AccentTeal
 import com.studyagent.client.ui.theme.PrimaryBlue
+import com.studyagent.client.ui.theme.AppColors
+import com.studyagent.client.ui.theme.useReducedMotion
 
 @Composable
 fun VoiceWaveVisualizer(
     isActive: Boolean,
     color: Color = PrimaryBlue,
     modifier: Modifier = Modifier
+    color: Color = AppColors.voiceListening,
+    modifier: Modifier = Modifier,
+    description: String = "Voice activity"
 ) {
     val heights = waveHeights(isActive)
+    val reducedMotion = useReducedMotion()
+    val heights = waveHeights(isActive && !reducedMotion)
 
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(36.dp),
+            .height(36.dp)
+            .semantics { contentDescription = if (isActive) description else "Voice idle" },
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -49,6 +60,7 @@ fun VoiceWaveVisualizer(
                     .height((36 * heightFraction).dp)
                     .clip(RoundedCornerShape(2.dp))
                     .background(if (isActive) color else Color.Gray.copy(alpha = 0.3f))
+                    .background(if (isActive) color else AppColors.voiceIdle)
             )
         }
     }
