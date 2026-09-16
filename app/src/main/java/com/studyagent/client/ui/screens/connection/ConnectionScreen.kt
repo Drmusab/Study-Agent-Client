@@ -767,3 +767,28 @@ private fun ProfileDialog(
         }
     )
 }
+
+
+// ---------------------------------------------------------------------------
+// Previews (fake static data only — no repositories, §90)
+// ---------------------------------------------------------------------------
+
+@Preview(name = "Status hero — connected", showBackground = true, backgroundColor = 0xFF0F172A)
+@Composable
+private fun StatusHeroConnectedPreview() {
+    StatusHeroCard(
+        connectionState = ConnectionState.Connected("192.168.1.100", 8765, serverName = "Musab's PC", latencyMs = 12L),
+        onConnect = {},
+        onDisconnect = {}
+    )
+}
+
+@Preview(name = "Status hero — offline", showBackground = true, backgroundColor = 0xFF0F172A)
+@Composable
+private fun StatusHeroOfflinePreview() {
+    StatusHeroCard(
+        connectionState = ConnectionState.ServerUnavailable("refused"),
+        onConnect = {},
+        onDisconnect = {}
+    )
+}             
