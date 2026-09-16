@@ -74,8 +74,8 @@ fun connectionVisualOf(state: ConnectionState): ConnectionVisual = when (state) 
 }
 
 /**
- * Compact, tappable connection chip used in top bars. 40dp tall minimum, one line,
- * icon + text + colour.
+ * Compact, tappable connection chip used in top bars. 48dp tall minimum, one line,
+ * icon + text + colour (§63).
  */
 @Composable
 fun ConnectionBadge(
@@ -89,7 +89,7 @@ fun ConnectionBadge(
             .clip(AppShape.chipShape)
             .background(AppColors.surfaceElevated)
             .clickable(onClick = onClick)
-            .heightIn(min = 40.dp)
+            .heightIn(min = 48.dp)
             .padding(horizontal = AppSpacing.SM, vertical = AppSpacing.XS)
             .semantics {
                 contentDescription = "Connection: ${visual.status}, ${visual.detail}. Open connection screen"

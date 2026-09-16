@@ -327,7 +327,7 @@ private fun LevelChip(label: String, selected: Boolean, onClick: () -> Unit) {
             selectedLabelColor = AppColors.actionPrimary,
             labelColor = AppColors.contentSecondary
         ),
-        modifier = Modifier.heightIn(min = 40.dp)
+        modifier = Modifier.heightIn(min = 48.dp)
     )
 }
 

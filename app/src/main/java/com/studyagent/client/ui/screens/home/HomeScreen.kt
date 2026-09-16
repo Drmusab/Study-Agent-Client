@@ -530,7 +530,7 @@ private fun HistoryPanel(
                         selectedLabelColor = AppColors.actionPrimary,
                         labelColor = AppColors.contentSecondary
                     ),
-                    modifier = Modifier.heightIn(min = 40.dp)
+                    modifier = Modifier.heightIn(min = 48.dp)
                 )
             }
         }
@@ -558,7 +558,7 @@ private fun HistoryPanel(
                             selectedLabelColor = AppColors.actionAccent,
                             labelColor = AppColors.contentSecondary
                         ),
-                        modifier = Modifier.heightIn(min = 40.dp)
+                        modifier = Modifier.heightIn(min = 48.dp)
                     )
                 }
             }

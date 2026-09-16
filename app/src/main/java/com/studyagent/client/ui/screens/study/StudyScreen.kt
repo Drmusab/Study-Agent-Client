@@ -1,6 +1,12 @@
 package com.studyagent.client.ui.screens.study
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -106,10 +112,15 @@ fun StudyScreen(
     val isListening by viewModel.isListening.collectAsStateWithLifecycle()
     val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
     val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
-    // Route flows are optional (no coordinator in some test/fake wirings): collect safely.
-    val studyAudioRoute = viewModel.studyAudioRoute?.collectAsStateWithLifecycle()?.value
-    val audioRouteAttention = viewModel.audioRouteAttention?.collectAsStateWithLifecycle()?.value
-    val pendingAudioRoute = viewModel.pendingAudioRoute?.collectAsStateWithLifecycle()?.value
+    // Route flows are optional (no coordinator in some test/fake wirings): collect safely
+    // with lifecycle awareness. The nullable StateFlow is collected only when present;
+    // otherwise the value stays null and no recomposition is scheduled.
+    val studyAudioRouteState = viewModel.studyAudioRoute?.collectAsStateWithLifecycle()
+    val studyAudioRoute = studyAudioRouteState?.value
+    val audioRouteAttentionState = viewModel.audioRouteAttention?.collectAsStateWithLifecycle()
+    val audioRouteAttention = audioRouteAttentionState?.value
+    val pendingAudioRouteState = viewModel.pendingAudioRoute?.collectAsStateWithLifecycle()
+    val pendingAudioRoute = pendingAudioRouteState?.value
     var phoneNoticeDismissed by rememberSaveable { mutableStateOf(false) }
 
     val phase = remember(studyState) { studyPhaseOf(studyState) }
@@ -239,17 +250,36 @@ fun StudyScreen(
                         dimmed = isPaused
                     )
 
-                    // Live / final transcript.
+                    // Live / final transcript — partial feels temporary (muted), final is clear.
                     val transcriptText = when (val s = studyState) {
                         is StudyState.Listening -> s.partialTranscript
                         is StudyState.Evaluating -> s.userTranscript
                         else -> ""
                     }
-                    AnimatedVisibility(visible = transcriptText.isNotBlank()) {
-                        QuoteCard(
-                            heading = if (studyState is StudyState.Evaluating) "Your answer" else "Hearing…",
-                            text = transcriptText
-                        )
+                    val isPartial = studyState is StudyState.Listening
+                    AnimatedVisibility(
+                        visible = transcriptText.isNotBlank(),
+                        enter = fadeIn() + slideInVertically { it / 4 },
+                        exit = fadeOut() + slideOutVertically { -it / 4 }
+                    ) {
+                        if (isPartial) {
+                            AppCard(color = AppColors.surfaceElevated.copy(alpha = 0.85f)) {
+                                Column(modifier = Modifier.padding(AppSpacing.cardPadding)) {
+                                    SectionHeader(title = "Hearing…", color = AppColors.contentMuted)
+                                    Spacer(modifier = Modifier.height(AppSpacing.XS))
+                                    Text(
+                                        text = "\u201C$transcriptText\u201D",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = AppColors.contentSecondary
+                                    )
+                                }
+                            }
+                        } else {
+                            QuoteCard(
+                                heading = "Your answer",
+                                text = transcriptText
+                            )
+                        }
                     }
 
                     // Transcript review (§19/§73): submit or listen again — not a text editor.
@@ -529,13 +559,24 @@ private fun QuestionCard(
         Column(modifier = Modifier.padding(AppSpacing.heroCardPadding)) {
             SectionHeader(title = "Question", color = AppColors.voiceSpeaking)
             Spacer(modifier = Modifier.height(AppSpacing.XS))
-            Text(
-                text = question
-                    ?: loadingMessage
-                    ?: "Press 'Start' to begin loading cards from your Study Agent.",
-                style = MaterialTheme.typography.headlineSmall,
-                color = if (question != null) AppColors.contentPrimary else AppColors.contentSecondary
-            )
+            // Subtle card transition: fade + small vertical shift when the question changes (§71).
+            val questionText = question ?: loadingMessage ?: "Press 'Start' to begin loading cards from your Study Agent."
+            AnimatedContent(
+                targetState = questionText,
+                transitionSpec = {
+                    (fadeIn(animationSpec = androidx.compose.animation.core.tween(220)) +
+                        slideInVertically(animationSpec = androidx.compose.animation.core.tween(220)) { it / 8 }) togetherWith
+                        (fadeOut(animationSpec = androidx.compose.animation.core.tween(180)) +
+                            slideOutVertically(animationSpec = androidx.compose.animation.core.tween(180)) { -it / 8 })
+                },
+                label = "questionTransition"
+            ) { text ->
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = if (question != null) AppColors.contentPrimary else AppColors.contentSecondary
+                )
+            }
             Spacer(modifier = Modifier.height(AppSpacing.MD))
             // Activity only — the RMS level is intentionally not plumbed into this screen.
             VoiceWaveVisualizer(
