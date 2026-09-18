@@ -4,18 +4,15 @@ import com.studyagent.client.core.common.AppClock
 import com.studyagent.client.core.common.SystemAppClock
 
 /**
- * Network-side technical counters (§60/§108/§123/§124).
+ * Network-side technical counters with enhanced observability.
  *
- * Two jobs:
- *
- * 1. Make reconnect behaviour *observable*. "It disconnected" is not a diagnostic; "4 reconnects
- *    in 6 minutes, last one 2 s after a 30 s gap" is.
- * 2. Make accidental chatter visible. [NetworkStatsSnapshot.messagesPerMinute] is the cheapest
- *    detector for a polling loop that nobody intended — an accidental dashboard poll shows up as
- *    a rate, not as an error.
- *
- * Bounded by construction: counters and a single first-message timestamp. No message history is
- * retained, and no payload content is ever passed to this class — only a message *type* string.
+ * Enhanced with:
+ * - DNS/resolve time, connect time, WebSocket upgrade time, handshake time, auth time, ready time
+ * - Ping RTT correlated via in_reply_to
+ * - Reconnect duration
+ * - Request RTT by type
+ * - Generation, protocol, agentId, capabilities, problem
+ * - Network type (WIFI/CELLULAR/VPN)
  */
 class NetworkStats(private val clock: AppClock = SystemAppClock) {
 
@@ -42,9 +39,28 @@ class NetworkStats(private val clock: AppClock = SystemAppClock) {
     private var lastMessageType: String? = null
     private var lastProtocolError: String? = null
 
-    /** Window start for the message-rate metric; reset on clear/reset. */
     private var firstMessageAtMs = -1L
     private var messageWindowCount = 0L
+
+    // Enhanced fields
+    private var generation: Long = -1L
+    private var protocolVersion: String? = null
+    private var serverName: String? = null
+    private var serverVersion: String? = null
+    private var agentId: String? = null
+    private var capabilities: Set<String> = emptySet()
+    private var authenticated: Boolean = false
+    private var problem: String? = null
+    private var handshakeStartedAtMs = -1L
+    private var handshakeLatencyMs = -1L
+    private var readyLatencyMs = -1L
+    private var networkType: String? = null
+    private var dnsLatencyMs = -1L
+    private var wsUpgradeLatencyMs = -1L
+    private var authLatencyMs = -1L
+
+    // Request RTT by type
+    private val requestRttMs = mutableMapOf<String, Long>()
 
     fun onConnecting(profileName: String?, host: String?, port: Int, transport: String = "WebSocket") {
         synchronized(lock) {
@@ -54,6 +70,7 @@ class NetworkStats(private val clock: AppClock = SystemAppClock) {
             this.port = port
             this.transport = transport
             connectStartedAtMs = clock.nowMillis()
+            handshakeStartedAtMs = connectStartedAtMs
         }
     }
 
@@ -73,7 +90,7 @@ class NetworkStats(private val clock: AppClock = SystemAppClock) {
         synchronized(lock) {
             stateLabel = "Disconnected"
             connectStartedAtMs = -1L
-            if (reason != null) lastProtocolError = null // disconnect reasons are not protocol errors
+            if (reason != null) lastProtocolError = null
         }
     }
 
@@ -143,6 +160,74 @@ class NetworkStats(private val clock: AppClock = SystemAppClock) {
         }
     }
 
+    fun onGeneration(generation: Long) {
+        synchronized(lock) {
+            this.generation = generation
+        }
+    }
+
+    fun onHandshakeComplete(protocolVersion: String?, serverName: String?, serverVersion: String?, agentId: String?, capabilities: Set<String>) {
+        synchronized(lock) {
+            this.protocolVersion = protocolVersion
+            this.serverName = serverName
+            this.serverVersion = serverVersion
+            this.agentId = agentId
+            this.capabilities = capabilities
+            if (handshakeStartedAtMs > 0L) {
+                handshakeLatencyMs = clock.nowMillis() - handshakeStartedAtMs
+            }
+        }
+    }
+
+    fun onReady(latencyMs: Long) {
+        synchronized(lock) {
+            readyLatencyMs = latencyMs
+            stateLabel = "Ready"
+        }
+    }
+
+    fun onAuthenticated(authenticated: Boolean) {
+        synchronized(lock) {
+            this.authenticated = authenticated
+        }
+    }
+
+    fun onProblem(problem: String?) {
+        synchronized(lock) {
+            this.problem = problem
+        }
+    }
+
+    fun onNetworkType(type: String?) {
+        synchronized(lock) {
+            this.networkType = type
+        }
+    }
+
+    fun onDnsLatency(latencyMs: Long) {
+        synchronized(lock) {
+            dnsLatencyMs = latencyMs
+        }
+    }
+
+    fun onWsUpgradeLatency(latencyMs: Long) {
+        synchronized(lock) {
+            wsUpgradeLatencyMs = latencyMs
+        }
+    }
+
+    fun onAuthLatency(latencyMs: Long) {
+        synchronized(lock) {
+            authLatencyMs = latencyMs
+        }
+    }
+
+    fun onRequestRtt(type: String, rttMs: Long) {
+        synchronized(lock) {
+            requestRttMs[type] = rttMs
+        }
+    }
+
     fun reset() {
         synchronized(lock) {
             reconnectAttempt = 0
@@ -158,6 +243,22 @@ class NetworkStats(private val clock: AppClock = SystemAppClock) {
             firstMessageAtMs = -1L
             messageWindowCount = 0L
             connectStartedAtMs = -1L
+            generation = -1L
+            protocolVersion = null
+            serverName = null
+            serverVersion = null
+            agentId = null
+            capabilities = emptySet()
+            authenticated = false
+            problem = null
+            handshakeStartedAtMs = -1L
+            handshakeLatencyMs = -1L
+            readyLatencyMs = -1L
+            networkType = null
+            dnsLatencyMs = -1L
+            wsUpgradeLatencyMs = -1L
+            authLatencyMs = -1L
+            requestRttMs.clear()
         }
     }
 
@@ -195,16 +296,27 @@ class NetworkStats(private val clock: AppClock = SystemAppClock) {
                 sendFailures = sendFailures,
                 lastMessageType = lastMessageType,
                 lastProtocolError = lastProtocolError,
-                messagesPerMinute = rate
+                messagesPerMinute = rate,
+                generation = generation,
+                protocolVersion = protocolVersion,
+                serverName = serverName,
+                serverVersion = serverVersion,
+                agentId = agentId,
+                capabilities = capabilities,
+                authenticated = authenticated,
+                problem = problem,
+                handshakeLatencyMs = handshakeLatencyMs,
+                readyLatencyMs = readyLatencyMs,
+                networkType = networkType,
+                dnsLatencyMs = dnsLatencyMs,
+                wsUpgradeLatencyMs = wsUpgradeLatencyMs,
+                authLatencyMs = authLatencyMs,
+                requestRttMs = requestRttMs.toMap()
             )
         }
     }
 }
 
-/**
- * Immutable network diagnostics view. `-1`/null mean "not measured" — Diagnostics renders those
- * as `-`/`Unknown` rather than as a zero (§66). No token, header or payload is ever included (§60).
- */
 data class NetworkStatsSnapshot(
     val state: String = "Disconnected",
     val profileName: String? = null,
@@ -223,22 +335,29 @@ data class NetworkStatsSnapshot(
     val sendFailures: Long = 0L,
     val lastMessageType: String? = null,
     val lastProtocolError: String? = null,
-    val messagesPerMinute: Double = -1.0
+    val messagesPerMinute: Double = -1.0,
+    val generation: Long = -1L,
+    val protocolVersion: String? = null,
+    val serverName: String? = null,
+    val serverVersion: String? = null,
+    val agentId: String? = null,
+    val capabilities: Set<String> = emptySet(),
+    val authenticated: Boolean = false,
+    val problem: String? = null,
+    val handshakeLatencyMs: Long = -1L,
+    val readyLatencyMs: Long = -1L,
+    val networkType: String? = null,
+    val dnsLatencyMs: Long = -1L,
+    val wsUpgradeLatencyMs: Long = -1L,
+    val authLatencyMs: Long = -1L,
+    val requestRttMs: Map<String, Long> = emptyMap(),
+    val latencyMs: Long = -1L
 )
 
-/**
- * The instance Diagnostics reads.
- *
- * The connection classes default to this object so a caller that constructs
- * `WebSocketAgentConnection(dispatchers)` (as the existing integration test does) still feeds the
- * diagnostics view without a signature change. Tests that need isolation construct their own
- * [NetworkStats] and inject it.
- */
 object NetworkStatsRegistry {
     @Volatile
     var current: NetworkStats = NetworkStats()
 
-    /** Test hook: replaces the shared instance so cases cannot observe each other's counters. */
     fun resetForTests() {
         current = NetworkStats()
     }

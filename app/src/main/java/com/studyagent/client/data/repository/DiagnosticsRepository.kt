@@ -281,6 +281,7 @@ class DefaultDiagnosticsRepository(
         val connection = connectionState.value
         return buildList {
             add("Connection" to connection.label)
+            add("Phase" to connection.phaseName)
             add("Profile" to (stats.profileName ?: DiagnosticsFormatting.UNKNOWN))
             add("Transport" to stats.transport)
             add(
@@ -290,6 +291,8 @@ class DefaultDiagnosticsRepository(
                     "${stats.host}:${stats.port}"
                 }
             )
+            add("Generation" to if (stats.generation >= 0) stats.generation.toString() else DiagnosticsFormatting.NOT_MEASURED)
+            add("Network type" to (stats.networkType ?: DiagnosticsFormatting.UNKNOWN))
             add(
                 "Reconnect attempt" to if (stats.maxReconnectAttempts > 0) {
                     "${stats.reconnectAttempt}/${stats.maxReconnectAttempts}"
@@ -298,7 +301,12 @@ class DefaultDiagnosticsRepository(
                 }
             )
             add("Reconnects" to stats.reconnectCount.toString())
+            add("DNS latency" to DiagnosticsFormatting.millis(stats.dnsLatencyMs))
             add("Connect latency" to DiagnosticsFormatting.millis(stats.connectLatencyMs))
+            add("WS upgrade latency" to DiagnosticsFormatting.millis(stats.wsUpgradeLatencyMs))
+            add("Handshake latency" to DiagnosticsFormatting.millis(stats.handshakeLatencyMs))
+            add("Auth latency" to DiagnosticsFormatting.millis(stats.authLatencyMs))
+            add("Ready latency" to DiagnosticsFormatting.millis(stats.readyLatencyMs))
             add(
                 "Ping interval" to if (stats.pingIntervalSeconds > 0L) {
                     "${stats.pingIntervalSeconds}s"
@@ -306,7 +314,7 @@ class DefaultDiagnosticsRepository(
                     DiagnosticsFormatting.NOT_MEASURED
                 }
             )
-            add("Last ping RTT" to DiagnosticsFormatting.millis(stats.lastPingRttMs))
+            add("Last ping RTT (correlated)" to DiagnosticsFormatting.millis(stats.lastPingRttMs))
             add("Last message received" to DiagnosticsFormatting.ageMs(stats.lastMessageAgeMs))
             add("Last message type" to (stats.lastMessageType ?: DiagnosticsFormatting.NOT_MEASURED))
             add("Messages sent" to stats.messagesSent.toString())
@@ -319,7 +327,11 @@ class DefaultDiagnosticsRepository(
                     String.format(Locale.US, "%.1f msg/min", stats.messagesPerMinute)
                 }
             )
+            add("Problem" to (stats.problem ?: "None"))
             add("Last protocol error" to (stats.lastProtocolError ?: "None"))
+            if (stats.requestRttMs.isNotEmpty()) {
+                add("Request RTTs" to stats.requestRttMs.entries.joinToString(", ") { "${it.key}=${it.value}ms" })
+            }
         }
     }
 
@@ -327,23 +339,22 @@ class DefaultDiagnosticsRepository(
         val caps: AgentCapabilities? = capabilityStore?.capabilities?.value
         val stats = networkStats.snapshot()
         return buildList {
-            add("Protocol version" to (caps?.protocolVersion ?: DiagnosticsFormatting.UNKNOWN))
+            add("Protocol version" to (stats.protocolVersion ?: caps?.protocolVersion ?: DiagnosticsFormatting.UNKNOWN))
             add("Negotiation" to (caps?.status?.name ?: DiagnosticsFormatting.UNKNOWN))
-            add("Server name" to (caps?.serverName ?: DiagnosticsFormatting.NOT_MEASURED))
-            add("Server version" to (caps?.serverVersion ?: DiagnosticsFormatting.NOT_MEASURED))
+            add("Server name" to (stats.serverName ?: caps?.serverName ?: DiagnosticsFormatting.NOT_MEASURED))
+            add("Server version" to (stats.serverVersion ?: caps?.serverVersion ?: DiagnosticsFormatting.NOT_MEASURED))
+            add("Agent ID" to (stats.agentId ?: caps?.agentId ?: DiagnosticsFormatting.NOT_MEASURED))
+            add("Authenticated" to DiagnosticsFormatting.boolean(stats.authenticated))
             add(
-                "Capabilities" to if (caps == null) {
+                "Capabilities" to if (caps == null && stats.capabilities.isEmpty()) {
                     DiagnosticsFormatting.UNKNOWN
-                } else if (caps.capabilities.isEmpty()) {
-                    "None advertised"
                 } else {
-                    caps.capabilities.sorted().joinToString(", ")
+                    val allCaps = if (stats.capabilities.isNotEmpty()) stats.capabilities else caps?.capabilities ?: emptySet()
+                    if (allCaps.isEmpty()) "None advertised" else allCaps.sorted().joinToString(", ")
                 }
             )
             add("Last server message" to (stats.lastMessageType ?: DiagnosticsFormatting.NOT_MEASURED))
             add("Last protocol error" to (stats.lastProtocolError ?: "None"))
-            // Stated explicitly, because "there is no raw-frame log" is itself information a
-            // reader of an export needs in order to trust it (§81/§83).
             add("Raw frames" to "not stored (privacy)")
         }
     }

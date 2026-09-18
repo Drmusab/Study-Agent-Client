@@ -7,7 +7,10 @@ import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.ServerMessage
 import com.studyagent.client.core.models.ServerProfile
 import com.studyagent.client.core.network.AgentConnection
+import com.studyagent.client.core.network.AgentConnectionSnapshot
+import com.studyagent.client.core.network.ConnectionTestResult
 import com.studyagent.client.core.network.FakeAgentConnection
+import com.studyagent.client.core.network.TransportStatus
 import com.studyagent.client.core.network.WebSocketAgentConnection
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import com.studyagent.client.data.preferences.ProfileRepository
@@ -20,18 +23,24 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 interface ConnectionRepository {
     val connectionState: StateFlow<ConnectionState>
+    val connectionSnapshot: StateFlow<AgentConnectionSnapshot>
     val incomingMessages: Flow<ServerMessage>
     val activeProfile: Flow<ServerProfile?>
 
     suspend fun connect(profile: ServerProfile? = null)
+    suspend fun connectWithOverride(profile: ServerProfile? = null)
     suspend fun disconnect(reason: String = "User requested disconnect")
     suspend fun send(message: ClientMessage): Boolean
     fun toggleFakeAgent(useFake: Boolean)
+
+    fun testConnection(profile: ServerProfile): Flow<ConnectionTestResult>
+    fun getConnectionDiagnostics(): String
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -69,6 +78,16 @@ class DefaultConnectionRepository(
         .flatMapLatest { it.connectionState }
         .stateIn(scope, SharingStarted.Eagerly, ConnectionState.Disconnected)
 
+    override val connectionSnapshot: StateFlow<AgentConnectionSnapshot> = activeConnectionFlow
+        .flatMapLatest {
+            try {
+                it.connectionSnapshot
+            } catch (_: NotImplementedError) {
+                flowOf(AgentConnectionSnapshot.disconnected())
+            }
+        }
+        .stateIn(scope, SharingStarted.Eagerly, AgentConnectionSnapshot.disconnected())
+
     override val incomingMessages: Flow<ServerMessage> = activeConnectionFlow
         .flatMapLatest { it.incomingMessages }
 
@@ -83,9 +102,23 @@ class DefaultConnectionRepository(
 
     override suspend fun connect(profile: ServerProfile?) {
         val targetProfile = profile ?: profileRepository.getActiveProfileOnce() ?: ServerProfile.defaultLocalProfile()
+        // Validate before connecting - don't hide bad config
+        val normalized = targetProfile.normalized()
+        if (normalized == null) {
+            AppLogger.w(tag, "Invalid profile config: ${targetProfile.name}")
+            return
+        }
         AppLogger.i(tag, "Connecting using ${_isFakeMode.value} mode to ${targetProfile.name} (${targetProfile.host}:${targetProfile.port})")
         val currentConn = activeConnectionFlow.value
         currentConn.connect(targetProfile)
+    }
+
+    override suspend fun connectWithOverride(profile: ServerProfile?) {
+        val targetProfile = profile ?: profileRepository.getActiveProfileOnce() ?: ServerProfile.defaultLocalProfile()
+        val normalized = targetProfile.normalized()
+        if (normalized == null) return
+        AppLogger.i(tag, "Manual connect override to ${targetProfile.name}")
+        activeConnectionFlow.value.connectWithOverride(targetProfile)
     }
 
     override suspend fun disconnect(reason: String) {
@@ -104,6 +137,41 @@ class DefaultConnectionRepository(
                 preferencesDataStore.updateSettings { it.copy(useFakeAgent = useFake) }
                 _isFakeMode.value = useFake
             }
+        }
+    }
+
+    override fun testConnection(profile: ServerProfile): Flow<ConnectionTestResult> {
+        return activeConnectionFlow.value.testConnection(profile)
+    }
+
+    override fun getConnectionDiagnostics(): String {
+        val snapshot = connectionSnapshot.value
+        val state = connectionState.value
+        return buildString {
+            appendLine("=== Connection Diagnostics (sanitized) ===")
+            appendLine("App: ${getAppVersion()}")
+            appendLine("Phase: ${state.phaseName}")
+            appendLine("Transport: ${snapshot.transport}")
+            appendLine("Host: ${snapshot.profile?.host ?: "none"}:${snapshot.profile?.port ?: 0}")
+            appendLine("Server: ${snapshot.serverName ?: "unknown"} ${snapshot.serverVersion ?: ""}")
+            appendLine("Protocol: ${snapshot.protocolVersion ?: "unknown"}")
+            appendLine("Capabilities: ${snapshot.capabilities.joinToString(", ")}")
+            appendLine("Authenticated: ${snapshot.authenticated ?: "unknown"}")
+            appendLine("Latency: ${snapshot.latencyMs?.let { "${it}ms" } ?: "unknown"}")
+            appendLine("Last message: ${snapshot.lastMessageAgeMs?.let { "${it}ms ago" } ?: "never"}")
+            appendLine("Generation: ${snapshot.connectionGeneration}")
+            appendLine("Problem: ${snapshot.problem?.userMessage ?: "none"}")
+            appendLine("Profile: ${snapshot.profile?.name ?: "none"}")
+            appendLine("Connection: ${state.label}")
+        }
+    }
+
+    private fun getAppVersion(): String {
+        return try {
+            val clazz = Class.forName("com.studyagent.client.BuildConfig")
+            clazz.getField("VERSION_NAME").get(null) as? String ?: "unknown"
+        } catch (_: Exception) {
+            "unknown"
         }
     }
 }

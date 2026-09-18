@@ -13,10 +13,10 @@ The **Study Agent Mobile Client** is a lightweight, voice-first native Android a
   - Session statistics, card queues, and historical memory.
 
 * **Android Mobile Application (Voice Client):**
-  - High-resilience WebSocket connection (LAN, Tailscale, WireGuard, WSS).
+  - High-resilience WebSocket connection with explicit lifecycle (transport vs agent ready).
+  - Typed AgentApi over transport with request correlation and idempotency.
   - Bidirectional Speech-to-Text (STT) and Text-to-Speech (TTS) pipelines.
-  - Study audio routing that is **headset-optional**: headphones when present, the phone
-    speaker + built-in microphone otherwise (`docs/AUDIO_ROUTING.md`).
+  - Study audio routing that is **headset-optional**: headphones when present, the phone speaker + built-in microphone otherwise.
   - Foreground service for background hands-free study (screen off / phone locked).
   - Real-time state machine driving the study loop without requiring screen interaction.
 
@@ -24,290 +24,404 @@ The **Study Agent Mobile Client** is a lightweight, voice-first native Android a
                  ┌────────────────────────────┐
                  │       ANKI DATABASE        │
                  └─────────────┬──────────────┘
-                               │ AnkiConnect
+                               │ AnkiConnect (localhost only)
                  ┌─────────────▼──────────────┐
                  │    PC STUDY AGENT (HOST)   │
                  │ ────────────────────────── │
-                 │ • LLM Evaluator (Ollama/API)│
+                 │ • LLM Evaluator            │
                  │ • Study Session State      │
-                 │ • Memory & User Profile    │
                  │ • WebSocket Server (:8765) │
+                 │ • Auth + Capabilities      │
                  └─────────────┬──────────────┘
-                               │
-                 JSON over WebSocket (WS / WSS)
-                               │
+                               │ WebSocket JSON (WS/WSS)
+                               │ Bearer auth, welcome handshake
                  ┌─────────────▼──────────────┐
                  │    ANDROID VOICE CLIENT    │
                  │ ────────────────────────── │
+                 │ • AgentClient (handshake)  │
+                 │ • AgentApi (typed)         │
                  │ • Speech Recognition (STT) │
                  │ • Text-to-Speech (TTS)     │
-                 │ • Hands-Free State Machine │
-                 │ • Bluetooth Headset Route  │
-                 │ • Jetpack Compose UI       │
+                 │ • Study Session Machine    │
                  └─────────────┬──────────────┘
-                               │
-                       Bluetooth A2DP / SCO
-                               │
-                         🎧 Headset
-                               │
-                             User
+                               │ Bluetooth A2DP / SCO
+                         🎧 Headset / Phone
+                               │ User
 ```
 
----
-
-## 2. Layered Architecture
-
-The Android app follows Clean Architecture principles with unidirectional data flow (MVI / MVVM):
+## 2. Layered Architecture (Updated for Agent API)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         UI LAYER                            │
-│  • Jetpack Compose Screens (Home, Study, Connection, etc.) │
+│  • Compose Screens (Home, Study, Connection, Control)      │
 │  • ViewModels (StateFlow UI state, Event Handlers)         │
-│  • Custom Voice Visualizers & Headset Badges                │
+│  • Connection test, staged status, help                    │
 └──────────────────────────────┬──────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────┐
-│                       DOMAIN LAYER                          │
-│  • Study State Machine (StudyState sealed hierarchy)        │
-│  • Voice Command Normalizer & Bilingual Parser              │
-│  • Session Controllers & Audio Route Policy                 │
+│                    FEATURE REPOSITORIES                     │
+│  • StudySessionMachineRepository (study business logic)     │
+│  • DashboardRepository (coalescing, cache, freshness)      │
+│  • StudyControlRepository (config draft + ACK)             │
+│  • ConnectionRepository (profiles, intent)                 │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                     AGENT API LAYER                         │
+│  • AgentApi (typed methods: startSession, submitAnswer...) │
+│  • AgentEvent (Flow: question, evaluation, progress...)    │
+│  • ApiResult (Success/Rejected/Timeout/Disconnected)       │
+│  • AgentApiError (stable codes)                            │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                 REQUEST COORDINATION LAYER                  │
+│  • RequestCoordinator (messageId correlation, in_reply_to) │
+│  • Timeouts purpose-specific (handshake 8s, eval 30s)      │
+│  • Bounded map, cancellation, leak prevention              │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                     PROTOCOL LAYER                          │
+│  • ProtocolJson (envelope-first, unknown type handling)    │
+│  • ProtocolContext (negotiated version, session)           │
+│  • MessageFactory (centralized creation, BuildConfig)      │
+│  • Size limits (2MB frame, 10KB question, etc)             │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                   CONNECTION MANAGEMENT                     │
+│  • AgentClient (handshake, auth, capability negotiation)   │
+│  • WebSocketAgentConnection (socket lifecycle, generation) │
+│  • NetworkMonitor (connectivity awareness)                 │
+│  • ReconnectController (exponential backoff + jitter)      │
+│  • ConnectionState (rich lifecycle, not just Connected)    │
+│  • AgentConnectionSnapshot (single source of truth)        │
 └──────────────────────────────┬──────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────┐
 │                        DATA LAYER                           │
-│  • Repositories (StudySession, Connection, Profile, Diag)  │
-│  • WebSocketAgentConnection & ReconnectController           │
-│  • FakeAgentConnection (Standalone Mock Client)            │
-│  • Jetpack DataStore Preferences & SecureTokenStorage       │
+│  • ProfileRepository (non-secret) + SecureTokenStorage     │
+│  • ManagementCacheStorage (dashboard snapshot, decks)      │
+│  • PreferencesDataStore (AppSettings)                      │
 └──────────────────────────────┬──────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────┐
 │                    CORE PLATFORM LAYER                      │
-│  • Android SpeechRecognizer (Locale-aware STT)              │
-│  • TtsEngineAdapter → single Android TextToSpeech instance  │
-│  • AudioFocusController (transient spoken-audio focus)      │
-│  • AudioManager & AudioDeviceCallback (Route Manager)       │
-│  • Foreground Service with Media Actions Notification       │
+│  • SpeechRecognitionOrchestrator, SpeechOrchestrator       │
+│  • AudioRouteManager, StudyAudioRouteCoordinator           │
+│  • Foreground Service + Notification                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
----
+### Responsibility Boundaries
 
-## 3. Package Structure
+#### WebSocketAgentConnection
+Owns: socket lifecycle, frames, transport errors, generation, ping loop, liveness detection, handshake timeout
 
-```text
+#### AgentClient
+Owns: handshake (hello/welcome), auth (Bearer preferred, legacy frame fallback), protocol negotiation (selected_protocol), request correlation (in_reply_to), capabilities, session recovery (request_session_snapshot after reconnect)
+
+#### ConnectionRepository
+Owns: profiles, connect/disconnect intent, effective connection state (ConnectionState + Snapshot), fake mode toggle, test connection
+
+#### Feature Repositories
+Own: study/dashboard/control business behavior, not transport
+
+#### Network Layer Should NOT Know
+- when hint should be shown
+- how rating is chosen
+- how voice behaves
+It only transports and correlates protocol events.
+
+## 3. Connection Lifecycle (New)
+
+### Target Conceptual Lifecycle
+
+```
+DISCONNECTED
+  │
+  ▼
+RESOLVING (DNS)
+  │
+  ▼
+CONNECTING_TRANSPORT (TCP/WebSocket)
+  │
+  ▼
+TRANSPORT_OPEN (socket open, NOT yet Study Agent)
+  │
+  ▼
+HANDSHAKING (hello sent, waiting welcome)
+  │
+  ▼
+AUTHENTICATING (Bearer header or legacy frame)
+  │
+  ▼
+NEGOTIATING_CAPABILITIES (capabilities/welcome)
+  │
+  ▼
+READY (agent verified, protocol negotiated, authenticated, capabilities known)
+  or READY_LEGACY (v1 fallback)
+```
+
+Failure branches:
+
+```
+NETWORK_UNAVAILABLE (no Android network)
+SERVER_UNREACHABLE (DNS failure, refused, timeout)
+TLS_FAILED
+AUTHENTICATION_FAILED (401/403 or error code)
+INCOMPATIBLE_PROTOCOL (client 1,2 vs server 3)
+HANDSHAKE_TIMEOUT (wrong service on port)
+AGENT_UNAVAILABLE
+```
+
+Reconnect:
+
+```
+READY -> connection lost -> RECONNECTING (backoff) -> HANDSHAKING -> RECONCILING SESSION (request_session_snapshot) -> READY
+```
+
+### Why Separate States?
+
+Previously:
+
+```
+TCP/WebSocket opened
+↓
+ConnectionState.Connected
+```
+
+Before proving:
+
+```
+this endpoint is actually a Study Agent
+protocol is compatible
+authentication succeeded
+capabilities are known
+agent is ready
+```
+
+Now: Transport connectivity and agent readiness are NOT same thing. Model separately:
+
+```
+NETWORK AVAILABLE
+TRANSPORT OPEN
+STUDY AGENT DETECTED (welcome received)
+PROTOCOL NEGOTIATED (selected_protocol)
+AUTHENTICATED
+AGENT READY
+ANKI READY (from component_health, not inferred)
+AI READY (from component_health)
+```
+
+Never collapse all into Connected=true.
+
+### ConnectionState Evolution
+
+```kotlin
+sealed interface ConnectionState {
+    data object Disconnected
+    data class Resolving(val host: String, val port: Int)
+    data class ConnectingTransport(val host: String, val port: Int)
+    data class TransportConnected(val host: String, val port: Int, val serverName: String? = null)
+    data class Handshaking(val host: String, val port: Int)
+    data class Authenticating(val host: String, val port: Int)
+    data class NegotiatingCapabilities(val host: String, val port: Int, val serverName: String?, val protocolVersion: String?)
+    data class Ready(val host: String, val port: Int, val serverName: String, val serverVersion: String?, val protocolVersion: String, val latencyMs: Long?, val capabilities: Set<String>, val agentId: String?, val authenticated: Boolean)
+    data class ReadyLegacy(val host: String, val port: Int, val serverName: String?, val latencyMs: Long?)
+    data class Reconnecting(val attempt: Int, val maxAttempts: Int, val nextRetryInMs: Long, val reason: String?, val phase: String?)
+    data object NetworkUnavailable
+    data class AuthenticationFailed(val reason: String, val isExpired: Boolean = false)
+    data class TlsFailure(val reason: String)
+    data class ProtocolMismatch(val reason: String, val serverVersion: String?, val clientVersions: List<String>)
+    data class AgentUnavailable(val reason: String)
+    data class ServerUnavailable(val reason: String)
+    data class HandshakeTimeout(val host: String, val port: Int)
+    data class Error(val message: String, val cause: Throwable?)
+
+    // Legacy compat
+    data class Connecting(val host: String, val port: Int)
+    data class Connected(val host: String, val port: Int, val serverName: String?, val latencyMs: Long?)
+}
+```
+
+### Connection Snapshot (Coherent Truth)
+
+```kotlin
+data class AgentConnectionSnapshot(
+    val phase: ConnectionState,
+    val transport: TransportStatus,
+    val profile: ServerProfile?,
+    val protocolVersion: String?,
+    val serverName: String?,
+    val serverVersion: String?,
+    val agentId: String?,
+    val capabilities: Set<String>,
+    val authenticated: Boolean?,
+    val latencyMs: Long?,
+    val lastMessageAgeMs: Long?,
+    val retry: ReconnectInfo?,
+    val problem: ConnectionProblem?
+)
+```
+
+One authoritative concept of AgentReady consumed by Dashboard, Study, Control, Connection, Diagnostics - not independently inferring from WebSocket != null.
+
+## 4. Package Structure (Updated)
+
+```
 com.studyagent.client/
-│
-├── StudyAgentApp.kt                 # Application subclass & dependency bootstrap
-├── MainActivity.kt                  # Single Activity host with runtime permissions
-│
 ├── core/
-│   ├── audio/                       # Study audio routing (pure policy + Android facts)
-│   │   ├── StudyAudioModels.kt      # Modes, routes, snapshots, readiness, route events
-│   │   ├── StudyAudioModeResolver.kt# preference + snapshot → effective route (pure)
-│   │   ├── AudioRouteSnapshotFactory.kt # enumerated devices → snapshot (pure)
-│   │   ├── AudioRouteManager.kt     # Android device callbacks, verified input route
-│   │   ├── StudyAudioRouteCoordinator.kt # loss, deferred switch, user overrides
-│   │   └── PhoneModeDiagnostics.kt  # Local counters + self-echo detector
-│   │
-│   ├── models/                      # Strongly typed data models & sealed interfaces
-│   │   ├── ConnectionState.kt       # Disconnected, Connecting, Connected, Reconnecting, etc.
-│   │   ├── StudyState.kt            # Idle, SpeakingQuestion, Listening, Evaluating, etc.
-│   │   ├── ProtocolMessages.kt      # ClientMessage and ServerMessage sealed hierarchies
-│   │   ├── StudySession.kt          # Session domain model
-│   │   ├── StudyCard.kt             # Thin card model (id, question, index)
-│   │   ├── Evaluation.kt            # Feedback, score, correct & missing points
-│   │   ├── Rating.kt                # AGAIN, HARD, GOOD, EASY enum & parser
-│   │   ├── VoiceCommand.kt          # Normalized voice commands
-│   │   ├── ServerProfile.kt         # Server connection profiles
-│   │   └── AppSettings.kt           # User preferences
-│   │
-│   ├── network/                     # Network communication engine
-│   │   ├── AgentConnection.kt       # Connection interface
-│   │   ├── WebSocketAgentConnection.kt # OkHttp WebSocket implementation
-│   │   ├── FakeAgentConnection.kt   # Offline mock agent connection
-│   │   ├── ReconnectController.kt   # Exponential backoff + jitter calculator
-│   │   └── ProtocolJson.kt          # Kotlinx Serialization engine
-│   │
-│   ├── voice/                       # Voice interface subsystem
-│   │   ├── SpeechRecognitionManager.kt # STT abstraction
-│   │   ├── AndroidSpeechRecognitionManager.kt # Android SpeechRecognizer wrapper
-│   │   ├── SpeechRecognitionResult.kt  # Partial, Final, NoSpeech, Error
-│   │   ├── VoiceCommandManager.kt   # English + Arabic fuzzy regex command matcher
-│   │   └── tts/                     # Speech-output subsystem (docs/TTS_ARCHITECTURE.md)
-│   │       ├── SpeechModels.kt      # SpeechRequest/Result/Purpose/Priority/QueuePolicy/TtsState
-│   │       ├── SpeechOrchestrator.kt# The single speech API (interface + health/metrics)
-│   │       ├── DefaultSpeechOrchestrator.kt # Pure-Kotlin conductor (unit-tested)
-│   │       ├── TtsEngineAdapter.kt  # Coroutine-first engine abstraction
-│   │       ├── AndroidTtsEngineAdapter.kt # Hardened TextToSpeech wrapper (single engine)
-│   │       ├── SpeechQueue.kt       # Bounded priority queue with policies
-│   │       ├── TtsVoiceSelector.kt  # Deterministic offline-preferring voice ranking
-│   │       ├── SpeechTextPreprocessor.kt # HTML/Anki markup cleanup (speech-only)
-│   │       ├── MedicalPronunciationProcessor.kt # Abbreviations/units/numbers
-│   │       ├── MixedLanguageSegmenter.kt # Arabic/English run segmentation
-│   │       ├── SpeechChunker.kt     # Semantic chunking via getMaxSpeechInputLength
-│   │       ├── AudioFocusController.kt # Spoken-audio focus policy
-│   │       ├── SpeechFormatting.kt  # Centralized spoken labels & preview text
-│   │       └── VoiceHandoffController.kt # TTS→STT acoustic-handoff policy
-│   │
-│   ├── audio/                       # Hardware audio routing
-│   │   ├── AudioRouteManager.kt     # Modern AudioDeviceInfo routing manager
-│   │   ├── AudioDeviceInfoModel.kt  # Route metadata model
-│   │   └── HeadsetBroadcastReceiver.kt # Broadcast listener for headset events
-│   │
-│   ├── security/                    # Security & encryption
-│   │   ├── SecureTokenStorage.kt    # EncryptedSharedPreferences wrapper
-│   │   └── LogSanitizer.kt          # Token and credential redactor
-│   │
-│   └── common/                      # Common utilities
-│       ├── AppLogger.kt             # Structured circular buffer logger
-│       └── DispatcherProvider.kt    # Coroutine dispatcher abstractions
-│
+│   ├── models/
+│   │   ├── ConnectionState.kt (rich lifecycle)
+│   │   ├── ServerProfile.kt (enhanced validation: IPv4, IPv6, Tailscale, MagicDNS)
+│   │   ├── ProtocolMessages.kt (welcome, in_reply_to, client build info, error codes)
+│   │   ├── AgentCapabilities.kt (isProtocolV2, supportsV2)
+│   │   └── ...
+│   ├── network/
+│   │   ├── AgentConnection.kt (interface + snapshot + test)
+│   │   ├── WebSocketAgentConnection.kt (generation, handshake timeout, liveness, ping correlation, single auth path)
+│   │   ├── AgentClient.kt (handshake, auth, negotiation, correlation, recovery)
+│   │   ├── AgentApi.kt (typed API + events)
+│   │   ├── AgentApiResult.kt (Success/Rejected/Timeout/Disconnected/ProtocolFailure)
+│   │   ├── AgentApiError.kt (stable codes, user messages)
+│   │   ├── RequestCoordinator.kt (bounded, timeouts, in_reply_to)
+│   │   ├── ProtocolContext.kt (negotiated version, session, BuildConfig version)
+│   │   ├── MessageFactory.kt (centralized creation)
+│   │   ├── ConnectionProblem.kt (typed reasons + user actions)
+│   │   ├── TransportStatus.kt (DISCONNECTED, RESOLVING, CONNECTING, OPEN, CLOSING, FAILED)
+│   │   ├── AgentConnectionSnapshot.kt (coherent truth)
+│   │   ├── NetworkMonitor.kt (connectivity awareness)
+│   │   ├── NetworkStats.kt (counters, latency, message rate)
+│   │   ├── ProtocolJson.kt (envelope-first, unknown handling, size limits)
+│   │   ├── ReconnectController.kt (exponential backoff + jitter)
+│   │   └── FakeAgentConnection.kt (welcome, in_reply_to, enhanced lifecycle, test connection)
+│   ├── security/
+│   │   └── SecureTokenStorage.kt (EncryptedSharedPreferences, separate from profile JSON)
+│   └── ...
 ├── data/
-│   ├── preferences/                 # Preferences & storage
-│   │   ├── PreferencesDataStore.kt  # Jetpack DataStore Preferences
-│   │   └── ProfileRepository.kt     # Profile management repository
-│   │
-│   └── repository/                  # Repositories
-│       ├── ConnectionRepository.kt  # Active connection lifecycle & fake mode toggle
-│       ├── StudySessionRepository.kt # Primary study orchestrator & hands-free engine
-│       └── DiagnosticsRepository.kt # Log aggregator & export manager
-│
-├── di/                              # Dependency Injection
-│   ├── AppContainer.kt              # Concrete dependency container
-│   └── ServiceLocator.kt            # Global thread-safe locator
-│
-├── service/                         # Android Background & Foreground Services
-│   ├── StudySessionForegroundService.kt # Foreground service keeping voice loop alive
-│   └── NotificationHelper.kt        # Media action notification builder
-│
-└── ui/                              # Jetpack Compose UI
-    ├── theme/                       # Design system (Dark Theme, Typography, Colors)
-    ├── navigation/                  # Navigation graph & routes
-    ├── components/                  # Reusable UI widgets (PushToTalk, RatingGroup, Waveform)
-    └── screens/
-        ├── home/                    # Dashboard & Start Study
-        ├── study/                   # Primary Voice Study screen
-        ├── connection/              # Server Profiles & LAN configuration
-        ├── settings/                # Voice, TTS, and study settings
-        └── diagnostics/             # Live log inspector & latency monitor
+│   ├── preferences/
+│   │   └── ProfileRepository.kt (token separation, validation)
+│   └── repository/
+│       ├── ConnectionRepository.kt (snapshot, test, diagnostics, override)
+│       ├── CapabilityStore.kt (welcome + capabilities, single authority)
+│       ├── DashboardRepository.kt (coalescing, bounded timeouts, out-of-order guard, cache)
+│       └── StudySessionRepository.kt (idempotency via ledger, turn identity)
+└── ui/
+    └── screens/connection/
+        ├── ConnectionScreen.kt (staged status, test, advanced editor, help)
+        └── ConnectionViewModel.kt (snapshot, test results, token rotation)
 ```
 
----
+## 5. Study Audio Routing (Unchanged)
 
-## 4. Study Audio Routing (Headset-Optional)
+See previous doc - headset-optional, effective mode derived, turn gate owns mic, route changes turn-boundary events.
 
-The client supports two equally valid environments: **Headset Mode** (headset output, headset
-or phone microphone) and **Phone Mode** (phone speaker, built-in microphone). Which one runs is
-decided by a small, pure decision layer, and nothing else in the app branches on
-"is a headset connected".
+## 6. Concurrency & Threading
 
-```
-AppSettings.studyAudioMode ─┐
-                            ├─► StudyAudioModeResolver ─► EffectiveStudyAudioRoute
-AudioRouteSnapshot ─────────┘        (pure)                (output, input, certainty,
-    ▲                                                        readiness, acoustic profile)
-    │
-AudioRouteManager (Android)                     │
-    ▲                                           ▼
-AudioDeviceCallback                    StudyAudioRouteCoordinator
-                                       (loss, pending route, overrides, generation)
-                                                │
-                                                ▼
-                       StudyVoiceTurnGate ──► SpeechRecognitionOrchestrator
-                       (gap + half-duplex)      (microphone opens here, and only here)
-```
+- Main: Compose UI, SpeechRecognizer, TextToSpeech
+- IO: OkHttp WebSocket, JSON, DataStore, EncryptedSharedPreferences
+- Default: voice command matching, state machine, speech pipeline (markup cleanup, pronunciation, segmentation, chunking), recognition lifecycle serialized via monitor
 
-* **One workflow.** There is no `PhoneStudySession`; the same reducer, TTS pipeline and STT
-  pipeline run on both routes. `StudyEffect`s, events and effects are identical.
-* **Effective mode is derived, never stored.** `AUTO` is the default, `HEADSET_REQUIRED` is an
-  advanced opt-in that is the only thing that may refuse a start.
-* **The turn gate owns the microphone.** TTS completion, drained queue, stable route, acoustic
-  gap and generation validation are all checked in one place, which is what keeps the
-  half-duplex invariant true on the phone speaker.
-* **Route changes are turn-boundary events.** A headset appearing is parked in `pendingRoute`
-  until the next safe boundary; an unexpected loss cancels the live turn and applies the
-  disconnect policy (pause with a *Continue on phone* offer, or continue on the phone directly).
+Additional:
 
----
+- Connection generation AtomicLong prevents late callbacks from stale connections (critical for OkHttp WebSocket callbacks)
+- RequestCoordinator uses ConcurrentHashMap + Mutex for bounded pending map, no leak over multi-hour sessions
+- NetworkMonitor uses ConnectivityManager.NetworkCallback, distinct flows for network available vs agent unreachable
 
-## 5. Concurrency & Threading Model
-
-1. **Main Thread (`Dispatchers.Main`):**
-   - Jetpack Compose UI updates.
-   - Android `SpeechRecognizer` lifecycle calls (Android requires `SpeechRecognizer` to be invoked from the main thread).
-   - Android `TextToSpeech` lifecycle calls.
-
-2. **IO Thread (`Dispatchers.IO`):**
-   - OkHttp WebSocket socket read/write operations.
-   - JSON serialization & deserialization.
-   - DataStore preferences reading and writing.
-   - EncryptedSharedPreferences access.
-
-3. **Default Computation Thread (`Dispatchers.Default`):**
-   - Voice command regex normalization and string matching.
-   - State machine transition computations.
-   - Speech pipeline: markup cleanup, pronunciation, segmentation, chunking
-     (the `SpeechOrchestrator` actor + pump run here; engine calls are posted
-     to the main thread by the engine adapter).
-   - Recognition lifecycle: all `SpeechRecognitionOrchestrator` transitions (start, finish,
-     cancel, backend events, watchdog, retry) are serialized through one monitor, so the
-     study loop, the event collector, the watchdog and UI-triggered calls can never
-     interleave a check-then-act sequence.
-
----
-
-## Management Layer (Dashboard + Study Control Center)
-
-Protocol v2 adds an operational command center on top of the voice study loop. Full
-product behavior is documented in `docs/DASHBOARD.md` and `docs/CONTROL_CENTER.md`;
-wire details live in `docs/PROTOCOL.md` (§4–§8).
-
-### Component map
+## 7. Management Layer (Dashboard + Control)
 
 ```
-ConnectionRepository (transport, message bus)
-        │                       │
-CapabilityStore ◄──── capabilities frame (negotiation, 4 s fallback to v1)
+ConnectionRepository (transport, message bus, snapshot)
         │
-        ├── DefaultDashboardRepository ── DashboardUiState ── HomeScreen
+CapabilityStore ◄──── welcome + capabilities (negotiation, 4s fallback to v1)
+        │
+        ├── DashboardRepository ── DashboardUiState ── HomeScreen
         │     request_dashboard/decks/health/history/insights/ai_usage
-        │     single-flight coalescing · 8 s timeouts · out-of-order guard
-        │     offline snapshot/deck cache (DataStore) · session push merges
+        │     single-flight coalescing, 8s timeouts, out-of-order guard via generated_at
+        │     offline cache, session push merges (session_progress, session_stats)
         │
-        └── DefaultStudyControlRepository ── ControlCenterUiState ── ControlCenterScreen
+        └── StudyControlRepository ── ControlCenterUiState ── ControlCenterScreen
               serverConfig ↔ draft ↔ localConfig
-              update_study_config → ACK (message_id echo) / reject / timeout
-              StudyPreset.applyTo / matching (centralized preset logic)
+              update_study_config → ACK (in_reply_to echo) / reject / timeout
+              StudyPreset.applyTo / matching
 ```
 
-### Data ownership rules
+Data ownership:
 
-1. The PC Study Agent computes everything analytic (pace, weakness, recommendation,
-   AI cost). Android renders — it never recomputes.
-2. `CapabilityStore` is the single capability authority; Dashboard, Control Center and
-   Connection observe it instead of guessing features.
-3. Dashboard data flows `server → repository → single StateFlow → Compose`. Requests
-   are lifecycle/repository-driven; Compose recomposition never triggers network I/O.
-4. Control configuration commits only on a correlated server ACK; rejection and timeout
-   preserve both the authoritative config and the user's draft.
-5. Session start uses the Control Center's live configuration
-   (`StartStudyRequest(deck, mode, config)`); v1 servers receive the backward-compatible
-   deck + mode only. Duplicate starts are rejected by the session state machine.
-6. Settings (device speech/audio) and Control Center (agent behavior) never overlap;
-   the only link is the explicit preset adapter for local hands-free flags.
+1. PC Agent computes everything analytic (pace, weakness, recommendation, AI cost) - Android renders
+2. CapabilityStore single capability authority
+3. Dashboard data flow server → repository → single StateFlow → Compose, lifecycle/repository-driven, no network I/O on recomposition
+4. Control config commits only on correlated server ACK (in_reply_to), rejection/timeout preserve authoritative config + draft
+5. Session start uses Control Center's live config; v1 servers receive backward-compatible deck + mode only
+6. Settings (device speech/audio) and Control Center (agent behavior) never overlap
 
-### Navigation
+## 8. Production Connection Architecture (Target)
 
-Primary destinations via bottom navigation: **Dashboard**, **Study**, **Control**.
-Connection / Settings / Diagnostics remain secondary (Dashboard header). The bottom bar
-hides during immersive study turns so the voice loop is never crowded.
+```
+                        UI (Compose)
+                         │
+                         ▼
+               ConnectionRepository (profiles, intent, snapshot)
+                         │
+                         ▼
+                  AgentClient (handshake, auth, negotiation, recovery)
+                  /         \
+                 /           \
+                ▼             ▼
+           AgentApi        AgentEvents (Flow: question, evaluation, progress...)
+                \             /
+                 \           /
+                  ▼         ▼
+              Request Coordinator (correlation, timeouts, bounded)
+                       │
+                       ▼
+                 Protocol Codec (JSON, envelope-first, size limits, BuildConfig version)
+                       │
+                       ▼
+               Connection Manager (generation, handshake timeout, liveness)
+                /             \
+               ▼               ▼
+       Network Monitor     WebSocket (OkHttp, Bearer header, single ping loop)
+                               │
+                               ▼
+                         PC Study Agent (reference impl in mock_pc_agent.py)
+                               │
+                               ├── AnkiConnect localhost
+                               └── LLM provider/local model
+```
 
-### Testing
+## 9. Security Architecture
 
-Repository behavior (coalescing, out-of-order protection, timeouts, caching, capability
-fallback, config ACK/rejection/timeout/rapid-save, presets, freshness, start payloads)
-is covered by JVM unit tests under `app/src/test/java/com/studyagent/client/data/`.
-The Fake Agent (`FakeAgentConnection`) and `server/mock_pc_agent.py` both implement the
-full v2 management surface, including partial-v2 and v1-only modes for gating tests.
+See docs/SECURITY.md for full threat model.
+
+Key points:
+
+- No LLM API keys in APK, only Study Agent auth token
+- Tokens in EncryptedSharedPreferences, not profile JSON, never logged
+- WS vs WSS: allow ws:// for trusted LAN with UI label, recommend Tailscale or WSS for internet, no public ws:// port forwarding
+- TLS: never trust all certs, pinning explicit for self-signed
+- agent_id persistent server ID, not hardware, recognizes same agent at new address
+- Size limits, backpressure, critical events prioritized
+- No arbitrary Android command execution
+- Server validates all client input
+- Rate limiting for expensive actions
+
+## 10. Testing
+
+- Protocol contract: Android Hello -> server Welcome, StartSession -> SessionStarted -> Question, SubmitAnswer -> Evaluation, RateCard -> RatingSaved -> Question
+- Auth: no token, correct token, missing, wrong, expired, Bearer vs legacy frame, token leakage in logs
+- Wrong endpoint: socket opens but no Study Agent handshake -> handshake failure, not Ready
+- Protocol mismatch: server only v3, client 1,2 -> incompatible, no infinite retry
+- Handshake timeout, auth timeout
+- Ping: normal, late, duplicate, missing, correlation via in_reply_to
+- Network loss during idle, question, answer submission, evaluation wait, rating -> recovery via snapshot
+- Exactly-once: rating sent, server applies, ACK lost, reconnect, same request resent -> Anki rating applied once
+- Large payloads, malformed frames (no crash), unknown message type (no destroy)
+- Buffer stress: many progress/dashboard updates, critical preserved
+- Endurance: 24h virtual, many pings, reconnects, 1000+ turns, no socket leak, no request-tracker leak, no coroutine leak, no duplicate heartbeat
+- Diagnostics: richer, sanitized, no tokens
+
+See docs/TESTING_STRATEGY.md and server/mock_pc_agent.py --chaos mode.
