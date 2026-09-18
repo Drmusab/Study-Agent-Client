@@ -148,6 +148,9 @@ class StudySessionMachine(
 
     private val selfEchoDetector = SelfEchoDetector()
 
+    /** Interprets spoken transcripts as study commands within the current phase context. */
+    private val commandInterpreter = VoiceCommandInterpreter()
+
     /** Invalidates in-flight delayed microphone starts when a turn is superseded (§102-§104). */
     private val sttGeneration = AtomicLong(0L)
     private val sttStartCount = AtomicLong(0L)
@@ -434,7 +437,7 @@ class StudySessionMachine(
             is SessionPhase.WaitingForRating,
             is SessionPhase.SpeakingFeedback,
             is SessionPhase.SpeakingExplanation,
-            is SessionPhase.HintShowing ->
+            is SessionPhase.SpeakingHint ->
                 effect.purpose == RecognitionPurpose.RATING ||
                     effect.purpose == RecognitionPurpose.PUSH_TO_TALK_COMMAND ||
                     effect.purpose == RecognitionPurpose.SHORT_CONFIRMATION
@@ -506,7 +509,7 @@ class StudySessionMachine(
         is SessionPhase.WaitingForRating -> CommandContext.RATING_EXPECTED
         is SessionPhase.SpeakingFeedback,
         is SessionPhase.SpeakingExplanation,
-        is SessionPhase.HintShowing -> CommandContext.FEEDBACK_SHOWING
+        is SessionPhase.SpeakingHint -> CommandContext.FEEDBACK_SHOWING
         else -> CommandContext.ANSWER_EXPECTED
     }
 
@@ -613,7 +616,6 @@ class StudySessionMachine(
         is SessionPhase.SpeakingFeedback,
         is SessionPhase.WaitingForRating,
         is SessionPhase.SpeakingHint,
-        is SessionPhase.HintShowing,
         is SessionPhase.SpeakingExplanation,
         is SessionPhase.ShowingAnswer -> true
         else -> false
