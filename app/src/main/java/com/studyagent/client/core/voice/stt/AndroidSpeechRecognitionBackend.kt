@@ -70,9 +70,15 @@ class AndroidSpeechRecognitionBackend(
     private var recognizer: SpeechRecognizer? = null
     private var recognizerKind: RecognitionBackendKind? = null
 
-    /** Non-null while a turn owns the recognizer. This is the busy signal. */
-    private var activeTurn: ActiveTurn? = null
-    private var released = false
+    /**
+     * Non-null while a turn owns the recognizer. This is the busy signal.
+     *
+     * Volatile: [start] runs on the orchestrator's thread while the terminal callbacks that
+     * clear the turn run on the main thread — without visibility a stale read means a
+     * spurious BUSY rejection (or a double start).
+     */
+    @Volatile private var activeTurn: ActiveTurn? = null
+    @Volatile private var released = false
 
     private var lastLevelEmitMs = 0L
     private var lastLevelValue = IDLE_AUDIO_LEVEL

@@ -4,6 +4,7 @@ import com.studyagent.client.core.common.AppLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +42,16 @@ class StudyAudioRouteCoordinator(
 
     /** Why a re-resolution happened. Only a user action is allowed to cut a live turn short. */
     private enum class Trigger { INITIAL, DEVICES, PREFERENCE, USER_OVERRIDE }
+
+    /**
+     * Guards [snapshot], [prefs], [phoneOverride], [generation] and [initialised].
+     *
+     * Resolutions run on the collector coroutine while user actions
+     * ([continueOnPhone], [useHeadsetNow], [onSafeTurnBoundary],
+     * [resetSessionOverrides]) arrive on arbitrary threads — every state
+     * transition below holds this lock, and [recompute] requires it.
+     */
+    private val stateLock = Any()
 
     private var snapshot: AudioRouteSnapshot = initialSnapshot
     private var prefs: StudyAudioPreferences = initialPreferences
@@ -88,21 +99,29 @@ class StudyAudioRouteCoordinator(
     }
 
     private fun observe() {
+        // A single collector: the two input flows used to be collected on two coroutines
+        // that raced on the plain state above (torn snapshot/prefs pairs, double first
+        // resolution). combine() keeps the trigger semantics — a device change resolves
+        // as DEVICES, an explicit mode change as PREFERENCE — while making every
+        // resolution atomic and emission-ordered.
         scope.launch {
-            snapshots.collect { incoming ->
-                snapshot = incoming
-                recompute(Trigger.DEVICES)
-            }
-        }
-        scope.launch {
-            preferences.collect { incoming ->
-                val modeChanged = incoming.mode != prefs.mode
-                prefs = incoming
-                if (modeChanged) {
-                    // An explicit settings change is an explicit user intent: it wins over a
-                    // previous "continue on phone" fallback.
-                    phoneOverride = false
-                    recompute(Trigger.PREFERENCE)
+            combine(snapshots, preferences) { snap, pref -> snap to pref }.collect { (incomingSnapshot, incomingPrefs) ->
+                synchronized(stateLock) {
+                    val snapshotChanged = !initialised || incomingSnapshot != snapshot
+                    snapshot = incomingSnapshot
+                    val modeChanged = incomingPrefs.mode != prefs.mode
+                    prefs = incomingPrefs
+                    when {
+                        snapshotChanged -> recompute(Trigger.DEVICES)
+                        modeChanged -> {
+                            // An explicit settings change is an explicit user intent: it wins over a
+                            // previous "continue on phone" fallback.
+                            phoneOverride = false
+                            recompute(Trigger.PREFERENCE)
+                        }
+                        // A non-mode preference edit changes nothing about the route.
+                        else -> Unit
+                    }
                 }
             }
         }
@@ -110,6 +129,13 @@ class StudyAudioRouteCoordinator(
 
     // ------------------------------------------------------------------ resolution
 
+    /**
+     * Re-resolves the effective route from [snapshot] + [prefs].
+     *
+     * Callers must hold [stateLock]: the collector takes it around each emission and the
+     * user-action entry points take it around the whole action, so a resolution always sees
+     * one consistent input pair.
+     */
     private fun recompute(trigger: Trigger) {
         // "Continue on phone" is a hold, not a permanent mode change: it is released as soon as
         // headphones are available again. The switch itself still waits for a safe boundary
@@ -241,16 +267,18 @@ class StudyAudioRouteCoordinator(
      * before the next question, after a rating is saved, and while paused — never mid-turn.
      */
     fun onSafeTurnBoundary() {
-        val pending = _pendingRoute.value ?: return
-        _pendingRoute.value = null
-        val current = _effectiveRoute.value
-        if (sameRoute(current, pending)) return
-        generation += 1
-        val applied = pending.copy(generation = generation)
-        apply(applied)
-        metrics.recordRouteChange()
-        AppLogger.i(tag, "Applying preferred route at turn boundary: ${applied.statusLabel}")
-        _events.tryEmit(StudyAudioRouteEvent.RouteChanged(current, applied, atSafeBoundary = true))
+        synchronized(stateLock) {
+            val pending = _pendingRoute.value ?: return
+            _pendingRoute.value = null
+            val current = _effectiveRoute.value
+            if (sameRoute(current, pending)) return
+            generation += 1
+            val applied = pending.copy(generation = generation)
+            apply(applied)
+            metrics.recordRouteChange()
+            AppLogger.i(tag, "Applying preferred route at turn boundary: ${applied.statusLabel}")
+            _events.tryEmit(StudyAudioRouteEvent.RouteChanged(current, applied, atSafeBoundary = true))
+        }
     }
 
     /**
@@ -259,19 +287,23 @@ class StudyAudioRouteCoordinator(
      * study layer can repeat the current question exactly once.
      */
     fun continueOnPhone() {
-        if (phoneOverride && !snapshot.externalAudioPresent) return
-        phoneOverride = true
-        _attention.value = null
-        recompute(Trigger.USER_OVERRIDE)
+        synchronized(stateLock) {
+            if (phoneOverride && !snapshot.externalAudioPresent) return
+            phoneOverride = true
+            _attention.value = null
+            recompute(Trigger.USER_OVERRIDE)
+        }
     }
 
     /** Manual *Use headphones now* (§42): immediate switch, the caller repeats the question. */
     fun useHeadsetNow(): Boolean {
-        if (!snapshot.headsetOutputAvailable) return false
-        phoneOverride = false
-        _attention.value = null
-        recompute(Trigger.USER_OVERRIDE)
-        return true
+        synchronized(stateLock) {
+            if (!snapshot.headsetOutputAvailable) return false
+            phoneOverride = false
+            _attention.value = null
+            recompute(Trigger.USER_OVERRIDE)
+            return true
+        }
     }
 
     /** *Wait for headphones* — hides the prompt; the session stays paused until the user acts. */
@@ -281,20 +313,26 @@ class StudyAudioRouteCoordinator(
 
     /** Drop session-scoped overrides (called when a session ends). */
     fun resetSessionOverrides() {
-        if (!phoneOverride && _attention.value == null) return
-        phoneOverride = false
-        _attention.value = null
-        recompute(Trigger.DEVICES)
+        synchronized(stateLock) {
+            if (!phoneOverride && _attention.value == null) return
+            phoneOverride = false
+            _attention.value = null
+            recompute(Trigger.DEVICES)
+        }
     }
 
-    fun currentSnapshot(): AudioRouteSnapshot = snapshot
+    fun currentSnapshot(): AudioRouteSnapshot = synchronized(stateLock) { snapshot }
 
     /** Compact row for Diagnostics (§67). */
     fun diagnosticsRows(): List<Pair<String, String>> {
         val route = _effectiveRoute.value
         val m = metrics.metrics.value
+        // Snapshot the plain inputs under the lock so a torn pair is never reported.
+        val (mode, externalPresent, policy) = synchronized(stateLock) {
+            Triple(prefs.mode, snapshot.externalAudioPresent, prefs.disconnectPolicy)
+        }
         return listOf(
-            "Study audio mode" to prefs.mode.displayName,
+            "Study audio mode" to mode.displayName,
             "Effective mode" to when (route.effective) {
                 EffectiveStudyAudioMode.HEADSET -> "Headset"
                 EffectiveStudyAudioMode.HYBRID -> "Headphones + phone mic"
@@ -304,11 +342,11 @@ class StudyAudioRouteCoordinator(
             },
             "Output route" to "${route.outputLabel} (${route.output.name})",
             "Input route" to "${route.inputLabel} (${route.input.name})",
-            "External headset" to if (snapshot.externalAudioPresent) "Connected" else "Not connected",
+            "External headset" to if (externalPresent) "Connected" else "Not connected",
             "Route certainty" to route.certainty.name.lowercase().replaceFirstChar { it.uppercase() },
             "Acoustic profile" to route.acousticProfileLabel,
             "Pending route" to (_pendingRoute.value?.statusLabel ?: "None"),
-            "Disconnect policy" to prefs.disconnectPolicy.displayName,
+            "Disconnect policy" to policy.displayName,
             "Route generation" to route.generation.toString(),
             "Route changes" to m.routeChanges.toString(),
             "Headset loss events" to m.headsetLossEvents.toString(),

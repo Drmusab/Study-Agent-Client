@@ -133,30 +133,6 @@ class MessageFactory(
         )
     }
 
-    fun submitAnswer(cardId: String, text: String, reviewTurnId: String?, sessionRevision: Long?): ClientMessage.SubmitAnswer {
-        return ClientMessage.SubmitAnswer(
-            protocolVersion = context.negotiatedVersion,
-            messageId = UUID.randomUUID().toString(),
-            sessionId = context.sessionId,
-            cardId = cardId,
-            text = text,
-            reviewTurnId = reviewTurnId,
-            sessionRevision = sessionRevision
-        )
-    }
-
-    fun rateCard(cardId: String, rating: com.studyagent.client.core.models.Rating, reviewTurnId: String?, sessionRevision: Long?): ClientMessage.RateCard {
-        return ClientMessage.RateCard(
-            protocolVersion = context.negotiatedVersion,
-            messageId = UUID.randomUUID().toString(),
-            sessionId = context.sessionId,
-            cardId = cardId,
-            rating = rating,
-            reviewTurnId = reviewTurnId,
-            sessionRevision = sessionRevision
-        )
-    }
-
     fun requestStudyConfig(): ClientMessage.RequestStudyConfig {
         return ClientMessage.RequestStudyConfig(
             protocolVersion = context.negotiatedVersion,

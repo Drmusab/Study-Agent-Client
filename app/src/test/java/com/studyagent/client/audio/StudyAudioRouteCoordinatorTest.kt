@@ -8,7 +8,9 @@ import com.studyagent.client.core.audio.StudyAudioPreferences
 import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.audio.StudyAudioRouteEvent
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -256,6 +258,111 @@ class StudyAudioRouteCoordinatorTest {
 
         assertNull(h.coordinator.attention.value)
         assertEquals(EffectiveStudyAudioMode.PHONE, h.coordinator.effectiveRoute.value.effective)
+    }
+
+    /**
+     * Device facts, preference edits and turn boundaries arrive on different threads in
+     * production. Hammers all three from real threads, then proves the coordinator is still
+     * sane by driving one deterministic sequence through it.
+     *
+     * Regression: the two input flows were collected on two coroutines racing on plain
+     * shared state (torn snapshot/prefs pairs, double first resolution). The fix funnels
+     * everything through one locked collector; this test fails with a deadlock, a crash,
+     * or an incoherent final state if that ever regresses.
+     *
+     * Real time and real threads on purpose: virtual-time dispatchers serialize the very
+     * race this test exists for.
+     */
+    @Test(timeout = 90_000)
+    fun `concurrent device preference and boundary churn stays consistent`() {
+        val snapshots = MutableStateFlow(AudioRouteSnapshot.PHONE_ONLY)
+        val prefs = MutableStateFlow(StudyAudioPreferences())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val coordinator = StudyAudioRouteCoordinator(
+            snapshots = snapshots,
+            preferences = prefs,
+            scope = scope
+        )
+        try {
+            val failures = java.util.concurrent.ConcurrentLinkedQueue<Throwable>()
+            val workers = List(8) { worker ->
+                Thread {
+                    try {
+                        repeat(250) { i ->
+                            when ((worker + i) % 3) {
+                                0 -> snapshots.value =
+                                    if (i % 2 == 0) AudioRouteSnapshot.PHONE_ONLY
+                                    else AudioRouteSnapshot.BLUETOOTH_HEADSET
+                                1 -> prefs.value = StudyAudioPreferences(
+                                    mode = if (i % 2 == 0) StudyAudioMode.AUTO else StudyAudioMode.PHONE
+                                )
+                                else -> coordinator.onSafeTurnBoundary()
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        failures += t
+                    }
+                }.also { it.start() }
+            }
+            workers.forEach { it.join(30_000) }
+            assertTrue("worker threads must all finish (no deadlock)", workers.all { !it.isAlive })
+            assertTrue("no worker may fail: ${failures.peek()}", failures.isEmpty())
+
+            // Quiesce: a marker snapshot with a unique revision; once the collector has
+            // processed it, everything before it has been processed too.
+            val markerRevision = Long.MAX_VALUE - 42
+            snapshots.value = AudioRouteSnapshot.PHONE_ONLY.copy(revision = markerRevision)
+            awaitCondition("collector drains after churn") {
+                coordinator.currentSnapshot().revision == markerRevision
+            }
+
+            // From here the drive is single-threaded and deterministic. First force a known
+            // state: no headset in the device list always ends on the phone route (either it
+            // already was, or the loss path applies immediately).
+            awaitCondition("loss-or-idle settles on phone") {
+                coordinator.effectiveRoute.value.effective == EffectiveStudyAudioMode.PHONE
+            }
+
+            // Preferences only ever held AUTO/PHONE during the churn, so toggling through a
+            // third value guarantees emissions that update the stored prefs deterministically.
+            prefs.value = StudyAudioPreferences(mode = StudyAudioMode.HEADSET_PREFERRED)
+            prefs.value = StudyAudioPreferences(mode = StudyAudioMode.AUTO)
+            awaitCondition("preference edits are processed") {
+                coordinator.diagnosticsRows().toMap()["Study audio mode"] == "Automatic"
+            }
+
+            // Headset appears mid-turn: deferred, then applied at the boundary.
+            snapshots.value = AudioRouteSnapshot.BLUETOOTH_HEADSET.copy(revision = markerRevision - 1)
+            awaitCondition("headset appearance is deferred to the boundary") {
+                coordinator.pendingRoute.value != null
+            }
+            assertEquals(EffectiveStudyAudioMode.PHONE, coordinator.effectiveRoute.value.effective)
+            coordinator.onSafeTurnBoundary()
+            assertEquals(EffectiveStudyAudioMode.HEADSET, coordinator.effectiveRoute.value.effective)
+
+            // Headset disappears while in use: immediate loss, recovery prompt, loss metric.
+            val lossesBefore = coordinator.metrics.metrics.value.headsetLossEvents
+            snapshots.value = AudioRouteSnapshot.PHONE_ONLY.copy(revision = markerRevision - 2)
+            awaitCondition("loss applies immediately") {
+                coordinator.effectiveRoute.value.effective == EffectiveStudyAudioMode.PHONE
+            }
+            assertNotNull(coordinator.attention.value)
+            assertTrue(
+                coordinator.metrics.metrics.value.headsetLossEvents >= lossesBefore + 1
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    private fun awaitCondition(description: String, timeoutMs: Long = 15_000, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!condition()) {
+            if (System.currentTimeMillis() >= deadline) {
+                throw AssertionError("timed out waiting for: $description")
+            }
+            Thread.sleep(10)
+        }
     }
 
     @Test

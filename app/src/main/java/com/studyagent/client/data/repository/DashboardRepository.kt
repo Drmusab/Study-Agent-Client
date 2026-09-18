@@ -520,10 +520,10 @@ class DefaultDashboardRepository(
         var shouldApply = false
         var runFollowUp = false
         synchronized(lock) {
-            // A response completes the in-flight request when its message id matches,
-            // or when the server does not echo ids (then it is the only request out).
+            // A response completes the in-flight request when it correlates to it
+            // (v2 in_reply_to, or an echoed/absent id on legacy servers).
             completesInFlight = snapshotInFlight &&
-                (message.messageId == null || message.messageId == outstandingSnapshotMessageId)
+                ProtocolJson.isReplyTo(message, outstandingSnapshotMessageId)
             if (completesInFlight) {
                 snapshotAppliedGeneration = snapshotGeneration
                 snapshotInFlight = false
@@ -559,7 +559,7 @@ class DefaultDashboardRepository(
 
     private fun onDeckList(message: ServerMessage.DeckListResponse) {
         synchronized(lock) {
-            if (decksInFlight && (outstandingDecksMessageId == message.messageId || message.messageId == null)) {
+            if (decksInFlight && ProtocolJson.isReplyTo(message, outstandingDecksMessageId)) {
                 decksInFlight = false
                 outstandingDecksMessageId = null
                 decksTimeoutJob?.cancel()
@@ -582,7 +582,7 @@ class DefaultDashboardRepository(
         var ignore = false
         synchronized(lock) {
             val isOutstanding = historyInFlight &&
-                (outstandingHistoryMessageId == message.messageId || message.messageId == null)
+                ProtocolJson.isReplyTo(message, outstandingHistoryMessageId)
             if (isOutstanding) {
                 responseRange = outstandingHistoryRange
                 historyInFlight = false
@@ -615,7 +615,7 @@ class DefaultDashboardRepository(
     private fun onAiUsage(message: ServerMessage.AiUsageResponse) {
         val usage = message.usage ?: return
         synchronized(lock) {
-            if (aiUsageInFlight && (outstandingAiUsageMessageId == message.messageId || message.messageId == null)) {
+            if (aiUsageInFlight && ProtocolJson.isReplyTo(message, outstandingAiUsageMessageId)) {
                 aiUsageInFlight = false
                 outstandingAiUsageMessageId = null
                 aiUsageTimeoutJob?.cancel()
@@ -631,9 +631,10 @@ class DefaultDashboardRepository(
     }
 
     private fun onServerError(message: ServerMessage.ErrorMessage) {
-        // A correlated error fails the in-flight request; uncorrelated errors are logged.
+        // Only an error correlated to the outstanding request fails it; anything
+        // else (study errors, pushes, other panels) must not kill this refresh.
         val failedSnapshot = synchronized(lock) {
-            if (snapshotInFlight) {
+            if (snapshotInFlight && ProtocolJson.isReplyTo(message, outstandingSnapshotMessageId)) {
                 snapshotInFlight = false
                 snapshotTimeoutJob?.cancel()
                 outstandingSnapshotMessageId = null

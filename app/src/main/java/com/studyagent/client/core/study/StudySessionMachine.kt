@@ -62,8 +62,8 @@ import java.util.concurrent.atomic.AtomicLong
  * Authoritative serialized event processor (§6 §73-§75).
  *
  * Single coroutine consumes [Channel<StudyEvent>] and drives [StudyReducer] →
- * [newState] + [effects]; [StudyEffectExecutor] then performs effects and
- * re-emits completion events. No other code writes `_state` or `_machineState`.
+ * [newState] + [effects]; effects are then executed inline and completion events
+ * re-emitted. No other code writes `_state` or `_machineState`.
  *
  * Derives public [studyState] and [currentSession] from [machineState] so they
  * can never disagree (§75).
@@ -147,6 +147,9 @@ class StudySessionMachine(
         DefaultStudyAudioModeResolver().resolve(StudyAudioMode.AUTO, AudioRouteSnapshot.PHONE_ONLY)
 
     private val selfEchoDetector = SelfEchoDetector()
+
+    /** Interprets spoken transcripts as study commands within the current phase context. */
+    private val commandInterpreter = VoiceCommandInterpreter()
 
     /** Invalidates in-flight delayed microphone starts when a turn is superseded (§102-§104). */
     private val sttGeneration = AtomicLong(0L)
@@ -434,7 +437,7 @@ class StudySessionMachine(
             is SessionPhase.WaitingForRating,
             is SessionPhase.SpeakingFeedback,
             is SessionPhase.SpeakingExplanation,
-            is SessionPhase.HintShowing ->
+            is SessionPhase.SpeakingHint ->
                 effect.purpose == RecognitionPurpose.RATING ||
                     effect.purpose == RecognitionPurpose.PUSH_TO_TALK_COMMAND ||
                     effect.purpose == RecognitionPurpose.SHORT_CONFIRMATION
@@ -506,7 +509,7 @@ class StudySessionMachine(
         is SessionPhase.WaitingForRating -> CommandContext.RATING_EXPECTED
         is SessionPhase.SpeakingFeedback,
         is SessionPhase.SpeakingExplanation,
-        is SessionPhase.HintShowing -> CommandContext.FEEDBACK_SHOWING
+        is SessionPhase.SpeakingHint -> CommandContext.FEEDBACK_SHOWING
         else -> CommandContext.ANSWER_EXPECTED
     }
 
@@ -613,7 +616,6 @@ class StudySessionMachine(
         is SessionPhase.SpeakingFeedback,
         is SessionPhase.WaitingForRating,
         is SessionPhase.SpeakingHint,
-        is SessionPhase.HintShowing,
         is SessionPhase.SpeakingExplanation,
         is SessionPhase.ShowingAnswer -> true
         else -> false
@@ -814,6 +816,8 @@ class StudySessionMachine(
                             dispatch(StudyEvent.ConnectionLost(state.label))
                         }
                     }
+                    is ConnectionState.Ready,
+                    is ConnectionState.ReadyLegacy,
                     is ConnectionState.Connected -> {
                         timeline?.record(
                             DiagnosticCategory.NETWORK,
@@ -821,10 +825,10 @@ class StudySessionMachine(
                             sessionEpoch = _machineState.value.epoch,
                             turnId = _machineState.value.cardTurn?.turnId
                         )
+                        // Ready/ReadyLegacy are what the real transport emits after a
+                        // handshake; Connected is kept for legacy and fake transports.
                         if (_machineState.value.phase is SessionPhase.Recovering || _machineState.value.phase is SessionPhase.Error) {
                             dispatch(StudyEvent.ConnectionRestored("connected"))
-                        } else if (_machineState.value.phase is SessionPhase.Error && _machineState.value.error?.recoverable == true) {
-                            dispatch(StudyEvent.ConnectionRestored("connected-from-error"))
                         }
                     }
                     else -> Unit
