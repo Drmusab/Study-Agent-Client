@@ -66,7 +66,9 @@ class FakeConnectionRepository(
     var disconnectCalls: Int = 0
         private set
 
-    val isConnected: Boolean get() = _connectionState.value is ConnectionState.Connected
+    val isConnected: Boolean get() = _connectionState.value.let {
+        it is ConnectionState.Connected || it is ConnectionState.Ready || it is ConnectionState.ReadyLegacy
+    }
 
     override suspend fun connect(profile: ServerProfile?) {
         connectCalls++
@@ -143,6 +145,16 @@ class FakeConnectionRepository(
 
     fun restoreConnection(host: String = "localhost", port: Int = 8000) {
         _connectionState.value = ConnectionState.Connected(host, port, serverName = "test")
+    }
+
+    /** Restores via the state the real transport emits after a v2 handshake. */
+    fun restoreReady(host: String = "localhost", port: Int = 8000) {
+        _connectionState.value = ConnectionState.Ready(host, port, serverName = "test")
+    }
+
+    /** Restores via the state the real transport emits after a v1 handshake. */
+    fun restoreReadyLegacy(host: String = "localhost", port: Int = 8000) {
+        _connectionState.value = ConnectionState.ReadyLegacy(host, port, serverName = "test")
     }
 
     fun currentStateLabel(): String = _connectionState.value.label
