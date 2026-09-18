@@ -81,10 +81,4 @@ object ClientInfoProvider {
     }
 }
 
-/**
- * Factory for version-aware message creation - ensures all messages use negotiated protocol.
- */
-class MessageFactory(private val context: ProtocolContext) {
-    fun createHello() = context.createHello()
-    fun createStartSession(deck: String?, messageId: String) = context.createStartSession(deck, messageId)
-}
+
