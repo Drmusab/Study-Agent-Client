@@ -93,7 +93,14 @@ class MainActivity : ComponentActivity() {
         val audioRouteManager = ServiceLocator.appContainer.audioRouteManager
         headsetReceiver = HeadsetBroadcastReceiver(audioRouteManager)
         headsetReceiver?.let { receiver ->
-            registerReceiver(receiver, receiver.getIntentFilter())
+            // Android 14 throws for flag-less registerReceiver; system headset/BT
+            // broadcasts are still delivered to a non-exported receiver.
+            ContextCompat.registerReceiver(
+                this,
+                receiver,
+                receiver.getIntentFilter(),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
         }
     }
 
