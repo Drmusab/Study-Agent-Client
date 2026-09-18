@@ -816,6 +816,8 @@ class StudySessionMachine(
                             dispatch(StudyEvent.ConnectionLost(state.label))
                         }
                     }
+                    is ConnectionState.Ready,
+                    is ConnectionState.ReadyLegacy,
                     is ConnectionState.Connected -> {
                         timeline?.record(
                             DiagnosticCategory.NETWORK,
@@ -823,10 +825,10 @@ class StudySessionMachine(
                             sessionEpoch = _machineState.value.epoch,
                             turnId = _machineState.value.cardTurn?.turnId
                         )
+                        // Ready/ReadyLegacy are what the real transport emits after a
+                        // handshake; Connected is kept for legacy and fake transports.
                         if (_machineState.value.phase is SessionPhase.Recovering || _machineState.value.phase is SessionPhase.Error) {
                             dispatch(StudyEvent.ConnectionRestored("connected"))
-                        } else if (_machineState.value.phase is SessionPhase.Error && _machineState.value.error?.recoverable == true) {
-                            dispatch(StudyEvent.ConnectionRestored("connected-from-error"))
                         }
                     }
                     else -> Unit
