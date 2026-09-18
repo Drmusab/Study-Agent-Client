@@ -32,17 +32,32 @@ import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.AppShape
 import com.studyagent.client.ui.theme.AppSpacing
 
-/** Icon + colour + short text for a connection state (never colour alone, §65). */
 data class ConnectionVisual(
     val icon: ImageVector,
     val color: Color,
-    /** One or two words, e.g. "Connected". */
     val status: String,
-    /** Longer badge text, e.g. "Study PC • 24ms". */
     val detail: String
 )
 
 fun connectionVisualOf(state: ConnectionState): ConnectionVisual = when (state) {
+    is ConnectionState.Ready -> {
+        val ping = state.latencyMs?.let { " • ${it}ms" } ?: ""
+        ConnectionVisual(
+            Icons.Default.Cloud,
+            AppColors.statusSuccess,
+            "Ready",
+            "${state.serverName}$ping"
+        )
+    }
+    is ConnectionState.ReadyLegacy -> {
+        val ping = state.latencyMs?.let { " • ${it}ms" } ?: ""
+        ConnectionVisual(
+            Icons.Default.Cloud,
+            AppColors.statusSuccess,
+            "Ready (legacy)",
+            "${state.serverName ?: "${state.host}:${state.port}"}$ping"
+        )
+    }
     is ConnectionState.Connected -> {
         val ping = state.latencyMs?.let { " • ${it}ms" } ?: ""
         ConnectionVisual(
@@ -52,8 +67,18 @@ fun connectionVisualOf(state: ConnectionState): ConnectionVisual = when (state) 
             "${state.serverName ?: "${state.host}:${state.port}"}$ping"
         )
     }
-    is ConnectionState.Connecting ->
+    is ConnectionState.ConnectingTransport, is ConnectionState.Connecting ->
         ConnectionVisual(Icons.Default.Sync, AppColors.statusWarning, "Connecting", "Connecting…")
+    is ConnectionState.TransportConnected ->
+        ConnectionVisual(Icons.Default.Sync, AppColors.statusWarning, "Transport open", "Verifying agent…")
+    is ConnectionState.Handshaking ->
+        ConnectionVisual(Icons.Default.Sync, AppColors.statusWarning, "Handshaking", "Handshaking…")
+    is ConnectionState.Authenticating ->
+        ConnectionVisual(Icons.Default.Sync, AppColors.statusWarning, "Authenticating", "Authenticating…")
+    is ConnectionState.NegotiatingCapabilities ->
+        ConnectionVisual(Icons.Default.Sync, AppColors.statusWarning, "Negotiating", "Negotiating…")
+    is ConnectionState.Resolving ->
+        ConnectionVisual(Icons.Default.Sync, AppColors.statusWarning, "Resolving", "Resolving ${state.host}…")
     is ConnectionState.Reconnecting ->
         ConnectionVisual(
             Icons.Default.Sync,
@@ -63,20 +88,24 @@ fun connectionVisualOf(state: ConnectionState): ConnectionVisual = when (state) 
         )
     is ConnectionState.AuthenticationFailed ->
         ConnectionVisual(Icons.Default.Warning, AppColors.statusDanger, "Auth failed", "Authentication failed")
+    is ConnectionState.TlsFailure ->
+        ConnectionVisual(Icons.Default.Warning, AppColors.statusDanger, "TLS failed", "TLS failure")
+    is ConnectionState.ProtocolMismatch ->
+        ConnectionVisual(Icons.Default.Warning, AppColors.statusDanger, "Protocol mismatch", "Version mismatch")
+    is ConnectionState.AgentUnavailable ->
+        ConnectionVisual(Icons.Default.CloudOff, AppColors.statusDanger, "Agent unavailable", "Agent unavailable")
     is ConnectionState.ServerUnavailable ->
         ConnectionVisual(Icons.Default.CloudOff, AppColors.statusDanger, "Offline", "Server offline")
     is ConnectionState.NetworkUnavailable ->
         ConnectionVisual(Icons.Default.CloudOff, AppColors.statusDanger, "No network", "No network")
+    is ConnectionState.HandshakeTimeout ->
+        ConnectionVisual(Icons.Default.Warning, AppColors.statusDanger, "Handshake timeout", "No agent response")
     is ConnectionState.Error ->
         ConnectionVisual(Icons.Default.Warning, AppColors.statusDanger, "Error", "Connection error")
     is ConnectionState.Disconnected ->
         ConnectionVisual(Icons.Default.CloudOff, AppColors.statusNeutral, "Disconnected", "Disconnected")
 }
 
-/**
- * Compact, tappable connection chip used in top bars. 48dp tall minimum, one line,
- * icon + text + colour (§63).
- */
 @Composable
 fun ConnectionBadge(
     connectionState: ConnectionState,

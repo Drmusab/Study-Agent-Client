@@ -34,7 +34,9 @@ data class AgentCapabilities(
     val protocolVersion: String = "1",
     val capabilities: Set<String> = emptySet(),
     val serverName: String? = null,
-    val serverVersion: String? = null
+    val serverVersion: String? = null,
+    val agentId: String? = null,
+    val raw: Set<String> = capabilities
 ) {
     enum class NegotiationStatus { UNKNOWN, NEGOTIATING, NEGOTIATED_V2, LEGACY_V1 }
 
@@ -44,5 +46,19 @@ data class AgentCapabilities(
     val isLegacyV1: Boolean
         get() = status == NegotiationStatus.LEGACY_V1
 
+    val hasDashboard: Boolean
+        get() = capabilities.contains(AgentCapability.DASHBOARD)
+
     fun supports(capability: String): Boolean = capabilities.contains(capability)
+
+    companion object {
+        fun fromStrings(strings: Set<String>): AgentCapabilities {
+            return AgentCapabilities(
+                status = NegotiationStatus.NEGOTIATED_V2,
+                protocolVersion = "2",
+                capabilities = strings,
+                raw = strings
+            )
+        }
+    }
 }

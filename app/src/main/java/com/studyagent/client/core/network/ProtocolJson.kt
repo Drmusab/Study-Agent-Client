@@ -4,6 +4,7 @@ import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.models.ClientMessage
 import com.studyagent.client.core.models.ServerMessage
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
@@ -16,38 +17,77 @@ object ProtocolJson {
         classDiscriminator = "type"
     }
 
+    // Size limits - protect against huge frames but allow real content
+    const val MAX_FRAME_SIZE = 2 * 1024 * 1024 // 2MB max frame
+    const val MAX_QUESTION_SIZE = 10_000
+    const val MAX_ANSWER_SIZE = 20_000
+    const val MAX_FEEDBACK_SIZE = 20_000
+    const val MAX_DASHBOARD_SIZE = 1 * 1024 * 1024
+
     fun encodeClientMessage(message: ClientMessage): String {
-        return json.encodeToString(ClientMessage.serializer(), message)
+        val encoded = json.encodeToString(ClientMessage.serializer(), message)
+        // Size check
+        if (encoded.length > MAX_FRAME_SIZE) {
+            AppLogger.w("ProtocolJson", "Client message exceeds size limit: type=${message.type} size=${encoded.length}")
+            // Still send but log warning - server should handle
+        }
+        return encoded
     }
 
     fun decodeServerMessage(rawJson: String): ServerMessage? {
+        // Size protection
+        if (rawJson.length > MAX_FRAME_SIZE) {
+            AppLogger.e("ProtocolJson", "Frame too large: ${rawJson.length} bytes, type=${peekType(rawJson)}")
+            return ServerMessage.ErrorMessage(
+                message = "Frame too large",
+                code = "FRAME_TOO_LARGE"
+            )
+        }
+
         return try {
             json.decodeFromString(ServerMessage.serializer(), rawJson)
         } catch (e: Exception) {
-            // §83: never log the raw frame. A protocol frame can legitimately contain study
-            // content, and a malformed one can contain a credential. Log the shape instead:
-            // frame type (best effort), size, and the decoder's own message.
-            AppLogger.e(
-                "ProtocolJson",
-                "Failed to decode server message: ${e.message} " +
-                    "(type=${peekType(rawJson)} bytes=${rawJson.length})",
-                e
-            )
-            // Attempt to parse generic error if possible
+            // Try envelope-first parsing for forward compatibility
             try {
                 val element = json.parseToJsonElement(rawJson).jsonObject
                 val type = element["type"]?.jsonPrimitive?.content
+
+                if (type != null) {
+                    // Unknown type - return Unknown instead of failing
+                    AppLogger.w("ProtocolJson", "Unknown server message type: $type (bytes=${rawJson.length})")
+                    return ServerMessage.Unknown(
+                        rawType = type,
+                        messageId = element["message_id"]?.jsonPrimitive?.content,
+                        sessionId = element["session_id"]?.jsonPrimitive?.content,
+                        timestamp = element["timestamp"]?.jsonPrimitive?.content,
+                        inReplyTo = element["in_reply_to"]?.jsonPrimitive?.content
+                    )
+                }
+
+                // Try generic error parsing
                 val msg = element["message"]?.jsonPrimitive?.content ?: "Unknown error"
-                if (type == "error") {
-                    ServerMessage.ErrorMessage(
+                if (element["type"]?.jsonPrimitive?.content == "error") {
+                    return ServerMessage.ErrorMessage(
                         message = msg,
                         code = element["code"]?.jsonPrimitive?.content,
-                        details = element["details"]?.jsonPrimitive?.content
+                        details = element["details"]?.jsonPrimitive?.content,
+                        messageId = element["message_id"]?.jsonPrimitive?.content,
+                        inReplyTo = element["in_reply_to"]?.jsonPrimitive?.content
                     )
-                } else {
-                    null
                 }
+
+                AppLogger.e(
+                    "ProtocolJson",
+                    "Failed to decode server message: ${e.message} (type=${peekType(rawJson)} bytes=${rawJson.length})",
+                    e
+                )
+                null
             } catch (_: Exception) {
+                AppLogger.e(
+                    "ProtocolJson",
+                    "Failed to decode server message: ${e.message} (type=${peekType(rawJson)} bytes=${rawJson.length})",
+                    e
+                )
                 null
             }
         }
@@ -58,16 +98,30 @@ object ProtocolJson {
         return incomingVersion == "1" || incomingVersion == "2"
     }
 
-    /**
-     * Best-effort `type` peek without a full deserialization (§83/§61).
-     *
-     * Used only for diagnostics on the failure path: it answers "what kind of frame was it?"
-     * without retaining or rendering the frame itself. Returns "unknown" when the payload is not
-     * even a JSON object, which is itself a useful fact.
-     */
+    fun selectProtocolVersion(clientSupported: List<String>, serverSelected: String?): String? {
+        if (serverSelected != null && clientSupported.contains(serverSelected)) {
+            return serverSelected
+        }
+        // Server should choose highest mutually supported
+        return null
+    }
+
     fun peekType(rawJson: String): String = try {
         json.parseToJsonElement(rawJson).jsonObject["type"]?.jsonPrimitive?.content ?: "missing"
     } catch (_: Exception) {
         "unparseable"
+    }
+
+    fun peekEnvelope(rawJson: String): Map<String, String?>? = try {
+        val obj = json.parseToJsonElement(rawJson).jsonObject
+        mapOf(
+            "type" to obj["type"]?.jsonPrimitive?.content,
+            "protocol_version" to obj["protocol_version"]?.jsonPrimitive?.content,
+            "message_id" to obj["message_id"]?.jsonPrimitive?.content,
+            "in_reply_to" to obj["in_reply_to"]?.jsonPrimitive?.content,
+            "session_id" to obj["session_id"]?.jsonPrimitive?.content
+        )
+    } catch (_: Exception) {
+        null
     }
 }

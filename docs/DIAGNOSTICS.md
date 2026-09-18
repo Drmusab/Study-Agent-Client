@@ -222,7 +222,117 @@ than an afterthought.
 
 ---
 
-## 8. What is not instrumented (and why)
+## 8. Connection Diagnostics (Enhanced)
+
+### Staged Connection Test
+
+The Connection screen provides a staged test that reports per-stage success/failure:
+
+```
+1. Network (Android has usable network)
+2. DNS/IP reachability (can resolve host)
+3. Transport (WebSocket upgrade)
+4. Study Agent handshake (welcome received)
+5. Protocol (negotiated version)
+6. Authentication (Bearer or legacy frame)
+7. Anki (if capability advertised)
+8. AI (if capability advertised)
+```
+
+Each stage maps to ConnectionProblem with userMessage and userAction:
+
+```
+PC reachable ✓
+WebSocket ✓
+Study Agent handshake ✓
+Authentication ✕ -> "The PC Agent is running, but the token was rejected." + "Edit token or pair again"
+```
+
+Technical details in Diagnostics, not in user-facing banner.
+
+### Developer Diagnostics (Connection Screen -> Diagnostics)
+
+```
+Transport: WebSocket
+Connection generation: 42 (prevents late callbacks from stale connections)
+Protocol: 2 (selected via welcome.selected_protocol)
+Agent: StudyPC-Agent 2.3.0 (server_name + server_version from welcome)
+Agent ID: persistent-uuid (recognizes same agent at new address)
+Capabilities: dashboard, study_config, session_recovery, etc.
+Authentication: Bearer • authenticated (never token)
+Ping: 14ms (correlated via in_reply_to, not confused by delayed pongs)
+Last message: 2.1s ago (liveness detection)
+Reconnect attempts: 0 (bounded exponential backoff + jitter)
+Network type: WIFI/CELLULAR/VPN
+Problem: typed ConnectionProblem if any
+```
+
+### Copy Diagnostics (Sanitized)
+
+Generates:
+
+```
+App: 1.0.0
+Agent: 2.3.0
+Protocol: 2
+Connection: Ready
+Transport: WSS
+Host: private/redacted where appropriate
+Latency: 14ms
+Anki: Ready
+AI: Ready
+Last Error: none
+Support ID: short random local to export, no remote tracking
+```
+
+No token, no raw frames, no transcripts.
+
+### Observability Metrics
+
+- DNS/resolve time where observable
+- Connect time
+- WebSocket upgrade time
+- Handshake time (hello -> welcome)
+- Auth time
+- Ready time (Connect tapped -> Agent Ready, separate from socket opened)
+- Ping RTT (correlated)
+- Reconnect duration
+- Request RTT by type (dashboard, decks, config, session start, evaluation, rating) - don't mix LLM evaluation latency with simple local API
+
+NetworkStats enhanced with:
+
+```
+state, profileName, host, port, transport,
+reconnectAttempt, maxReconnectAttempts, reconnectCount,
+pingIntervalSeconds, lastPingRttMs, connectLatencyMs,
+lastMessageAgeMs, messagesSent, messagesReceived, sendFailures,
+lastMessageType, lastProtocolError, messagesPerMinute (detects polling loops)
+```
+
+### Connection Problem Model
+
+Typed reasons:
+
+```
+NetworkMissing, DnsFailure, ConnectionRefused, Timeout, TlsFailure,
+AuthenticationRejected, ProtocolMismatch, HandshakeTimeout, AgentBusy,
+AgentNotStudyAgent (wrong service), Unknown
+```
+
+UI maps problem to action:
+
+```
+Connection refused -> Start PC Agent
+Authentication rejected -> Edit token
+TLS failed -> Check secure server address/certificate
+Protocol incompatible -> Update app/agent
+Network missing -> Check Wi-Fi/Tailscale
+Handshake timeout -> Verify endpoint is Study Agent, not other service
+```
+
+Do NOT display exception strings to users - technical details in Diagnostics.
+
+## 9. What is not instrumented (and why)
 
 * **Per-frame RMS levels and partial transcripts.** They are the highest-volume signals in the app and
   the least diagnostic after the fact; recording them would drown the timeline (§70/§77/§78).

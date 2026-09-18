@@ -15,21 +15,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * The ONE authoritative capability state for the whole app (§109).
- *
- * Dashboard, Control Center and Connection screens all observe this store —
- * no ViewModel guesses features on its own.
- *
- * Negotiation model:
- *  - On connect: status becomes [NegotiationStatus.NEGOTIATING]; a v2 server is
- *    expected to send a `capabilities` frame shortly after the hello exchange.
- *  - If the frame arrives: [NegotiationStatus.NEGOTIATED_V2] with the exact
- *    advertised capability set (possibly empty — v2 but nothing supported).
- *  - If the frame does not arrive within [negotiationTimeoutMs]: the server is
- *    treated as a legacy Protocol v1 agent ([NegotiationStatus.LEGACY_V1]).
- *    Basic study keeps working; management features are gated off instead of
- *    failing (§12).
- *  - On any disconnect: back to [NegotiationStatus.UNKNOWN].
+ * The ONE authoritative capability state for the whole app.
+ * Dashboard, Control Center and Connection screens all observe this store.
  */
 class CapabilityStore(
     connectionRepository: ConnectionRepository,
@@ -56,17 +43,73 @@ class CapabilityStore(
 
     private fun onConnectionState(state: ConnectionState) {
         when (state) {
-            is ConnectionState.Connected -> {
+            is ConnectionState.TransportConnected,
+            is ConnectionState.Handshaking,
+            is ConnectionState.Authenticating,
+            is ConnectionState.NegotiatingCapabilities,
+            is ConnectionState.ConnectingTransport,
+            is ConnectionState.Connecting,
+            is ConnectionState.Resolving -> {
                 val serial = ++connectionSerial
+                if (_capabilities.value.status == NegotiationStatus.UNKNOWN) {
+                    _capabilities.value = AgentCapabilities(
+                        status = NegotiationStatus.NEGOTIATING,
+                        protocolVersion = "2",
+                        serverName = (state as? ConnectionState.TransportConnected)?.serverName
+                    )
+                }
+                // Start timeout if not already
+                if (negotiationTimeoutJob == null) {
+                    negotiationTimeoutJob?.cancel()
+                    negotiationTimeoutJob = scope.launch {
+                        delay(negotiationTimeoutMs)
+                        if (connectionSerial == serial && _capabilities.value.status == NegotiationStatus.NEGOTIATING) {
+                            AppLogger.i(tag, "No capabilities/welcome received; treating server as Protocol v1")
+                            _capabilities.value = AgentCapabilities(
+                                status = NegotiationStatus.LEGACY_V1,
+                                protocolVersion = "1",
+                                serverName = _capabilities.value.serverName
+                            )
+                        }
+                    }
+                }
+            }
+
+            is ConnectionState.Ready -> {
+                negotiationTimeoutJob?.cancel()
+                negotiationTimeoutJob = null
                 _capabilities.value = AgentCapabilities(
-                    status = NegotiationStatus.NEGOTIATING,
-                    protocolVersion = "2",
+                    status = NegotiationStatus.NEGOTIATED_V2,
+                    protocolVersion = state.protocolVersion,
+                    capabilities = state.capabilities,
+                    serverName = state.serverName,
+                    serverVersion = state.serverVersion
+                )
+            }
+
+            is ConnectionState.ReadyLegacy -> {
+                negotiationTimeoutJob?.cancel()
+                negotiationTimeoutJob = null
+                _capabilities.value = AgentCapabilities(
+                    status = NegotiationStatus.LEGACY_V1,
+                    protocolVersion = "1",
                     serverName = state.serverName
                 )
+            }
+
+            is ConnectionState.Connected -> {
+                val serial = ++connectionSerial
+                // Legacy path - treat Connected as negotiating
+                if (_capabilities.value.status == NegotiationStatus.UNKNOWN) {
+                    _capabilities.value = AgentCapabilities(
+                        status = NegotiationStatus.NEGOTIATING,
+                        protocolVersion = "2",
+                        serverName = state.serverName
+                    )
+                }
                 negotiationTimeoutJob?.cancel()
                 negotiationTimeoutJob = scope.launch {
                     delay(negotiationTimeoutMs)
-                    // Only downgrade if THIS connection is still waiting for the frame.
                     if (connectionSerial == serial && _capabilities.value.status == NegotiationStatus.NEGOTIATING) {
                         AppLogger.i(tag, "No capabilities frame received; treating server as Protocol v1")
                         _capabilities.value = AgentCapabilities(
@@ -90,18 +133,35 @@ class CapabilityStore(
     }
 
     private fun onMessage(message: ServerMessage) {
-        if (message !is ServerMessage.Capabilities) return
-        negotiationTimeoutJob?.cancel()
-        negotiationTimeoutJob = null
-        val caps = AgentCapabilities(
-            status = NegotiationStatus.NEGOTIATED_V2,
-            protocolVersion = message.protocolVersion ?: "2",
-            capabilities = message.capabilities.toSet(),
-            serverName = message.serverName ?: _capabilities.value.serverName,
-            serverVersion = message.serverVersion
-        )
-        AppLogger.i(tag, "Capabilities negotiated: ${caps.capabilities} (server=${caps.serverName} v=${caps.serverVersion})")
-        _capabilities.value = caps
+        when (message) {
+            is ServerMessage.Capabilities -> {
+                negotiationTimeoutJob?.cancel()
+                negotiationTimeoutJob = null
+                val caps = AgentCapabilities(
+                    status = NegotiationStatus.NEGOTIATED_V2,
+                    protocolVersion = message.protocolVersion ?: "2",
+                    capabilities = message.capabilities.toSet(),
+                    serverName = message.serverName ?: _capabilities.value.serverName,
+                    serverVersion = message.serverVersion
+                )
+                AppLogger.i(tag, "Capabilities negotiated: ${caps.capabilities} (server=${caps.serverName} v=${caps.serverVersion})")
+                _capabilities.value = caps
+            }
+            is ServerMessage.Welcome -> {
+                negotiationTimeoutJob?.cancel()
+                negotiationTimeoutJob = null
+                val caps = AgentCapabilities(
+                    status = NegotiationStatus.NEGOTIATED_V2,
+                    protocolVersion = message.selectedProtocol,
+                    capabilities = message.capabilities.toSet(),
+                    serverName = message.serverName,
+                    serverVersion = message.serverVersion
+                )
+                AppLogger.i(tag, "Welcome negotiated: protocol=${message.selectedProtocol} caps=${caps.capabilities} server=${message.serverName}")
+                _capabilities.value = caps
+            }
+            else -> Unit
+        }
     }
 
     companion object {
@@ -109,10 +169,8 @@ class CapabilityStore(
     }
 }
 
-/** True once the server explicitly negotiated Protocol v2. */
 val AgentCapabilities.isProtocolV2: Boolean
     get() = status == NegotiationStatus.NEGOTIATED_V2
 
-/** True when the server negotiated v2 AND advertised [capability]. */
 fun AgentCapabilities.supportsV2(capability: String): Boolean =
     isProtocolV2 && supports(capability)
