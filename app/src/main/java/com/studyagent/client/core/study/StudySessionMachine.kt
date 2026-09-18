@@ -62,8 +62,8 @@ import java.util.concurrent.atomic.AtomicLong
  * Authoritative serialized event processor (§6 §73-§75).
  *
  * Single coroutine consumes [Channel<StudyEvent>] and drives [StudyReducer] →
- * [newState] + [effects]; [StudyEffectExecutor] then performs effects and
- * re-emits completion events. No other code writes `_state` or `_machineState`.
+ * [newState] + [effects]; effects are then executed inline and completion events
+ * re-emitted. No other code writes `_state` or `_machineState`.
  *
  * Derives public [studyState] and [currentSession] from [machineState] so they
  * can never disagree (§75).
