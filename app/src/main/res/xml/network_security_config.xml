@@ -1,22 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Allow cleartext for local development and trusted LAN ranges, not globally -->
-    <domain-config cleartextTrafficPermitted="true">
-        <!-- Localhost for emulator host 10.0.2.2 and device testing -->
-        <domain includeSubdomains="true">10.0.2.2</domain>
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <!-- Private LAN ranges -->
-        <domain includeSubdomains="true">192.168.0.0</domain>
-        <domain includeSubdomains="true">192.168.1.0</domain>
-        <domain includeSubdomains="true">10.0.0.0</domain>
-        <!-- Tailscale CGNAT range 100.64.0.0/10 -->
-        <domain includeSubdomains="true">100.64.0.0</domain>
-        <!-- MagicDNS - allow .ts.net -->
-        <domain includeSubdomains="true">ts.net</domain>
-    </domain-config>
-    <!-- Default deny cleartext for everything else, require TLS -->
-    <base-config cleartextTrafficPermitted="false">
+    <!-- The app dials exactly one host: the user-configured PC agent, normally
+         over cleartext ws:// on the LAN (DHCP addresses) or Tailscale. NSC
+         <domain> entries are DNS names / exact literals and cannot express IP
+         ranges, so per-host scoping is impossible for LAN addresses and
+         cleartext is allowed at the base level. wss:// profiles still
+         negotiate TLS against the system trust anchors. -->
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

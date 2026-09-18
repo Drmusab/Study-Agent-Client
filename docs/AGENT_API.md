@@ -1,5 +1,11 @@
 # Agent API Specification
 
+> NOTE (2026-09): the `AgentApi` / `AgentClient` / `Transport` / `NetworkMonitor` Kotlin
+> layer described below was removed — it was never instantiated and the live path is
+> `WebSocketAgentConnection` + the feature repositories (`StudySessionMachineRepository`,
+> `DefaultDashboardRepository`, `DefaultStudyControlRepository`). This document is kept as
+> the protocol-level reference (frames, correlation, idempotency) pending a doc rewrite.
+
 High-level typed API over WebSocket transport.
 
 ## Architecture

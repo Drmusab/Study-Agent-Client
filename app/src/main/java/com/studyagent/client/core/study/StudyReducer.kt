@@ -885,7 +885,7 @@ object StudyReducer {
             is SessionPhase.WaitingForRating,
             is SessionPhase.SpeakingFeedback,
             is SessionPhase.SpeakingExplanation,
-            is SessionPhase.HintShowing -> RecognitionPurpose.PUSH_TO_TALK_COMMAND
+            is SessionPhase.SpeakingHint -> RecognitionPurpose.PUSH_TO_TALK_COMMAND
 
             else -> RecognitionPurpose.PUSH_TO_TALK_ANSWER
         }

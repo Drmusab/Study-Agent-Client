@@ -11,9 +11,33 @@ Requires mock_pc_agent.py running or uses in-process server.
 import asyncio
 import json
 import uuid
-import pytest
-import websockets
 from datetime import datetime, timezone
+
+try:
+    import pytest
+except ImportError:
+    # Stdlib-only run (`python3 test_contract.py`): the unit tests below execute via
+    # __main__ without pytest; the integration tests are never collected in that mode.
+
+    class _StubMark:
+        def __getattr__(self, _name):
+            return lambda fn: fn
+
+    class _StubPytest:
+        mark = _StubMark()
+
+        @staticmethod
+        def skip(reason=""):
+            raise RuntimeError(f"skipped (pytest not installed): {reason}")
+
+    pytest = _StubPytest()
+
+try:
+    import websockets
+except ImportError:
+    # Integration tests catch their own connection errors and skip; a missing
+    # websockets package degrades to the same skip path.
+    websockets = None
 
 # For in-process testing, we can import handler logic
 # But simpler: tests assume server running on localhost:8765

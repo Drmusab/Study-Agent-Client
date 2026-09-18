@@ -93,6 +93,24 @@ object ProtocolJson {
         }
     }
 
+    /**
+     * Whether [reply] answers the request [outstandingRequestId].
+     *
+     * Protocol v2 servers send every reply with a *fresh* `message_id` and the
+     * request id in `in_reply_to` — comparing reply `message_id` against the
+     * request id never matches there. Legacy v1/echo servers send no
+     * `in_reply_to`, so an absent or echoed id still completes the single
+     * outstanding request. A reply correlated to a *different* request never
+     * matches: stale answers must not complete (or fail) the current one.
+     */
+    fun isReplyTo(reply: ServerMessage, outstandingRequestId: String?): Boolean {
+        if (outstandingRequestId == null) return false
+        val inReplyTo = reply.inReplyTo
+        if (inReplyTo != null) return inReplyTo == outstandingRequestId
+        val messageId = reply.messageId
+        return messageId == null || messageId == outstandingRequestId
+    }
+
     fun isProtocolVersionCompatible(incomingVersion: String?): Boolean {
         if (incomingVersion == null) return true // Be lenient if omitted in V1
         return incomingVersion == "1" || incomingVersion == "2"
