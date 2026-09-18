@@ -12,6 +12,7 @@ import com.studyagent.client.data.repository.InMemoryManagementCacheStorage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -386,5 +387,150 @@ class StudyControlRepositoryTest {
 
         assertEquals("Pharmacology", h.control.serverConfig.value?.activeDeck)
         assertNull(h.control.draft.value)
+    }
+
+    @Test
+    fun `v2 ACK with fresh message id completes the save via in_reply_to`() = runTest(timeout = 30.seconds) {
+        val h = Harness()
+        h.start(testScheduler)
+        h.connectWithStudyConfig()
+        advanceUntilIdle()
+        h.answerConfigRequest(serverConfig)
+        advanceUntilIdle()
+
+        h.control.updateDraft { it.copy(newPerDay = 61) }
+        val candidate = h.control.draft.value!!
+        val saveJob = h.scope.async { h.control.saveConfig(candidate) }
+        advanceUntilIdle()
+        val requestId = h.lastUpdateRequestId()
+        assertTrue(requestId != null)
+
+        // A v2 server ACKs with a fresh message_id and the request id in in_reply_to.
+        h.connection.emit(
+            ServerMessage.StudyConfigUpdated(
+                messageId = "fresh-ack-1",
+                inReplyTo = requestId,
+                config = candidate
+            )
+        )
+        advanceUntilIdle()
+
+        assertEquals(ConfigSaveResult.Saved, saveJob.await())
+        assertEquals(61, h.control.serverConfig.value?.newPerDay)
+        assertNull(h.control.draft.value)
+    }
+
+    @Test
+    fun `correlated v2 rejection fails the save without touching server config`() = runTest(timeout = 30.seconds) {
+        val h = Harness()
+        h.start(testScheduler)
+        h.connectWithStudyConfig()
+        advanceUntilIdle()
+        h.answerConfigRequest(serverConfig)
+        advanceUntilIdle()
+
+        h.control.updateDraft { it.copy(newPerDay = 62) }
+        val candidate = h.control.draft.value!!
+        val saveJob = h.scope.async { h.control.saveConfig(candidate) }
+        advanceUntilIdle()
+        val requestId = h.lastUpdateRequestId()
+        assertTrue(requestId != null)
+
+        // Fresh message_id, correlated via in_reply_to: an immediate rejection, not a timeout.
+        h.connection.emit(
+            ServerMessage.ErrorMessage(
+                messageId = "fresh-error-1",
+                inReplyTo = requestId,
+                code = "CONFIG_REJECTED",
+                message = "The Study Agent rejected this configuration."
+            )
+        )
+        advanceUntilIdle()
+
+        val result = saveJob.await()
+        assertTrue(result is ConfigSaveResult.Rejected)
+        assertEquals(20, h.control.serverConfig.value?.newPerDay)
+        assertEquals(62, h.control.draft.value?.newPerDay)
+    }
+
+    @Test
+    fun `uncorrelated error does not reject the pending save`() = runTest(timeout = 30.seconds) {
+        val h = Harness()
+        h.start(testScheduler)
+        h.connectWithStudyConfig()
+        advanceUntilIdle()
+        h.answerConfigRequest(serverConfig)
+        advanceUntilIdle()
+
+        h.control.updateDraft { it.copy(newPerDay = 63) }
+        val candidate = h.control.draft.value!!
+        val saveJob = h.scope.async { h.control.saveConfig(candidate) }
+        advanceUntilIdle()
+        val requestId = h.lastUpdateRequestId()
+        assertTrue(requestId != null)
+        assertTrue(h.control.saveState.value is ConfigSaveState.Saving)
+
+        // An error for another request must not end this save.
+        h.connection.emit(
+            ServerMessage.ErrorMessage(
+                messageId = "fresh-error-2",
+                inReplyTo = "some-other-request",
+                code = "TIMEOUT",
+                message = "unrelated failure"
+            )
+        )
+        advanceUntilIdle()
+        assertTrue(saveJob.isActive)
+        assertTrue(h.control.saveState.value is ConfigSaveState.Saving)
+
+        // The real ACK still lands normally.
+        h.connection.emit(
+            ServerMessage.StudyConfigUpdated(
+                messageId = "fresh-ack-2",
+                inReplyTo = requestId,
+                config = candidate
+            )
+        )
+        advanceUntilIdle()
+        assertEquals(ConfigSaveResult.Saved, saveJob.await())
+    }
+
+    @Test
+    fun `duplicate v2 ACK after completion is absorbed, not treated as a push`() = runTest(timeout = 30.seconds) {
+        val h = Harness()
+        h.start(testScheduler)
+        h.connectWithStudyConfig()
+        advanceUntilIdle()
+        h.answerConfigRequest(serverConfig)
+        advanceUntilIdle()
+
+        val pushed = mutableListOf<StudyControlConfig>()
+        val collectJob = h.scope.launch {
+            h.control.serverPushedConfig.collect { pushed += it }
+        }
+        advanceUntilIdle()
+
+        h.control.updateDraft { it.copy(newPerDay = 64) }
+        val candidate = h.control.draft.value!!
+        val saveJob = h.scope.async { h.control.saveConfig(candidate) }
+        advanceUntilIdle()
+        val requestId = h.lastUpdateRequestId()
+        assertTrue(requestId != null)
+
+        val ack = ServerMessage.StudyConfigUpdated(
+            messageId = "fresh-ack-3",
+            inReplyTo = requestId,
+            config = candidate
+        )
+        h.connection.emit(ack)
+        advanceUntilIdle()
+        assertEquals(ConfigSaveResult.Saved, saveJob.await())
+
+        // A retransmitted ACK for the retired save must be dropped silently.
+        h.connection.emit(ack)
+        advanceUntilIdle()
+        assertTrue("duplicate ACK must not surface as a server push", pushed.isEmpty())
+        assertEquals(64, h.control.serverConfig.value?.newPerDay)
+        collectJob.cancel()
     }
 }

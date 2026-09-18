@@ -300,6 +300,121 @@ class DashboardRepositoryTest {
     }
 
     @Test
+    fun `v2 reply with fresh message id completes the request via in_reply_to`() = runTest(timeout = 30.seconds) {
+        val h = Harness()
+        h.start(testScheduler)
+        h.connectV2()
+        advanceUntilIdle()
+        val requestId = h.lastDashboardRequestId()
+        assertTrue(requestId != null)
+
+        // A v2 server answers with a fresh message_id and the request id in in_reply_to.
+        h.connection.emit(
+            ServerMessage.DashboardSnapshotResponse(
+                messageId = "fresh-reply-1",
+                inReplyTo = requestId,
+                snapshot = snapshotPayload()
+            )
+        )
+        advanceUntilIdle()
+
+        assertNotNull(h.dashboard.data.value.snapshot)
+        assertTrue(!h.dashboard.data.value.isRefreshing)
+        // The completion must cancel the timeout: no spurious TimedOut afterwards.
+        advanceTimeBy(9_000)
+        assertNull(h.dashboard.data.value.error)
+    }
+
+    @Test
+    fun `stale reply for a superseded request does not complete the new one`() = runTest(timeout = 30.seconds) {
+        val h = Harness()
+        h.start(testScheduler)
+        h.connectV2()
+        advanceUntilIdle()
+        val requestA = h.lastDashboardRequestId()
+        assertTrue(requestA != null)
+
+        // Request A times out; a new refresh sends request B.
+        advanceTimeBy(9_000)
+        assertEquals(DashboardError.TimedOut, h.dashboard.data.value.error)
+        h.dashboard.refresh("manual-retry")
+        advanceUntilIdle()
+        val requestB = h.lastDashboardRequestId()
+        assertTrue(requestB != null && requestB != requestA)
+
+        // A's late reply must not complete B.
+        h.connection.emit(
+            ServerMessage.DashboardSnapshotResponse(
+                messageId = "fresh-reply-A",
+                inReplyTo = requestA,
+                snapshot = snapshotPayload(reviewed = 1)
+            )
+        )
+        advanceUntilIdle()
+        advanceTimeBy(9_000)
+        assertEquals(
+            "B timed out on its own; A's stale reply must not have completed it",
+            DashboardError.TimedOut,
+            h.dashboard.data.value.error
+        )
+
+        // And B's own reply still completes normally afterwards.
+        h.dashboard.refresh("manual-retry-2")
+        advanceUntilIdle()
+        val requestC = h.lastDashboardRequestId()
+        h.connection.emit(
+            ServerMessage.DashboardSnapshotResponse(
+                messageId = "fresh-reply-C",
+                inReplyTo = requestC,
+                snapshot = snapshotPayload(reviewed = 7)
+            )
+        )
+        advanceUntilIdle()
+        advanceTimeBy(9_000)
+        assertNull(h.dashboard.data.value.error)
+        assertEquals(7, h.dashboard.data.value.snapshot?.today?.cardsReviewed)
+    }
+
+    @Test
+    fun `uncorrelated error does not fail the in-flight refresh`() = runTest(timeout = 30.seconds) {
+        val h = Harness()
+        h.start(testScheduler)
+        h.connectV2()
+        advanceUntilIdle()
+        val requestId = h.lastDashboardRequestId()
+        assertTrue(requestId != null)
+
+        // An error for some other request (or a server push) must not kill this refresh.
+        h.connection.emit(
+            ServerMessage.ErrorMessage(
+                messageId = "fresh-error-1",
+                inReplyTo = "some-other-request",
+                code = "ANKI_NOT_RUNNING",
+                message = "unrelated failure"
+            )
+        )
+        advanceUntilIdle()
+        assertTrue(h.dashboard.data.value.isRefreshing)
+        assertNull(h.dashboard.data.value.error)
+
+        // But an error correlated to this request does fail it with the server message.
+        h.connection.emit(
+            ServerMessage.ErrorMessage(
+                messageId = "fresh-error-2",
+                inReplyTo = requestId,
+                code = "TIMEOUT",
+                message = "agent overloaded"
+            )
+        )
+        advanceUntilIdle()
+        assertTrue(!h.dashboard.data.value.isRefreshing)
+        assertEquals(
+            DashboardError.RequestFailed("agent overloaded", "TIMEOUT"),
+            h.dashboard.data.value.error
+        )
+    }
+
+    @Test
     fun `legacy v1 server marks dashboard unsupported`() = runTest(timeout = 30.seconds) {
         val h = Harness()
         h.start(testScheduler)

@@ -76,8 +76,9 @@ data class StartStudyRequest(
  *  - [localConfig]: last-known safe fallback used on v1 servers / while offline.
  *
  * Saving is ACK-correlated: `update_study_config(messageId=X)` must be answered by
- * `study_config_updated` echoing `message_id=X` (or an `error` frame). Rejection and
- * timeout leave [serverConfig] untouched — no optimistic commits (§51-§53/§114).
+ * `study_config_updated` (or an `error` frame) carrying `in_reply_to=X` — v2 servers
+ * send a fresh `message_id` on every reply. Rejection and timeout leave
+ * [serverConfig] untouched — no optimistic commits (§51-§53/§114).
  */
 interface StudyControlRepository {
     val serverConfig: StateFlow<StudyControlConfig?>
@@ -503,13 +504,14 @@ class DefaultStudyControlRepository(
         val config = message.config
         val retired = synchronized(lock) {
             message.messageId?.let { it in retiredSaveMessageIds } == true ||
-                (message.messageId == null && config != null && config in retiredSaveCandidates)
+                message.inReplyTo?.let { it in retiredSaveMessageIds } == true ||
+                (message.messageId == null && message.inReplyTo == null && config != null && config in retiredSaveCandidates)
         }
         if (retired) return
         val pending = synchronized(lock) { pendingSave }
         val ackMatchesPending = pending != null &&
-            (message.messageId == pending.messageId ||
-                (message.messageId == null && config != null && config == pending.candidate))
+            (ProtocolJson.isReplyTo(message, pending.messageId) ||
+                (message.messageId == null && message.inReplyTo == null && config != null && config == pending.candidate))
         if (ackMatchesPending && pending != null) {
             // ACK correlation (§114): complete the awaiting save.
             pending.ackedConfig = config
@@ -527,10 +529,10 @@ class DefaultStudyControlRepository(
 
     private fun onError(message: ServerMessage.ErrorMessage) {
         val pending = synchronized(lock) { pendingSave } ?: return
-        // Protocol v2 correlates errors. A null id is retained only as the
-        // backward-compatible v1/v2 fallback; an unrelated id must not reject a
-        // save that is still waiting for its own ACK.
-        if (message.messageId != null && message.messageId != pending.messageId) {
+        // Protocol v2 correlates errors via in_reply_to. A null id is retained
+        // only as the backward-compatible v1 fallback; an unrelated id must not
+        // reject a save that is still waiting for its own ACK.
+        if (!ProtocolJson.isReplyTo(message, pending.messageId)) {
             AppLogger.d(tag, "Ignoring uncorrelated config error")
             return
         }

@@ -122,4 +122,43 @@ class ProtocolJsonTest {
         assertEquals("DECK_NOT_FOUND", error.code)
         assertEquals("Specified deck does not exist in Anki", error.message)
     }
+
+    @Test
+    fun testIsReplyToCorrelationMatrix() {
+        val pong = { messageId: String?, inReplyTo: String? ->
+            ServerMessage.Pong(messageId = messageId, inReplyTo = inReplyTo)
+        }
+        // v2: fresh reply id, request id in in_reply_to.
+        assertTrue(ProtocolJson.isReplyTo(pong("fresh-1", "req-A"), "req-A"))
+        // A reply correlated to a different request never matches.
+        assertTrue(!ProtocolJson.isReplyTo(pong("fresh-2", "req-B"), "req-A"))
+        // Legacy echo server: request id echoed as message_id, no in_reply_to.
+        assertTrue(ProtocolJson.isReplyTo(pong("req-A", null), "req-A"))
+        assertTrue(!ProtocolJson.isReplyTo(pong("other-id", null), "req-A"))
+        // Id-less frames: the only request out is assumed to be answered.
+        assertTrue(ProtocolJson.isReplyTo(pong(null, null), "req-A"))
+        // Nothing outstanding: nothing correlates.
+        assertTrue(!ProtocolJson.isReplyTo(pong("fresh-3", "req-A"), null))
+    }
+
+    @Test
+    fun testDecodePreservesReplyCorrelationIds() {
+        val json = """
+            {
+              "type": "dashboard_snapshot",
+              "message_id": "dash-abc",
+              "in_reply_to": "req-123",
+              "timestamp": "2026-09-13T08:00:00.000Z",
+              "snapshot": {"generated_at": "2026-09-13T08:00:00.000Z"}
+            }
+        """.trimIndent()
+
+        val msg = ProtocolJson.decodeServerMessage(json)
+        assertTrue(msg is ServerMessage.DashboardSnapshotResponse)
+        val snapshot = msg as ServerMessage.DashboardSnapshotResponse
+        assertEquals("dash-abc", snapshot.messageId)
+        assertEquals("req-123", snapshot.inReplyTo)
+        assertTrue(ProtocolJson.isReplyTo(snapshot, "req-123"))
+        assertTrue(!ProtocolJson.isReplyTo(snapshot, "req-other"))
+    }
 }
