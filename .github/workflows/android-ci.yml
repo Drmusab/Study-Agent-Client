@@ -42,6 +42,29 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------------------------
+  # Gate 0 — protocol contract unit tests. Hermetic (stdlib only, no pip): the mock agent's
+  # contract pins the fresh message_id + in_reply_to correlation the Android client relies on.
+  # ---------------------------------------------------------------------------------------------
+  contract-tests:
+    name: Protocol contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Contract unit tests (no dependencies)
+        run: python3 server/test_contract.py
+
+      - name: Mock agent compiles
+        run: python3 -m py_compile server/mock_pc_agent.py server/test_contract.py server/test_client.py
+
+  # ---------------------------------------------------------------------------------------------
   # Gate 1 — the fast gate. This is the one that must never be skipped or soft-failed.
   # ---------------------------------------------------------------------------------------------
   unit-tests:
