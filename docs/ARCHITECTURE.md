@@ -120,8 +120,8 @@ The **Study Agent Mobile Client** is a lightweight, voice-first native Android a
 #### WebSocketAgentConnection
 Owns: socket lifecycle, frames, transport errors, generation, ping loop, liveness detection, handshake timeout
 
-#### AgentClient
-Owns: handshake (hello/welcome), auth (Bearer preferred, legacy frame fallback), protocol negotiation (selected_protocol), request correlation (in_reply_to), capabilities, session recovery (request_session_snapshot after reconnect)
+#### AgentClient (REMOVED 2026-09 — never instantiated; responsibilities now live in WebSocketAgentConnection + CapabilityStore + feature repositories)
+Was documented as owning: handshake (hello/welcome), auth (Bearer preferred, legacy frame fallback), protocol negotiation (selected_protocol), request correlation (in_reply_to), capabilities, session recovery (request_session_snapshot after reconnect)
 
 #### ConnectionRepository
 Owns: profiles, connect/disconnect intent, effective connection state (ConnectionState + Snapshot), fake mode toggle, test connection
