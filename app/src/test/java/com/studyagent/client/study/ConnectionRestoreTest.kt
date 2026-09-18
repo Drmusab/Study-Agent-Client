@@ -1,6 +1,7 @@
 package com.studyagent.client.study
 
 import com.studyagent.client.core.models.ConnectionState
+import com.studyagent.client.core.network.WebSocketAgentConnection
 import com.studyagent.client.core.study.SessionConnectionStatus
 import com.studyagent.client.core.study.SessionPhase
 import com.studyagent.client.testutil.StudySessionHarness
