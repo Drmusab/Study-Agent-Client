@@ -78,6 +78,61 @@ object AnkiDroidApiContract {
 
     /** Projection column of that read; a recognized column, so the row shape is well defined. */
     const val SELECTED_DECK_COLUMN: String = "deck_id"
+
+    // ------------------------------------------------------------------------------------------
+    // GATE 05 — deck listing contract (`FlashCardsContract.Deck`, verified at v2.24.1)
+    //
+    // | Fact | Value | Verified from |
+    // |---|---|---|
+    // | Deck list URI | `content://<authority>/decks` (one row per deck, nested decks included) | `FlashCardsContract.Deck.CONTENT_ALL_URI`; `CardContentProvider.query` `DECKS -> col.sched.deckDueTree().forEach { addDeckToCursor(it.did, it.fullDeckName, …) }` |
+    // | Selected deck URI | `content://<authority>/selected_deck` (exactly one row) | `Deck.CONTENT_SELECTED_URI`; `DECK_SELECTED -> col.decks.selected()` |
+    // | `deck_id` | `long`, read-only, "unique ID of the Deck" | `Deck.DECK_ID` + KDoc table |
+    // | `deck_name` | `String`, full name, `::`-separated for nested decks | `Deck.DECK_NAME`; provider passes `DeckNode.fullDeckName` |
+    // | `deck_count` | `JSONArray` **`[learn, review, new]`**, read-only | `Deck.DECK_COUNTS` KDoc table; `getDeckCountsFromDueTreeNode` puts `lrnCount, revCount, newCount` in that order |
+    // | `deck_dyn` | `Boolean` ("whether or not the deck is a filtered deck") | `Deck.DECK_DYN`; provider adds `col.decks.isFiltered(id)` |
+    // | `deck_desc` | `String` | `Deck.DECK_DESC` — **not consumed**: the provider adds `col.decks.current().description`, i.e. the *selected* deck's description on every row |
+    // | `options` | `JSONObject` deck config | `Deck.OPTIONS` — **not consumed** (raw options JSON never travels upward, §36) |
+    // | Unknown projection column | silently skipped by `addDeckToCursor` (`when` without `else`) → later cells shift left | `CardContentProvider.addDeckToCursor` — the reason only recognized columns are ever requested |
+    // | Transport of non-numeric cells | `Boolean`/`JSONArray` cross the process boundary as their `toString()` | Android `CursorWindow`/`DatabaseUtils.cursorFillWindow` (`getTypeOfObject` → STRING) |
+    // | `selected_deck` counts | `JSONArray(listOf(col.sched.counts()))` — a *nested* array, not `[learn, review, new]` | `DECK_SELECTED` branch — the reason counts are never read from that row |
+    // | No parent ID, no collection ID, no per-deck "selected" flag in the contract | — | `FlashCardsContract.Deck` columns above are the complete set |
+    // ------------------------------------------------------------------------------------------
+
+    /** URI path of the deck list (`Deck.CONTENT_ALL_URI`). */
+    const val DECKS_PATH: String = "decks"
+
+    /** `Deck.DECK_ID` — the backend-issued deck identity (never the name, INV-ANKI-DECK-01). */
+    const val DECK_ID_COLUMN: String = "deck_id"
+
+    /** `Deck.DECK_NAME` — full name; nested decks use [DECK_NAME_SEPARATOR]. */
+    const val DECK_NAME_COLUMN: String = "deck_name"
+
+    /** `Deck.DECK_COUNTS` — JSON array `[learn, review, new]`, transported as text. */
+    const val DECK_COUNTS_COLUMN: String = "deck_count"
+
+    /** `Deck.DECK_DYN` — filtered-deck flag, transported as `"true"`/`"false"` text. */
+    const val DECK_DYN_COLUMN: String = "deck_dyn"
+
+    /** Anki's hierarchy separator inside a full deck name (`Parent::Child::Grandchild`). */
+    const val DECK_NAME_SEPARATOR: String = "::"
+
+    /**
+     * The only columns GATE 05 asks the provider for. Deliberately excludes `options` (heavy,
+     * never consumed) and `deck_desc` (wrong value per row, see table). Never add a column that
+     * the pinned contract does not define: the provider skips unknown names and shifts the row.
+     */
+    val DECK_LIST_PROJECTION: Array<String> = arrayOf(
+        DECK_ID_COLUMN,
+        DECK_NAME_COLUMN,
+        DECK_COUNTS_COLUMN,
+        DECK_DYN_COLUMN
+    )
+
+    /** Projection of the selected-deck read: identity only (its counts cell is not `[l, r, n]`). */
+    val SELECTED_DECK_PROJECTION: Array<String> = arrayOf(
+        DECK_ID_COLUMN,
+        DECK_NAME_COLUMN
+    )
 }
 
 /**

@@ -15,7 +15,14 @@ package com.studyagent.client.core.anki
 data class AnkiCapabilities(
     /** Can serve due cards and commit ratings (the minimum viable backend). */
     val review: Boolean = false,
+    /** Can list decks with backend-qualified identity (GATE 05 — read-only deck foundation). */
     val deckListing: Boolean = false,
+    /**
+     * Deck due counts are exposed *and their semantics were verified against the backend*.
+     * A backend may still populate `AnkiDeck.counts` best-effort while this stays `false`; UI
+     * must treat such counts as advisory and nullable (GATE 05 §13/§45).
+     */
+    val deckCounts: Boolean = false,
     val renderedCards: Boolean = false,
     val reviewIntervals: Boolean = false,
     val media: Boolean = false,

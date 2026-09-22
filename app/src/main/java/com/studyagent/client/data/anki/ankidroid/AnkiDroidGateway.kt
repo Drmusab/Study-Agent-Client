@@ -28,7 +28,7 @@ import kotlinx.coroutines.withContext
  *
  * Visibility: internal (§105) — upper layers depend on AnkiBackend, not gateway.
  */
-internal interface AnkiDroidGateway {
+interface AnkiDroidGateway {
 
     suspend fun refreshIntegrationState(): AnkiDroidIntegrationState
 
@@ -139,7 +139,7 @@ internal class DefaultAnkiDroidGateway(
     private suspend fun performRefresh(
         requestGen: Long
     ): AnkiDroidIntegrationState {
-        try {
+        return try {
             AppLogger.i("AnkiDroidGateway", "ANKI_HEALTH_CHECK_STARTED gen=$requestGen")
 
             val startMs = clock.nowMillis()

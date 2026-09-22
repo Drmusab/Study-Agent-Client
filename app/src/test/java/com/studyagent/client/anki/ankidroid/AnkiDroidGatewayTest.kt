@@ -255,71 +255,32 @@ class AnkiDroidGatewayTest {
     }
 
     @Test
-    fun `gateway stale result protection discards old generation`() = runTest {
-        // Simulate two refreshes where second is newer and faster, first is slower
-        // The final state should be from newer generation
+    fun `gateway overlapping refreshes share one in-flight probe`() = runTest {
         val providerClient = FakeAnkiDroidProviderClient()
-
-        var callIndex = 0
+        var calls = 0
         val healthProbe = object : com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthProbe {
             override suspend fun probe(): AnkiDroidGatewayHealthSnapshot {
-                callIndex++
-                return AnkiDroidGatewayHealthSnapshot(
-                    availability = AnkiAvailability.Ready(AnkiCapabilities.NONE),
-                    capabilities = AnkiCapabilities.NONE,
-                    apiCapabilities = capabilityResult().apiReport,
-                    providerSpec = 2,
-                    packageVersion = null,
-                    providerReachable = true,
-                    permissionGranted = true,
-                    collectionReady = true,
-                    checkedAtMs = 0L,
-                    latencyMs = 10L,
-                    lastError = null
-                )
+                error("not used")
             }
-
             override suspend fun probeWithDetection(): Pair<AnkiDroidHealthSnapshot, AnkiDroidCapabilityProbeResult> {
-                callIndex++
-                // First call slow, returns PermissionRequired
-                // Second call fast, returns Ready
-                if (callIndex == 1) {
-                    delay(100)
-                    val failureDetection = testDetection(
-                        availability = AnkiAvailability.PermissionRequired(),
-                        providerSpec = 2,
-                        permissionGranted = false
-                    )
-                    return testSnapshot(failureDetection) to capabilityResult()
-                } else {
-                    // fast
-                    return readyHealthSnapshot() to capabilityResult()
-                }
+                calls++
+                delay(50)
+                return readyHealthSnapshot() to capabilityResult()
             }
         }
-
         val gateway = DefaultAnkiDroidGateway(
             healthProbe = healthProbe,
             capabilityProbe = FakeAnkiDroidCapabilityProbe(result = capabilityResult()),
             providerClient = providerClient,
             endpoints = AnkiDroidEndpoints.forBuild(false)
         )
-
-        // Start slow probe
-        val slow = async { gateway.refreshIntegrationState() }
-        delay(10)
-        // Start fast probe (newer generation)
-        val fast = async { gateway.refreshIntegrationState() }
-
-        val fastResult = fast.await()
-        val slowResult = slow.await()
-
-        // Fast should be Ready
-        assertTrue(fastResult.availability is AnkiAvailability.Ready)
-
-        // Final current state should be Ready, not stale PermissionRequired
-        val finalState = gateway.currentState()
-        assertTrue(finalState.availability is AnkiAvailability.Ready)
+        val a = async { gateway.refreshIntegrationState() }
+        val b = async { gateway.refreshIntegrationState() }
+        val ra = a.await()
+        val rb = b.await()
+        assertEquals(ra.availability::class, rb.availability::class)
+        assertTrue(gateway.currentState().availability is AnkiAvailability.Ready)
+        assertEquals(1, calls)
     }
 
     @Test

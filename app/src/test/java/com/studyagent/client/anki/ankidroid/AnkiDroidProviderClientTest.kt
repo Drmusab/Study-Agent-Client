@@ -133,7 +133,7 @@ class AnkiDroidProviderClientTest {
                 selection: String?,
                 selectionArgs: Array<String>?,
                 sortOrder: String?,
-                mapper: (android.database.Cursor) -> T
+                mapper: (com.studyagent.client.data.anki.ankidroid.AnkiDroidProviderRow) -> T
             ): ProviderQueryResult<T> = throw CancellationException()
         }
 

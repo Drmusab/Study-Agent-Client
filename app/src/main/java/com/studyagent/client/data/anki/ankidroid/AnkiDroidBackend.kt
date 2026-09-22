@@ -5,8 +5,10 @@ import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiDeck
+import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiResult
+import com.studyagent.client.core.anki.unavailabilityError
 import com.studyagent.client.core.anki.BeginReviewRequest
 import com.studyagent.client.core.anki.CommitRatingRequest
 import com.studyagent.client.core.anki.CommitRatingResult
@@ -37,24 +39,26 @@ import kotlinx.coroutines.sync.withLock
  * - capabilities (StateFlow)
  * - refreshAvailability()
  *
- * Methods not yet implemented return UnsupportedOperation truthfully (§24/§102),
- * never empty list (which would incorrectly mean zero decks, §25).
+ * GATE 05 implements [getDecks] / [getSelectedDeck] through [AnkiDroidDeckGateway].
+ * Review / rating methods still return UnsupportedAction truthfully (§24/§102),
+ * never an empty list standing in for "not implemented" (INV-ANKI-DECK-06).
  *
- * Architecture (§106):
- * AnkiDroidGateway
+ * Architecture:
+ * AnkiDroidGateway (health) + AnkiDroidDeckGateway (decks)
  *   ↓
  * AnkiDroidBackend
  *   ↓
  * AnkiBackend (domain)
  *
- * No Cursor, ContentResolver, Uri, FlashCardsContract escapes (§4/§10).
- * Health probes are read-only, no mutation (§21/§91).
+ * No Cursor, ContentResolver, Uri or provider JSON escapes (§4/§10).
+ * Deck operations are read-only (INV-ANKI-DECK-12). No card or review queries.
  */
 class AnkiDroidBackend(
     private val gateway: AnkiDroidGateway,
     private val scope: CoroutineScope,
     private val clock: AppClock = SystemAppClock,
-    private val dispatchers: DispatcherProvider = DefaultDispatcherProvider()
+    private val dispatchers: DispatcherProvider = DefaultDispatcherProvider(),
+    private val deckGateway: AnkiDroidDeckGateway
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
@@ -122,19 +126,46 @@ class AnkiDroidBackend(
     }
 
     /**
-     * GATE 04 does NOT provide deck listing yet (§24/§93).
-     * Returns explicit UnsupportedOperation, not empty list (§25/§102).
+     * Read-only deck listing (GATE 05). `Success(emptyList())` is a real empty collection;
+     * every other outcome is a typed failure (INV-ANKI-DECK-06).
      */
     override suspend fun getDecks(): AnkiResult<List<AnkiDeck>> {
         try {
-            AppLogger.i("AnkiDroidBackend", "getDecks called — not yet implemented (GATE 05)")
-            return AnkiResult.Failure(
-                AnkiError.UnsupportedAction(action = "deckListingIntegrationPending")
-            )
+            guardDeckRead()?.let { return AnkiResult.Failure(it) }
+            val authority = currentAuthority()
+                ?: return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+            return when (val listing = deckGateway.queryDecks(authority)) {
+                is AnkiResult.Success -> AnkiResult.Success(listing.value.decks)
+                is AnkiResult.Failure -> listing
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         }
     }
+
+    override suspend fun getSelectedDeck(): AnkiResult<AnkiDeckRef?> {
+        try {
+            guardDeckRead()?.let { return AnkiResult.Failure(it) }
+            val authority = currentAuthority()
+                ?: return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+            return deckGateway.querySelectedDeck(authority)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        }
+    }
+
+    fun lastDeckQueryDiagnostics(): AnkiDeckQueryDiagnostics = deckGateway.lastListingDiagnostics()
+
+    private fun guardDeckRead(): AnkiError? {
+        val availability = _integrationState.value.availability
+        availability.unavailabilityError()?.let { return it }
+        if (!_integrationState.value.capabilities.deckListing) {
+            return AnkiError.UnsupportedAction(action = "deckListing")
+        }
+        return null
+    }
+
+    private fun currentAuthority(): String? = _integrationState.value.metadata?.authority
 
     override suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession> {
         try {

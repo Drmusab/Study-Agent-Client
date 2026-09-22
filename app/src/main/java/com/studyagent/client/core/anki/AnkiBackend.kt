@@ -14,7 +14,22 @@ interface AnkiBackend {
     val capabilities: StateFlow<AnkiCapabilities>
 
     suspend fun refreshAvailability()
+
+    /**
+     * Read-only deck listing (GATE 05). `Success(emptyList())` means the collection really has
+     * no decks; every other outcome is a typed failure — never an empty list standing in for one
+     * (INV-ANKI-DECK-06). Decks carry backend-qualified identity, the original full name, and
+     * nullable counts/filtered flags (`null` = the backend did not say, never a guessed zero).
+     */
     suspend fun getDecks(): AnkiResult<List<AnkiDeck>>
+
+    /**
+     * The deck the *backend* currently has selected (AnkiDroid's own "current deck"), if the
+     * backend exposes that notion. `Success(null)` = exposed but not determinable right now.
+     * This is informational: it is not Study-Agent's session deck and is never written (§14/§43).
+     */
+    suspend fun getSelectedDeck(): AnkiResult<AnkiDeckRef?>
+
     suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession>
 
     /**

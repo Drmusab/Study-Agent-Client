@@ -129,6 +129,7 @@ class AnkiDomainModelTest {
     @Test fun `deck hierarchy is display only and unknown counts stay unknown`() {
         val deck = deck()
         assertEquals(listOf("Medicine", "Cardiology", "Arrhythmias"), deck.path)
+        assertEquals("Arrhythmias", deck.leafName)
         assertEquals(deck.ref, deck.copy(name = "Renamed").ref)
         assertNull(deck.counts)
         assertNull(deck.isFiltered)

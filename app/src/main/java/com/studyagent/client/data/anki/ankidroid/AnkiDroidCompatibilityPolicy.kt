@@ -102,20 +102,18 @@ object AnkiDroidCompatibilityPolicy {
     /**
      * Maps current spec + runtime readiness to implemented AnkiCapabilities.
      *
-     * GATE 04: no review, deck listing, etc. implemented yet — returns NONE.
-     * Future gates will return true for features they have verified.
+     * GATE 05: [AnkiCapabilities.deckListing] is true when the backend is Ready at a supported
+     * spec. [AnkiCapabilities.deckCounts] stays false — counts are mapped best-effort from the
+     * provider but their recursive-vs-self semantics have not been verified on a real device,
+     * so UI must treat them as nullable/advisory. Review stays false until GATE 06
+     * (`isReadyForReview` remains false; PC path isolation holds).
      */
     fun implementedCapabilitiesFor(
         spec: Int?,
         isReady: Boolean
     ): AnkiCapabilities {
         if (!isReady || spec == null || !isSpecSupported(spec)) return AnkiCapabilities.NONE
-
-        // GATE 04 intentionally returns NONE: API supports features but Study-Agent
-        // has not yet implemented them. This prevents isReadyForReview from becoming true
-        // before GATE 06 (review gate) lands, preserving PC path isolation.
-        // Documented in GATE 02 §96 and GATE 04 §19/§22.
-        return AnkiCapabilities.NONE
+        return AnkiCapabilities(deckListing = true)
     }
 }
 

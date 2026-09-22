@@ -1,24 +1,26 @@
 package com.studyagent.client.data.anki.ankidroid
 
-import android.database.Cursor
-
 /**
- * GATE 04 — mapper responsibility (§56).
+ * GATE 04 — mapper responsibility (§56), made platform-neutral in GATE 05.
  *
- * Converts provider-specific values into domain models.
- * No UI formatting, no voice normalization, no AI transformation (§57/§58/§59).
+ * Converts provider row values into domain-ready values. No UI formatting, no voice
+ * normalization, no AI transformation (§57/§58/§59). Reads go through [AnkiDroidProviderRow], so
+ * these helpers — and every mapper built on them — compile and run on the plain JVM
+ * (INV-ANKI-DECK-02); `android.database.Cursor` never appears here.
  *
- * Currently placeholder for future deck/card mapping (GATE 05+).
- * Establishes the pattern: strict required / lenient optional (§55).
+ * Pattern (§55): strict for required identity fields, lenient for optional display fields.
+ * The helpers that *throw* ([requireColumnIndex], [getRequiredLong], [getRequiredString]) are for
+ * structural problems where the whole query is unusable; per-row policies (skip a malformed row,
+ * keep the rest) are expressed by mappers returning outcome values — see `AnkiDroidDeckMapper`.
  */
 internal object AnkiDroidMapper {
 
     /**
-     * Validates required column exists before reading.
-     * Returns typed failure info for malformed critical results (§54).
+     * Validates that a required column exists before reading.
+     * Throws a typed mapping error for a malformed critical result (§54).
      */
-    fun requireColumnIndex(cursor: Cursor, columnName: String): Int {
-        val index = cursor.getColumnIndex(columnName)
+    fun requireColumnIndex(row: AnkiDroidProviderRow, columnName: String): Int {
+        val index = row.columnIndex(columnName)
         if (index < 0) {
             throw AnkiDroidMappingException(
                 message = "Missing required column: $columnName",
@@ -30,21 +32,18 @@ internal object AnkiDroidMapper {
     }
 
     /**
-     * Optional column — returns -1 if missing, which caller should treat as
-     * capability unavailable, not backend broken (§53).
+     * Optional column — returns -1 if missing, which callers treat as "value unknown"
+     * (a capability the provider did not expose), never as "backend broken" (§53).
      */
-    fun optionalColumnIndex(cursor: Cursor, columnName: String): Int {
-        return cursor.getColumnIndex(columnName)
-    }
+    fun optionalColumnIndex(row: AnkiDroidProviderRow, columnName: String): Int =
+        row.columnIndex(columnName)
 
-    /**
-     * Safe Long extraction with validation — never silently uses 0 as fallback (§75).
-     */
-    fun getRequiredLong(cursor: Cursor, columnIndex: Int, fieldName: String): Long {
+    /** Safe Long extraction — never silently substitutes 0 for a missing field (§75). */
+    fun getRequiredLong(row: AnkiDroidProviderRow, columnIndex: Int, fieldName: String): Long {
         if (columnIndex < 0) throw AnkiDroidMappingException("Missing required field: $fieldName", fieldName, true)
         return try {
-            cursor.getLong(columnIndex)
-        } catch (e: Exception) {
+            row.getLong(columnIndex)
+        } catch (e: RuntimeException) {
             throw AnkiDroidMappingException(
                 message = "Invalid type for $fieldName at index $columnIndex",
                 columnName = fieldName,
@@ -54,26 +53,27 @@ internal object AnkiDroidMapper {
         }
     }
 
-    fun getOptionalString(cursor: Cursor, columnIndex: Int): String? {
+    /** Lenient optional read: absent column, SQL NULL or a read error all yield `null`. */
+    fun getOptionalString(row: AnkiDroidProviderRow, columnIndex: Int): String? {
         if (columnIndex < 0) return null
         return try {
-            if (cursor.isNull(columnIndex)) null else cursor.getString(columnIndex)
-        } catch (_: Exception) {
+            if (row.isNull(columnIndex)) null else row.getString(columnIndex)
+        } catch (_: RuntimeException) {
             null
         }
     }
 
-    fun getRequiredString(cursor: Cursor, columnIndex: Int, fieldName: String): String {
+    fun getRequiredString(row: AnkiDroidProviderRow, columnIndex: Int, fieldName: String): String {
         if (columnIndex < 0) throw AnkiDroidMappingException("Missing required field: $fieldName", fieldName, true)
         return try {
-            val value = cursor.getString(columnIndex)
+            val value = row.getString(columnIndex)
             if (value.isNullOrBlank()) {
                 throw AnkiDroidMappingException("Blank required field: $fieldName", fieldName, true)
             }
             value
         } catch (e: AnkiDroidMappingException) {
             throw e
-        } catch (e: Exception) {
+        } catch (e: RuntimeException) {
             throw AnkiDroidMappingException("Invalid type for $fieldName", fieldName, true, e)
         }
     }
@@ -84,4 +84,4 @@ internal class AnkiDroidMappingException(
     val columnName: String,
     val isRequired: Boolean,
     cause: Throwable? = null
-) : Exception(message, cause)
+) : RuntimeException(message, cause)

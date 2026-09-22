@@ -49,8 +49,7 @@ class AnkiDroidIntegrationIsolationTest {
     private val androidFacingFiles = setOf(
         "AndroidAnkiDroidProbe.kt",
         "AnkiDroidLauncher.kt",
-        "AnkiDroidProviderClient.kt",
-        "AnkiDroidMapper.kt"
+        "AnkiDroidProviderClient.kt"
     )
 
     // ---------------------------------------------------------------- helpers
@@ -153,7 +152,7 @@ class AnkiDroidIntegrationIsolationTest {
             "openOutputStream", "ContentProviderOperation", "resolver.call(",
             // GATE 06+ APIs that must not exist yet
             "addNote(", "addNotes(", "updateNote(", "addMediaFromUri(", "addNewDeck(",
-            "selectDeckWithCheck", "getNextCard(", "commitRating(",
+            "selectDeckWithCheck", "getNextCard(",
             // AnkiDroid internals: never linked, never copied
             "FlashCardsContract", "ReviewInfo", "libanki", "Reviewer"
         )

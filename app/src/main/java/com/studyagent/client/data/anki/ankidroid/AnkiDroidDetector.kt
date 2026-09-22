@@ -192,7 +192,8 @@ class DefaultAnkiDroidDetector(
                     permissionGranted = true,
                     permissionProtectionLevel = permissionState.protectionLevel,
                     collectionReady = true,
-                    availability = AnkiAvailability.Ready(AnkiCapabilities.NONE)
+                    availability = AnkiAvailability.Ready(AnkiCapabilities.NONE),
+                    failure = null
                 )
 
                 is AnkiDroidProbeOutcome.Failed -> result(

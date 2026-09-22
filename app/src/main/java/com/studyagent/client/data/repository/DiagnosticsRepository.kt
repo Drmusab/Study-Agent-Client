@@ -37,6 +37,7 @@ import com.studyagent.client.core.voice.stt.RecognitionHealthSnapshot
 import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.core.voice.tts.TtsHealthSnapshot
+import com.studyagent.client.data.anki.AnkiLibraryRepository
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthRepository
@@ -176,7 +177,8 @@ class DefaultDiagnosticsRepository(
     private val ankiDroidHealthRepository: AnkiDroidHealthRepository? = null,
     // ---- GATE 04: gateway + backend for capability matrix (§64/§65/§121) ----
     private val ankiDroidGateway: AnkiDroidGateway? = null,
-    private val ankiDroidBackend: AnkiDroidBackend? = null
+    private val ankiDroidBackend: AnkiDroidBackend? = null,
+    private val ankiLibraryRepository: AnkiLibraryRepository? = null
 ) : DiagnosticsRepository {
 
     override val logs: StateFlow<List<LogEntry>> = AppLogger.logsFlow
@@ -627,8 +629,9 @@ class DefaultDiagnosticsRepository(
 
         val capabilities = integrationState?.capabilities ?: detection?.capabilities
         if (capabilities != null) {
-            rows.add("--- Study-Agent Implementation (GATE 04) ---" to "")
-            rows.add("Deck Listing" to if (capabilities.deckListing) "Implemented" else "Pending GATE 05")
+            rows.add("--- Study-Agent Implementation ---" to "")
+            rows.add("Deck Listing" to if (capabilities.deckListing) "Implemented" else "Pending")
+            rows.add("Deck Counts" to if (capabilities.deckCounts) "Verified" else "Mapped, not verified")
             rows.add("Review" to if (capabilities.review) "Implemented" else "Pending GATE 06")
             rows.add("Rendered Cards" to if (capabilities.renderedCards) "Implemented" else "Pending GATE 08")
             rows.add("Review Intervals" to if (capabilities.reviewIntervals) "Implemented" else "Pending GATE 06")

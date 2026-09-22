@@ -50,6 +50,19 @@ sealed interface AnkiError {
         override val message: String = "The Anki backend could not answer the request."
     ) : AnkiError
 
+    /**
+     * GATE 05 amendment — the backend *answered*, but the answer does not satisfy the pinned
+     * contract (required identity column missing, every row unusable, wrong row shape). Distinct
+     * from [QueryFailure] (the query itself failed) because the remediation differs: a malformed
+     * response points at a contract/version mismatch, not at a transient fault. [detail] is a
+     * small stable token (for example `deck_identity_column_missing`), never provider content
+     * (GATE 05 §16/§38/§68).
+     */
+    data class MalformedResponse(
+        val detail: String? = null,
+        override val message: String = "The Anki backend returned data this app cannot interpret."
+    ) : AnkiError
+
     data class PermissionRequired(
         override val message: String = "Anki access permission has not been granted."
     ) : AnkiError

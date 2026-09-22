@@ -789,8 +789,8 @@ Required test matrix (§133):
 
 ## 23. Open items for later gates (post-GATE 04)
 
-- Real deck listing (GATE 05)
-- Deck counts
+- Real deck listing (GATE 05) — **delivered, see §25**
+- Deck counts — mapped, not device-verified (GATE 05)
 - Scheduled cards / ReviewInfo (GATE 06)
 - Card rendering / WebView (GATE 08)
 - Media read/write (GATE 09)
@@ -815,4 +815,20 @@ Same upstream sources as GATE 02, plus:
 | Backend returns Unsupported truthfully | `AnkiDroidBackend.kt` + `AnkiDroidBackendTest.kt` |
 
 **Not verified here**: real-device AnkiDroid provider interaction (no device/emulator environment in this gate).
+
+
+## 25. GATE 05 — Deck listing, hierarchy, counts, Library snapshot
+
+Full contract: `docs/GATE_05_ANKI_DECK.md`.
+
+Pipeline: public `decks` / `selected_deck` provider URIs → `AnkiDroidDeckGateway` →
+`AnkiDroidBackend.getDecks()` / `getSelectedDeck()` → `AnkiLibraryRepository` (`LibraryDataState`).
+
+Pinned columns: `deck_id`, `deck_name`, `deck_count` (`[learn, review, new]`, recursive due-today
+counts including subdecks), `deck_dyn`. Description and options JSON are not consumed.
+Unknown counts stay `null`. Parent ids are never invented. Virtual `::` groups are not Anki decks.
+Cache is in-memory, backend-scoped, not scheduling authority. Read-only.
+
+`AnkiCapabilities.deckListing = true` when Ready. `deckCounts` stays false until real-device
+verification. Review remains unimplemented.
 
