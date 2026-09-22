@@ -66,6 +66,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // GATE 02 §28/§30/§57 — the foreground trigger for AnkiDroid health.
+        //
+        // `onStart` covers app start, every return to the foreground (including "the user just
+        // opened AnkiDroid and finished its setup") and navigation back into the app. The
+        // repository debounces the call, so this is at most one provider probe per foreground
+        // event — never a polling loop.
+        //
+        // Wrapped for INV-ANKI-DET-09: availability of an optional integration must never be able
+        // to prevent Study-Agent from opening. The integration layer already cannot throw here;
+        // this is the last guard at the app boundary, and it reports instead of crashing.
+        try {
+            ServiceLocator.appContainer.ankiDroidHealthRepository.onAppForeground()
+        } catch (e: Throwable) {
+            AppLogger.w(tag, "AnkiDroid foreground health trigger failed: ${e.message}")
+        }
+    }
+
     private fun requestAppPermissions() {
         val permissionsToRequest = mutableListOf(
             Manifest.permission.RECORD_AUDIO

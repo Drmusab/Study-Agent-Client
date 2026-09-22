@@ -9,6 +9,7 @@ import com.studyagent.client.core.audio.toStudyAudioPreferences
 import com.studyagent.client.BuildConfig
 import com.studyagent.client.core.common.DefaultDispatcherProvider
 import com.studyagent.client.core.common.DispatcherProvider
+import com.studyagent.client.core.common.SystemAppClock
 import com.studyagent.client.core.diagnostics.AppDiagnostics
 import com.studyagent.client.core.diagnostics.AppPerformanceMetrics
 import com.studyagent.client.core.diagnostics.MemoryProbe
@@ -26,6 +27,15 @@ import com.studyagent.client.core.voice.tts.AudioFocusController
 import com.studyagent.client.core.voice.tts.DefaultSpeechOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.core.voice.tts.TtsEngineAdapter
+import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidLauncher
+import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidPermissionManager
+import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidProbe
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidEndpoint
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidEndpoints
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthRepository
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidLauncher
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidDetector
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidHealthCheck
 import com.studyagent.client.data.preferences.DefaultProfileRepository
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import com.studyagent.client.data.preferences.ProfileRepository
@@ -79,6 +89,19 @@ interface AppContainer {
 
     /** Persistence metadata (schema version, cache ages, write errors) for Diagnostics (§64). */
     val persistenceDiagnostics: PersistenceDiagnostics
+
+    /**
+     * GATE 02 — the one authoritative owner of AnkiDroid runtime availability (§26/§86/§87).
+     *
+     * Application-scoped and created once, like every other shared component here: screens
+     * observe it, they never build their own detector, and nothing about it is persisted
+     * (INV-ANKI-DET-05). It is deliberately independent of [connectionRepository] — a
+     * disconnected PC agent and a ready AnkiDroid are a valid combination (§38/§92).
+     */
+    val ankiDroidHealthRepository: AnkiDroidHealthRepository
+
+    /** "Open AnkiDroid" helper (§31). Distribution-neutral and crash-free when it is absent. */
+    val ankiDroidLauncher: AnkiDroidLauncher
 }
 
 /**
@@ -265,8 +288,49 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             dashboardRepository = dashboardRepository,
             studyControlRepository = studyControlRepository,
             persistenceDiagnostics = persistenceDiagnostics,
-            appInfo = { diagnosticsAppInfo() }
+            appInfo = { diagnosticsAppInfo() },
+            // GATE 02: the AnkiDroid integration section, owned by one application-scoped
+            // repository — Diagnostics renders its snapshot, it does not probe anything itself.
+            ankiDroidHealthRepository = ankiDroidHealthRepository
         )
+    }
+
+    /**
+     * Endpoints this build is allowed to look at.
+     *
+     * Official AnkiDroid always; the AnkiDroid *debug* endpoint (a different application id,
+     * authority and permission) only in debug builds, so a QA device can exercise the integration
+     * against a locally built AnkiDroid without any chance of a release build ever resolving it
+     * (GATE 02 §10).
+     */
+    private val ankiDroidEndpoints: List<AnkiDroidEndpoint> by lazy {
+        AnkiDroidEndpoints.forBuild(includeDebugEndpoints = BuildConfig.DEBUG)
+    }
+
+    /**
+     * Probe → detector → bounded check → one application-scoped repository.
+     *
+     * Nothing here performs I/O at construction time: the first provider call happens only when
+     * the activity reports a foreground event, so app start is never blocked on AnkiDroid
+     * (§89/§90).
+     */
+    override val ankiDroidHealthRepository: AnkiDroidHealthRepository by lazy {
+        AnkiDroidHealthRepository(
+            check = DefaultAnkiDroidHealthCheck(
+                detector = DefaultAnkiDroidDetector(
+                    probe = AndroidAnkiDroidProbe(context),
+                    permissions = AndroidAnkiDroidPermissionManager(context),
+                    endpoints = ankiDroidEndpoints
+                ),
+                clock = SystemAppClock
+            ),
+            scope = CoroutineScope(SupervisorJob() + dispatchers.default),
+            clock = SystemAppClock
+        )
+    }
+
+    override val ankiDroidLauncher: AnkiDroidLauncher by lazy {
+        AndroidAnkiDroidLauncher(context, ankiDroidEndpoints)
     }
 
     /** The machine-backed session repository, when that is the active implementation. */

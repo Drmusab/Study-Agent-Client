@@ -24,6 +24,22 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
+        AnkiDroid integration (GATE 02).
+
+        The AnkiDroid API contract declares this permission; the app requests it so the provider
+        will answer. It is a *third-party-declared* permission (AnkiDroid defines it with
+        protectionLevel="dangerous" and its provider enforces it dynamically), so Android resolves
+        the grant at install/update time and there is no runtime dialog to show — see
+        docs/ANKIDROID_INTEGRATION.md §3 and §6. No storage, contacts or broad-database permission
+        is requested: AnkiDroid access goes exclusively through this one permission and its
+        exported provider (§7 of the gate).
+
+        Verified against AnkiDroid v2.24.1: api module BuildConfig `READ_WRITE_PERMISSION`, and
+        `AnkiDroid/src/main/AndroidManifest.xml` `<permission android:name="${applicationId}.permission.READ_WRITE_DATABASE">`.
+    -->
+    <uses-permission android:name="com.ichi2.anki.permission.READ_WRITE_DATABASE" />
+
+    <!--
         Package visibility for the speech recognition service.
 
         targetSdk is 34, so package-visibility filtering applies: without this <queries>
@@ -33,11 +49,20 @@
 
         Only the service action is declared — no recognizer package is named, because the app
         must never depend on a specific vendor being installed (§84/§86).
+
+        The AnkiDroid package entry exists for the same reason: on API 30+ an app cannot see
+        another package (nor resolve its provider metadata) unless it is declared here. Queries
+        are the *minimal* mechanism — QUERY_ALL_PACKAGES is deliberately not requested, and the
+        entry names the one package the integration targets (matching the `<queries>` guidance in
+        AnkiDroid's own API documentation: "resolves 'Failed to find provider info for
+        com.ichi2.anki.flashcards'").
     -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+
+        <package android:name="com.ichi2.anki" />
     </queries>
 
     <application

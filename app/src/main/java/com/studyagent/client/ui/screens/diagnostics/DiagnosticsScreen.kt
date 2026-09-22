@@ -205,6 +205,10 @@ fun DiagnosticsScreen(
                 item(key = "control") { DiagnosticsRowsCard("Study Control", viewModel.controlRows()) }
                 item(key = "persistence") { DiagnosticsRowsCard("Persistence", viewModel.persistenceRows()) }
 
+                // AnkiDroid integration (GATE 02): technical facts only — no card content exists
+                // in this section, and none is needed (§68).
+                item(key = "ankidroid") { DiagnosticsRowsCard("AnkiDroid", viewModel.ankiDroidRows()) }
+
                 // Structured timeline: the ordering evidence for a race.
                 item(key = "timeline-header") {
                     SectionHeader(
