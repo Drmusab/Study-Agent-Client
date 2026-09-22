@@ -1,6 +1,8 @@
 package com.studyagent.client.di
 
 import android.content.Context
+import com.studyagent.client.core.anki.AnkiBackendRegistry
+import com.studyagent.client.core.anki.AnkiBackendSelector
 import com.studyagent.client.core.audio.AndroidAudioRouteManager
 import com.studyagent.client.core.audio.AudioRouteManager
 import com.studyagent.client.core.audio.DefaultStudyAudioModeResolver
@@ -102,6 +104,10 @@ interface AppContainer {
 
     /** "Open AnkiDroid" helper (§31). Distribution-neutral and crash-free when it is absent. */
     val ankiDroidLauncher: AnkiDroidLauncher
+
+    /** GATE 03 seam only; no incomplete backend participates in production selection. */
+    val ankiBackendRegistry: AnkiBackendRegistry
+    val ankiBackendSelector: AnkiBackendSelector
 }
 
 /**
@@ -111,6 +117,9 @@ interface AppContainer {
  * the foreground service observe the same engine, never create their own.
  */
 class DefaultAppContainer(private val context: Context) : AppContainer {
+    override val ankiBackendRegistry: AnkiBackendRegistry by lazy { AnkiBackendRegistry(emptyList()) }
+    override val ankiBackendSelector: AnkiBackendSelector by lazy { AnkiBackendSelector(ankiBackendRegistry) }
+
     override val dispatchers: DispatcherProvider by lazy { DefaultDispatcherProvider() }
 
     /** Heap + PSS. PSS is reported only when the platform actually provides it (§65). */

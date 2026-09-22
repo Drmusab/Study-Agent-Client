@@ -4,134 +4,84 @@ import com.studyagent.client.core.models.Rating
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * GATE 01 contract — the single Anki gateway boundary (§14-§15).
- *
- * Everything above this interface speaks Anki *domain*; everything below it
- * (AnkiDroid integration API, PC Study Agent protocol) is translated inside
- * the concrete backend. Study-Agent code never touches backend-native types
- * (INV-ANKI-06).
- *
- * Intentionally minimal: review, decks, card actions. Deliberately ABSENT and
- * owned elsewhere or delegated (§73): sync, template editing, import/export,
- * note browser editing, statistics. If this contract grows, the documented
- * decomposition is `AnkiReviewBackend` / `AnkiDeckSource` / `AnkiNoteEditor` /
- * `AnkiSearchSource` — not a god interface (§15).
+ * Backend-neutral Anki boundary. Implementations translate framework/protocol failures into
+ * typed outcomes, but propagate coroutine cancellation. No AI, voice or Study UI ownership.
+ * Scheduling belongs to Anki. No real production implementation is registered in GATE 03.
  */
 interface AnkiBackend {
-
     val id: AnkiBackendId
-
-    /** Unified availability; emits on every probe change (§17). */
     val availability: StateFlow<AnkiAvailability>
-
-    /** Last probed capability set; the whole session consults this snapshot (§16). */
     val capabilities: StateFlow<AnkiCapabilities>
 
-    /** Short-lived-cache eligible (§25). Deck identity is backend-qualified. */
-    suspend fun getDecks(): Result<List<AnkiDeck>>
-
-    suspend fun getDeckSummary(deck: AnkiDeckRef): Result<AnkiDeckSummary>
-
-    /**
-     * Open a review stream for [BeginReviewRequest.context]. The context's
-     * backend/collection/deck triple is the write-lock for the session
-     * (INV-ANKI-01); the backend must refuse a request whose context names a
-     * different backend than itself.
-     */
-    suspend fun beginReview(request: BeginReviewRequest): Result<AnkiReviewSession>
+    suspend fun refreshAvailability()
+    suspend fun getDecks(): AnkiResult<List<AnkiDeck>>
+    suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession>
 
     /**
-     * The next due turn, or `null` success when the queue is exhausted.
-     * Cards come from the scheduler — never from any Study-Agent cache
-     * (INV-ANKI-04, INV-ANKI-09). Not called while a commit for the previous
-     * turn is undecided (§27 transaction boundary).
+     * A read retry returns the same uncommitted turn, not a new presentation. An ambiguous
+     * or rejected commit blocks progression with a typed failure until recovery decides otherwise.
      */
-    suspend fun nextCard(session: AnkiReviewSession): Result<AnkiReviewTurn?>
+    suspend fun nextCard(session: AnkiReviewSession): NextCardResult
 
     /**
-     * The only scheduling mutation Study-Agent ever requests (INV-ANKI-04).
-     * [CommitRatingRequest.commitId] is the exactly-once key: re-sending the
-     * same commit id must produce at most one scheduler mutation (INV-ANKI-02).
-     * The result distinguishes COMMITTED / REJECTED / FAILED_SAFE_TO_RETRY /
-     * AMBIGUOUS (§28); AMBIGUOUS blocks session progression until reconciled
-     * (INV-ANKI-08).
+     * Same commit ID and payload must not mutate twice; different payload is a conflict.
+     * Ambiguous writes block progression and blind resubmission until reconciled.
+     * This interface supplies correlation, NOT a claim of distributed exactly-once delivery.
      */
-    suspend fun commitRating(request: CommitRatingRequest): Result<CommitRatingResult>
-
-    suspend fun bury(request: CardActionRequest): Result<CardActionResult>
-
-    /** Named `suspendCard` because `suspend` is a Kotlin keyword. */
-    suspend fun suspendCard(request: CardActionRequest): Result<CardActionResult>
+    suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult
 }
 
-/** `context.deckRef` is the review target; [limit] bounds the stream when set. */
-data class BeginReviewRequest(
-    val context: AnkiSessionContext,
-    val limit: Int? = null
-)
+/** Scheduled review only. Null deck means backend-defined collection-wide review. */
+data class BeginReviewRequest(val context: AnkiSessionContext, val limit: Int? = null) {
+    init { require(limit == null || limit > 0) }
+}
 
-/**
- * Handle for one open review stream. [context] is echoed verbatim so callers
- * can verify the session's ownership lock was honored; [backendSessionRef] is
- * opaque per backend (protocol session id, provider session token...).
- */
-data class AnkiReviewSession(
-    val context: AnkiSessionContext,
-    val backendSessionRef: String? = null
-)
+/** Opaque backend stream handle, separate from the existing user study-session ID. */
+data class AnkiReviewSession(val context: AnkiSessionContext, val backendSessionRef: String) {
+    init { require(backendSessionRef.isNotBlank()) }
+}
 
-/** One scheduler-served appearance of one card (turn ≠ card, INV-ANKI-03). */
+/** Immutable binding of a presentation to the user session and backend; card fields stay nested. */
 data class AnkiReviewTurn(
     val turnId: ReviewTurnId,
+    val studySessionId: String,
     val card: AnkiRenderedCard,
     val position: Int? = null,
     val remaining: Int? = null
-)
-
-/** §28 — the four deterministic outcomes of [AnkiBackend.commitRating]. */
-enum class CommitStatus {
-    /** Scheduler mutation applied (and acknowledged). */
-    COMMITTED,
-
-    /** Deterministically refused before any mutation. */
-    REJECTED,
-
-    /** Mutation provably never happened; the same commit id may be retried. */
-    FAILED_SAFE_TO_RETRY,
-
-    /** Outcome unknown (e.g. no ACK after the write was issued). Stop and reconcile. */
-    AMBIGUOUS
+) {
+    init {
+        require(studySessionId.isNotBlank())
+        require(position == null || position > 0)
+        require(remaining == null || remaining >= 0)
+    }
+    val backendId: AnkiBackendId get() = card.ref.backendId
+    val commitId: ReviewCommitId get() = ReviewCommitId(backendId, studySessionId, turnId)
 }
 
-/**
- * The rating the *user* selected for this turn — never the AI suggestion
- * (INV-ANKI-05, INV-ANKI-13). [rating] uses the existing domain [Rating]
- * (AGAIN/HARD/GOOD/EASY), which backends map to their ease values internally.
- */
+/** Existing Rating has exactly AGAIN/HARD/GOOD/EASY semantics; no parallel AnkiRating enum. */
 data class CommitRatingRequest(
     val commitId: ReviewCommitId,
     val card: AnkiCardRef,
     val rating: Rating,
     val ratedAtEpochMs: Long,
-    /** How long the answer phase of this turn took, when measured. */
     val answerDurationMs: Long? = null
-)
+) {
+    init {
+        require(commitId.backendId == card.backendId)
+        require(ratedAtEpochMs >= 0)
+        require(answerDurationMs == null || answerDurationMs >= 0)
+    }
+}
 
-data class CommitRatingResult(
-    val status: CommitStatus,
-    val error: AnkiError? = null,
-    /** e.g. the new interval label, when the backend reports one. */
-    val intervalLabel: String? = null
-)
-
-/** Bury/suspend share a request shape; commit correlation is option-scoped. */
+/** Future typed bury/suspend/flag methods may share identity, not string commands. */
 data class CardActionRequest(
     val card: AnkiCardRef,
     val session: AnkiReviewSession,
-    val commitId: ReviewCommitId? = null
-)
-
-data class CardActionResult(
-    val status: CommitStatus,
-    val error: AnkiError? = null
-)
+    val turnId: ReviewTurnId? = null
+) {
+    init {
+        require(card.backendId == session.context.backendId)
+        val collectionKey = session.context.collection?.collectionKey ?: session.context.deckRef?.collectionKey
+        require(collectionKey == null || card.collectionKey == null || collectionKey == card.collectionKey)
+    }
+}

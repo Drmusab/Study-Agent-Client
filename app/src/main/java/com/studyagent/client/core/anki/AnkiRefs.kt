@@ -1,93 +1,70 @@
 package com.studyagent.client.core.anki
 
-/**
- * GATE 01 contract — backend-qualified identity references.
- *
- * Rules these types encode (see `docs/ANKI_INTEGRATION_ARCHITECTURE.md`):
- *
- *  - Every reference carries its [AnkiBackendId]; raw ids are never compared
- *    across backends (INV-ANKI-06).
- *  - Deck identity is a backend-scoped id, never the display name (§49: names
- *    change, duplicate across collections, and nest as paths).
- *  - Notes and cards are distinct (§50): one note produces many cards.
- *  - A card ref may legitimately lack `cardId` (some backends can only address
- *    card-by-note+ord at first); refs never fabricate identifiers — optional
- *    fields stay null when the backend cannot supply them (§9).
- *  - `collectionKey` is an opaque, backend-issued collection discriminator;
- *    null when the backend cannot prove collection identity yet (§24).
- */
+import kotlinx.serialization.Serializable
 
-/** Opaque identity of one Anki collection as seen by one backend. */
-data class AnkiCollectionIdentity(
-    val backendId: AnkiBackendId,
-    /** Backend-issued opaque token (provider collection id, profile token...); never parsed. */
-    val collectionKey: String?
-)
-
-/** Backend-qualified deck identity. Display names live on `AnkiDeck`, not here. */
-data class AnkiDeckRef(
-    val backendId: AnkiBackendId,
-    /** Backend-scoped stable deck id (AnkiDroid deck id, or backend-defined key). */
-    val deckId: String
-) {
-    init {
-        require(deckId.isNotBlank()) { "AnkiDeckRef.deckId must not be blank" }
-    }
-
-    /** Human/audit key — safe for diagnostics, contains no content. */
-    val stableKey: String get() = "${backendId.stableId}|deck:$deckId"
+/** Backend-issued collection discriminator. Null means unknown, never an invented default. */
+@Serializable
+data class AnkiCollectionIdentity(val backendId: AnkiBackendId, val collectionKey: String?) {
+    init { requireOptionalId(collectionKey) }
 }
 
-/** Backend-qualified note identity. A note generates one or more cards. */
+/** Display name/path is never identity. Known collection identity participates in equality. */
+@Serializable
+data class AnkiDeckRef(
+    val backendId: AnkiBackendId,
+    val deckId: String,
+    val collectionKey: String? = null
+) {
+    init {
+        require(deckId.isNotBlank())
+        requireOptionalId(collectionKey)
+    }
+    val stableKey: String get() = identityKey(backendId.stableId, collectionKey, "deck", deckId)
+}
+
+/** A note generates cards, but is never itself a card reference. */
+@Serializable
 data class AnkiNoteRef(
     val backendId: AnkiBackendId,
     val noteId: String,
     val collectionKey: String? = null
 ) {
     init {
-        require(noteId.isNotBlank()) { "AnkiNoteRef.noteId must not be blank" }
+        require(noteId.isNotBlank())
+        requireOptionalId(collectionKey)
     }
-
-    val stableKey: String get() = "${backendId.stableId}|${collectionKey ?: "?"}|note:$noteId"
+    val stableKey: String get() = identityKey(backendId.stableId, collectionKey, "note", noteId)
 
     fun toCardRef(cardOrd: Int?, cardId: String? = null): AnkiCardRef =
-        AnkiCardRef(
-            backendId = backendId,
-            cardId = cardId,
-            noteId = noteId,
-            cardOrd = cardOrd,
-            collectionKey = collectionKey
-        )
+        AnkiCardRef(backendId, cardId, noteId, cardOrd, collectionKey)
 }
 
 /**
- * Backend-qualified card identity (§9).
- *
- * Either [cardId], or the pair ([noteId] + [cardOrd]), must be present — a ref
- * that cannot address a card at all is a construction error, not a runtime
- * surprise. Cross-backend equality is meaningless by construction: identical
- * `cardId`s on different backends never compare equal because [backendId] is
- * part of the value.
+ * Either cardId or noteId + ordinal addresses the card. Structural equality deliberately
+ * includes ALL fields, including collection and optional note identity. Adapters must normalize
+ * refs consistently; enriching a ref is not proof it denotes the same persisted identity.
+ * Unknown collection is not a wildcard. A reference is never a review-turn identifier.
  */
+@Serializable
 data class AnkiCardRef(
     val backendId: AnkiBackendId,
-    val cardId: String?,
-    val noteId: String?,
-    val cardOrd: Int?,
-    val collectionKey: String?
+    val cardId: String? = null,
+    val noteId: String? = null,
+    val cardOrd: Int? = null,
+    val collectionKey: String? = null
 ) {
     init {
+        requireOptionalId(cardId)
+        requireOptionalId(noteId)
+        requireOptionalId(collectionKey)
+        require(cardOrd == null || cardOrd >= 0)
+        require(cardOrd == null || noteId != null) { "Ordinal requires a note identity" }
         require(cardId != null || (noteId != null && cardOrd != null)) {
-            "AnkiCardRef requires cardId, or noteId + cardOrd (backend=$backendId)"
+            "Card identity requires cardId or noteId + ordinal"
         }
     }
-
-    /** Content-free key for ledgers, logging and equality across layers. */
     val stableKey: String
-        get() {
-            val cardPart = cardId?.let { "card:$it" } ?: "note:$noteId#ord=$cardOrd"
-            return "${backendId.stableId}|${collectionKey ?: "?"}|$cardPart"
-        }
+        get() = identityKey(backendId.stableId, collectionKey, "card", cardId, noteId, cardOrd?.toString())
 
     fun withCollectionKey(key: String?): AnkiCardRef = copy(collectionKey = key)
 }

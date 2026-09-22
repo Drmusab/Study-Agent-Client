@@ -212,7 +212,7 @@ exist as code in `core/anki/` (this gate).
 ### 5.1 Backend identity — `AnkiBackendId`, `AnkiBackendMode`
 
 ```kotlin
-enum class AnkiBackendId      // ANKIDROID_LOCAL, PC_AGENT — concrete, resolved
+sealed interface AnkiBackendId // AnkiDroidLocal, PcAgent(profileId), Fake(id) — resolved
 enum class AnkiBackendMode    // AUTO, ANKIDROID_LOCAL, PC_AGENT — user preference
 ```
 
@@ -226,10 +226,10 @@ Ambiguous bare labels ("Local", "Remote", "Server") are forbidden in new code.
 data class AnkiSessionContext(
     val backendId: AnkiBackendId,          // resolved effective backend (never AUTO)
     val collection: AnkiCollectionIdentity?,
-    val deckRef: AnkiDeckRef,
+    val deckRef: AnkiDeckRef?,
     val startedAtEpochMs: Long,
     val capabilities: AnkiCapabilities,
-    val studySessionId: String?
+    val studySessionId: String
 )
 ```
 
@@ -240,7 +240,7 @@ for the session (§41, INV-01/07). Every Anki operation of the session carries i
 
 ```kotlin
 data class AnkiCollectionIdentity(val backendId, val collectionKey: String?)   // opaque token
-data class AnkiDeckRef(val backendId, val deckId)        // never the display name
+data class AnkiDeckRef(val backendId, val deckId, val collectionKey: String?) // not name
 data class AnkiNoteRef(val backendId, val noteId, val collectionKey: String?)
 data class AnkiCardRef(val backendId, val cardId: String?, val noteId: String?,
                        val cardOrd: Int?, val collectionKey: String?)
@@ -275,7 +275,8 @@ data class ReviewCommitId(val backendId, val studySessionId, val turnId: ReviewT
 - `ReviewTurnId` wraps the existing machine-level turn identity
   (`CardTurn.turnId`: server `review_turn_id` when provided, else
   `epoch:cardId:generation`). The Anki layer adds the *commit* concept on top.
-- `ReviewCommitId.stableKey` = `backend | study session | review turn`. It is
+- `ReviewCommitId.stableKey` length-prefixes `backend + study session + review turn`
+  (delimiter-safe, not a literal pipe-joined string). It is
   **never** derived from the card id alone (a card may be reviewed many times).
 
 ---
@@ -297,7 +298,8 @@ Implemented in `core/anki/AnkiBackendSelector.kt` as a pure, tested function:
 ```
 AUTO:
   ANKIDROID_LOCAL implemented AND review-ready?  ──yes──► ANKIDROID_LOCAL
-  PC_AGENT implemented AND review-ready?         ──yes──► PC_AGENT
+  Exactly one PC profile implemented AND review-ready? ──yes──► PcAgent(profileId)
+  Multiple ready PC profiles? ──yes──► Ambiguous (explicit resolution required)
   otherwise ──► Unavailable (no session on Anki data)
 
 Explicit mode: pinned backend implemented AND review-ready ──► Resolved
@@ -309,9 +311,9 @@ the fewest moving parts (no network, no agent, no AnkiConnect), and keeps the
 ownership boundary inside one process. The PC path remains preferred *explicitly*
 or whenever local Anki cannot review. Two constraints temper the order:
 
-1. Only backends **implemented in this build** are candidates — so today AUTO
-   still resolves `PC_AGENT` (backward compatibility), and the day the
-   AnkiDroid backend lands, AUTO starts preferring it without a settings change.
+1. Only backends **implemented in this build** are candidates. GATE 03's registry
+   is empty: the legacy PC flow bypasses this new seam and keeps working unchanged.
+   Neither a detector nor a not-yet-written PC adapter is falsely registered as a backend.
 2. `review-ready` requires `AnkiAvailability.Ready` **and**
    `capabilities.review == true` — a deck-browsable-but-not-reviewable backend
    must not receive a rating-writing session.
@@ -363,7 +365,7 @@ never re-resolved by availability changes, provider changes or connection flaps
 |---|---|---|---|
 | AI **suggested** rating | `SuggestedRating` = `Evaluation.suggestedRating` (existing) | AI evaluator | LLM/rules |
 | User **selected** rating | `SelectedRating` (`CommitRatingRequest.rating`) | User | tap/spoken/click |
-| Anki **committed** rating | `CommittedRating` = scheduler accept (CommitStatus.COMMITTED) | Anki backend | scheduler |
+| Anki **committed** rating | `CommittedRating` = scheduler accept (CommitRatingResult.Committed) | Anki backend | scheduler |
 
 - `AI suggested GOOD` must not become `Anki commit GOOD` by itself (INV-05/13).
 - A future trusted auto-rating mode may exist ONLY as an explicit user setting;
@@ -389,14 +391,14 @@ Card loaded → turn starts → user interacts → rating chosen
 **Transaction boundary:** the next card is never requested/activated before the
 rating commit has a *deterministic* outcome.
 
-**Commit outcomes (`CommitStatus`, §28):**
+**Commit outcomes (`CommitRatingResult`, §28; sealed variants since GATE 03):**
 
 | Status | Meaning | Session behavior |
 |---|---|---|
-| COMMITTED | Mutation applied + acknowledged | Advance to next turn |
-| REJECTED | Deterministically refused pre-mutation | Surface; do NOT auto-retry |
-| FAILED_SAFE_TO_RETRY | Mutation provably never happened | Retry with THE SAME commit id |
-| AMBIGUOUS | Outcome unknown (e.g. write issued, no ACK) | STOP progression; reconcile before any next card (INV-08) |
+| Committed | Mutation applied + acknowledged | Advance to next turn |
+| Rejected | Deterministically refused pre-mutation | Surface; do NOT auto-retry |
+| RetryableFailure | Mutation provably never happened | Retry with THE SAME commit id |
+| Ambiguous | Outcome unknown (e.g. write issued, no ACK) | STOP progression; reconcile before any next card (INV-08) |
 
 `AMBIGUOUS` is the load-bearing case:
 
@@ -421,7 +423,7 @@ mutation. Mechanism, per backend (implemented in later gates):
 ## 8. The `AnkiBackend` contract (§14-§17)
 
 Final contract — designed from THIS repository's needs (`Rating` reuse, turn
-identity reuse, `Result`-style outcomes). See code for the normative shape:
+identity reuse, typed `AnkiResult` / next-card / commit outcomes). See code for the normative shape:
 `core/anki/AnkiBackend.kt`.
 
 ```kotlin
@@ -430,13 +432,11 @@ interface AnkiBackend {
     val availability: StateFlow<AnkiAvailability>
     val capabilities: StateFlow<AnkiCapabilities>
 
-    suspend fun getDecks(): Result<List<AnkiDeck>>
-    suspend fun getDeckSummary(deck: AnkiDeckRef): Result<AnkiDeckSummary>
-    suspend fun beginReview(request: BeginReviewRequest): Result<AnkiReviewSession>
-    suspend fun nextCard(session: AnkiReviewSession): Result<AnkiReviewTurn?>
-    suspend fun commitRating(request: CommitRatingRequest): Result<CommitRatingResult>
-    suspend fun bury(request: CardActionRequest): Result<CardActionResult>
-    suspend fun suspendCard(request: CardActionRequest): Result<CardActionResult>
+    suspend fun refreshAvailability()
+    suspend fun getDecks(): AnkiResult<List<AnkiDeck>>
+    suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession>
+    suspend fun nextCard(session: AnkiReviewSession): NextCardResult
+    suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult
 }
 ```
 
@@ -462,7 +462,7 @@ growth demands it: `AnkiReviewBackend`, `AnkiDeckSource`, `AnkiNoteEditor`,
 
 ### 8.3 Capability model (§16, §72)
 
-`AnkiCapabilities(review, deckListing, renderedCards, media, flags, bury,
+`AnkiCapabilities(review, deckListing, renderedCards, reviewIntervals, media, flags, bury,
 suspendCards, editNotes, createNotes, search)` — flat booleans, default
 `false` (the safe answer). UI derives affordances **only** from capabilities,
 never from the backend's name. Fallback semantics: review without
@@ -483,11 +483,13 @@ the single gate for session starts.
 ### 8.5 Domain errors (§36-§37)
 
 `AnkiError`: `BackendUnavailable`, `PermissionRequired`, `CollectionUnavailable`,
-`DeckNotFound`, `CardNotFound`, `CommitConflict`, `UnsupportedAction`,
-`MediaUnavailable`, `Unknown`. UI never parses SQLite/Cursor/HTTP text.
-Recovery classification is per failure (see Failure Ownership Matrix §20.3);
-`asCommitFailureClass()` gives the conservative commit mapping
-(`Unknown ⇒ AMBIGUOUS` — never silently retried).
+`DeckNotFound`, `CardNotFound`, `NoteNotFound`, `SessionInvalid`, `StaleTurn`,
+`CommitConflict`, `UnsupportedAction`, `MediaUnavailable`, `Unknown`, plus GATE 02's
+`ProviderUnavailable`, `UnsupportedApi` and `QueryFailure`. UI never parses backend error text.
+GATE 03 removes category-only `asCommitFailureClass()` / `CommitFailureClass`:
+**an error category cannot prove that a write was not applied**. Adapters return a sealed
+commit outcome based on evidence at the mutation boundary; any uncertain post-dispatch
+outcome stays `Ambiguous`, even if the accompanying error is `BackendUnavailable`.
 
 ---
 
@@ -503,7 +505,8 @@ data class AnkiRenderedCard(
     val pureAnswerText: String?,                              // EVALUATION
     val media: List<AnkiMediaRef>,
     val scheduling: AnkiSchedulingInfo?,                      // display-hints only
-    val metadata: AnkiCardMetadata
+    val metadata: AnkiCardMetadata,
+    val noteRef: AnkiNoteRef?, val deckRef: AnkiDeckRef?
 )
 ```
 
@@ -713,11 +716,12 @@ core/anki/                 ★ this gate — pure domain, JVM-only, backend-neut
 ├── AnkiRefs.kt            (collection/deck/note/card refs)
 ├── AnkiCapabilities.kt
 ├── AnkiAvailability.kt
-├── AnkiErrors.kt          (domain errors + commit failure classes)
+├── AnkiErrors.kt          (domain error categories, no Throwable)
 ├── AnkiSessionContext.kt  (context + ReviewTurnId + ReviewCommitId)
-├── AnkiBackend.kt         (gateway interface + request/result types)
+├── AnkiBackend.kt         (gateway interface, requests, session and turn)
+├── AnkiResults.kt         (typed operation, next-card and commit outcomes)
 ├── AnkiModels.kt          (deck/rendered card/media/scheduling models)
-└── AnkiBackendSelector.kt (resolution policy — the one behavior this gate ships)
+└── AnkiBackendSelector.kt (immutable registry + pure selection policy)
 
 data/anki/ankidroid/       ★ GATE 02 — the only package that may name AnkiDroid
 ├── AnkiDroidApiContract.kt        (authority/permission/spec constants + provenance, endpoints)
@@ -744,10 +748,10 @@ Never: `UI → ContentResolver`, never `reducer → FlashCardsContract`. (INV-06
 
 ### 15.3 DI strategy (§65)
 
-No new framework. The existing hand-wired `AppContainer` gains, in later gates:
-an `AnkiBackendRegistry` (implemented backends + their availability/capability
-flows) and the selector; current PC behavior is registered as `PcAnkiBackend`.
-Registry, not fork-on-write wiring.
+No new framework. GATE 03 adds a lazy, application-scoped `AnkiBackendRegistry`
+and `AnkiBackendSelector` to the existing `AppContainer`. The registry is intentionally
+empty until concrete production implementations exist. The PC flow is **not** migrated
+or gated by these objects. The fake is under `src/test` only, never production DI.
 
 ### 15.4 Scope discipline (§76-§77)
 
@@ -1065,3 +1069,222 @@ requiring no AnkiDroid installation (GATE 02 §106/§107/§108).
 *Normative cross-references: ADRs under `docs/adr/`; code contract under
 `app/src/main/java/com/studyagent/client/core/anki/`; contract tests under
 `app/src/test/java/com/studyagent/client/anki/`.*
+
+## 26. Anki Domain Model — GATE 03
+
+This section and the current `core/anki` source supersede GATE 01's preliminary model
+signatures. GATE 03 is a seam, **not** a production PC migration or an AnkiDroid data gateway.
+Validation status and file inventory: [GATE_03_ANKI_DOMAIN.md](GATE_03_ANKI_DOMAIN.md).
+
+### 26.1 Audit and consolidation
+
+- GATE 01 already supplied nine domain files: identity, refs, context, capabilities,
+  availability, errors, models, interface and selector. They are amended **in place**.
+  `AnkiCollectionIdentity` is retained; no parallel `AnkiCollectionRef` is introduced.
+- GATE 02 supplied detector, health check/repository, platform probe, permission/launcher
+  foundations, and availability/error extensions. These remain the operational health owner.
+  No new `AnkiDroidAvailability` hierarchy or provider query is added.
+- `StudyCard.id` is a raw string card ID; `question` is plain text; `deckName` is display
+  only. Answer arrives separately (`ServerMessage.Answer` / `StudyEvent.ServerAnswerReceived`);
+  evaluation belongs to `Evaluation` / `CardTurn`, not card content. `StudyState` is UI/interaction.
+- `StudySession.sessionId`, snapshots and protocol session IDs are strings. We reuse this
+  identifier in `AnkiSessionContext.studySessionId` and `AnkiReviewTurn.studySessionId`;
+  there is no second `AnkiSessionId` or invented `StudySessionId` wrapper.
+- `CardTurn.turnId` already separates a presentation from card identity (server
+  `review_turn_id`, otherwise epoch/card/generation). `ReviewTurnId` wraps that concept
+  at the new boundary. Protocol `message_id` correlates a transport request; it does not
+  replace the logical commit ID across retries.
+- Existing `Rating` already means AGAIN/HARD/GOOD/EASY. Reuse it, including in scheduling
+  preview maps. Backend numeric ease mapping stays inside the future adapter.
+- `StudySessionRepository` / `StudySessionMachine` still talk to the existing PC connection.
+  No result or identity signature changed in that production path.
+- Preliminary `Result<T>`, nullable next-card success, `CommitStatus`, `CommitFailureClass`,
+  `CardActionResult`, `AnkiDeckSummary`, summary/bury/suspend methods are consolidated or
+  removed, not kept as parallel APIs. There were no production consumers. Counts now
+  live in one optional `AnkiDeckCounts`, avoiding fictional zero totals.
+
+### 26.2 Relationships and identity
+
+```text
+Study / future session coordinator
+    ↓ depends on
+AnkiBackend (core/anki) ← implemented by backend adapters
+    │
+    ▼
+AnkiReviewSession — opaque stream handle + immutable AnkiSessionContext
+    │
+    ▼
+AnkiReviewTurn — ReviewTurnId + existing studySessionId + backend derived from card
+    │
+    ▼
+AnkiRenderedCard
+    ├── AnkiCardRef
+    ├── AnkiNoteRef?
+    ├── AnkiDeckRef?
+    ├── text / HTML / media references
+    └── scheduling display hints (not scheduler state)
+```
+
+**Identity rules:**
+
+1. Backend is `AnkiDroidLocal`, `PcAgent(profileId)` or test `Fake(id)`; a profile ID is
+   the configured logical profile identifier, not a hostname or fabricated default.
+2. Every deck/note/card ref is backend-qualified and optionally collection-qualified.
+   Collection keys must be backend-proven; null is unknown, never a wildcard or proof
+   that two sessions see the same live collection. Deck names and parsed `::` paths
+   are display data, not identifiers.
+3. Card ≠ note ≠ review turn. A usable card ref supplies a card ID **or** note + ordinal.
+   Blank IDs and negative ordinals are rejected, including during deserialization.
+4. Equality is structural over **all** ref fields, including collection, note and ordinal
+   even when card ID exists. Adapters must emit a consistently normalized ref. Enriching
+   a ref changes its value; matching only card ID is not the deduplication rule.
+5. Stable keys length-prefix all components and distinguish null from literal `?`.
+   Thus delimiters inside legitimate IDs cannot collide, and key equality agrees with
+   structural equality. Never parse these diagnostic/idempotency keys for scheduling.
+6. A turn stores no duplicate card fields. Retry reads return the same unresolved turn;
+   a later appearance of the same card creates a new turn. Context backend, deck and
+   collection qualifiers must agree. A copied context is a **new** value, not rebinding
+   an existing handle (backends reject forged or changed handles).
+
+### 26.3 Content and persistence boundary
+
+`AnkiDeck` has a stable ref, full name, derived path, optional parent, optional filtered
+status and optional backend-reported counts. Unknown counts remain null; totals are
+never guessed or used to build a review queue.
+
+`answerText` is the clean display/plain-text view; `pureAnswerText` is an optional
+backend-supplied evaluator reference, not automatically reconstructed by the domain.
+Question/answer HTML remain optional; medical speech normalization stays in TTS.
+Tags use `Set<String>`. Media uses content URI strings, opaque stream IDs or remote URL
+strings, never Android `Uri`, files or media bytes. Domain collections are read-only
+snapshots by contract; adapters must not retain mutable backing stores. The fake detaches
+all caller-owned nested content collections at construction.
+
+`AnkiSchedulingInfo.nextReviewTimes` maps existing `Rating` to backend display labels.
+FSRS stability/difficulty/retention are informational only. No scheduler queue enums,
+flag palette, custom-study modes or speculative reconciliation API is added in this gate.
+
+Only backend IDs/mode, refs, `ReviewTurnId` and `ReviewCommitId` are serializable now.
+No persistence store is introduced; full rendered cards/HTML, live availability and
+backend objects are not serialized. Future recovery stores logical identity and commit
+state, recreates the same backend by registry ID, and revalidates the collection and
+turn before writing. A missing backend must never trigger re-resolution to another one.
+The whole context is intentionally not a persistence schema yet: capabilities are
+re-probed and recovery policy must define which original facts remain authoritative.
+
+### 26.4 Typed outcomes and exactly-once foundation
+
+| Type/variant | Meaning | Required caller behavior |
+|---|---|---|
+| `AnkiResult.Success<T>` | Read/open succeeded | Consume value |
+| `AnkiResult.Failure` | Stable domain error | Handle category, not exception text |
+| `NextCardResult.Card` | One bound presentation | Correlate callbacks by turn |
+| `NextCardResult.Finished` | Scheduler queue complete | Finish explicitly |
+| `NextCardResult.BackendUnavailable` | Backend unusable now | Keep binding; pause/recover |
+| `NextCardResult.Failure` | Other typed next-card error | Surface/recover, not exhaustion |
+| `CommitRatingResult.Committed` | Mutation acknowledged | May advance |
+| `CommitRatingResult.Rejected` | Deterministically refused before mutation | Surface/reconcile; no automatic retry |
+| `CommitRatingResult.RetryableFailure` | Proven not applied | Retry identical ID **and payload** |
+| `CommitRatingResult.Ambiguous` | Applied state unknown | Block advance and blind retry |
+
+Commit identity is `(backendId, studySessionId, turnId)`. Request adds the card ref,
+user rating, rated-at epoch milliseconds and optional answer duration; no HTML. Same ID
+with changed rating/card/timing payload is a conflict once accepted for submission.
+An exact duplicate can be acknowledged from a ledger without a second mutation, even
+if its ACK retry arrives after the next card is active. An unknown/stale turn is rejected.
+
+**Error categories are not write evidence.** Even `BackendUnavailable` may accompany
+an ambiguous write after a lost response. Category-only failure classification was
+removed. Coroutine cancellation must propagate; a real adapter must durably account
+for the dispatched-write/cancellation window before claiming safe retry. This gate's
+identity and result types make that work possible; they do **not** themselves guarantee
+distributed exactly-once behavior. Durable ledgers, backend idempotency support and
+reconciliation/query-commit-status policy belong to later scheduler gates.
+
+### 26.5 Selection, capability and ownership policy
+
+- `AUTO`: implemented, Ready + review-capable local first; otherwise exactly one ready
+  PC profile; more than one ready PC profile → `Ambiguous`; none → `Unavailable`.
+- `ANKIDROID_LOCAL`: only local; unavailable or unimplemented → typed `Unavailable`,
+  preserving actionable permission/collection faults where available; never PC fallback.
+- `PC_AGENT`: only PC profiles; one ready → selected, multiple ready → `Ambiguous`,
+  none ready → `Unavailable`. A future profile picker must resolve ambiguity explicitly.
+- Fake identities never participate in product preference resolution. Tests can inject
+  a fake under a concrete logical ID to exercise policy without framework dependencies.
+- Preferred mode is never overwritten by effective ID. Selector consumes registry
+  availability/capabilities only, does no I/O and never probes Android or the PC connection.
+  Its immutable registry can contain several implementations simultaneously.
+- Availability controls current usability; capabilities control individual features.
+  Optional edit/search/bury support is not required for review. Selector requires both
+  Ready's capability projection and current capability flow to permit review; begin must
+  revalidate because state can change after selection.
+- Health (operational probe) stays backend-specific. Availability (usable now) and
+  capabilities (supported features) remain separate concepts. GATE 02's Ready does not
+  imply that an AnkiDroid review implementation exists.
+- The **future session coordinator/repository**, not UI or settings, owns the active
+  context and backend handle. It calls selection before binding, never per card. An
+  availability transition cannot mutate the context or switch the writer.
+
+`AppContainer` exposes a lazy empty registry + selector today. It registers neither a
+fake nor a placeholder AnkiDroid/PC implementation and does not use selection to gate
+legacy PC study. This avoids a false claim of usable capabilities.
+
+### 26.6 Fake and reusable backend contracts
+
+`src/test/.../anki/fake/FakeAnkiBackend` is excluded from release and production UI.
+Tests configure decks, ordered cards (including repeated cards), availability,
+capabilities, typed read/open/next failures, scripted commit outcomes, bounded ledger
+capacity and cancellable coroutine latency. Instance prefix is injectable for repeatable
+IDs; by default a UUID separates instances. Queue order is never random.
+
+All mutation uses a coroutine `Mutex`; delays occur before locking, then operations
+recheck current ownership/availability. Duplicate commits return the remembered outcome;
+changed payloads conflict. Both applied-and-lost-ACK and unapplied-but-ambiguous scenarios
+are configurable. Ambiguity blocks progression and cannot be cleared by a blind retry.
+Records expose exact request/result, attempts and simulated mutation count. A full ledger
+fails closed instead of evicting dedup keys. `reset()` clears history/scripts/handles,
+invalidates old turns and retains monotonic identity generation. Queue/card fixtures
+are finite and history cannot grow without bound.
+
+`AnkiBackendContract` is a reusable abstract JUnit suite with a seeded ready [A, B, A]
+fixture. It verifies binding, deterministic progression, repeat identities, exact retry,
+changed-payload conflict, typed invalid/stale errors and concurrent duplicate behavior.
+`FakeAnkiBackendContractTest` supplies the first fixture. Real adapters must supply
+isolated scheduler fixtures and separately verify actual provider/network mutations.
+No ContentResolver or MockWebServer belongs in the generic contract suite.
+
+### 26.7 Migration roadmap (not implemented here)
+
+```text
+Current PC server card/answer + profile + CardTurn / snapshots
+    → future PcAnkiBackend mapper (data/anki/remote)
+    → AnkiRenderedCard + AnkiReviewTurn
+
+AnkiDroid public provider
+    → future AnkiDroid gateway / mapper (data/anki/ankidroid)
+    → AnkiRenderedCard + AnkiReviewTurn
+```
+
+First map reads and truthful capability/availability projections. The PC adapter must
+use a real configured profile ID, request stable deck/card identity rather than equating
+deck name to ID, preserve absent collection/card IDs, and correlate server turns/ACKs.
+A staged `LegacyPcAnkiBackendAdapter` may bridge the existing repository while network
+transport remains unchanged. Session migration happens only when commit ambiguity and
+recovery semantics can be preserved. GATE 04 starts the local gateway, not this migration.
+
+### 26.8 GATE 03 invariants
+
+| ID | Contract |
+|---|---|
+| **INV-ANKI-DOM-01** | All card/deck/note identities are backend-qualified. |
+| **INV-ANKI-DOM-02** | Card identity is not review-turn identity. |
+| **INV-ANKI-DOM-03** | A session has one immutable effective backend identity. |
+| **INV-ANKI-DOM-04** | Upper layers depend on Anki domain models, not backend framework types. |
+| **INV-ANKI-DOM-05** | AnkiBackend does not own AI, TTS, STT or Study UI state. |
+| **INV-ANKI-DOM-06** | Capabilities determine optional feature availability. |
+| **INV-ANKI-DOM-07** | Anki scheduling remains backend-owned. |
+| **INV-ANKI-DOM-08** | Rating commit outcomes distinguish committed, safe failure and ambiguity. |
+| **INV-ANKI-DOM-09** | The same raw card ID from different backends is not considered the same identity. |
+| **INV-ANKI-DOM-10** | Backend preference and effective backend are distinct. |
+| **INV-ANKI-DOM-11** | AUTO resolution occurs before session binding, not during each review turn. |
+| **INV-ANKI-DOM-12** | A backend becoming unavailable does not silently switch the current session to another backend. |
