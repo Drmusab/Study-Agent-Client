@@ -9,6 +9,10 @@ import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.core.voice.tts.TtsEngineInfo
 import com.studyagent.client.core.voice.tts.TtsVoiceInfo
+import com.studyagent.client.core.common.AppLogger
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthRepository
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthSnapshot
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidLauncher
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -20,8 +24,32 @@ import kotlinx.coroutines.launch
 class SettingsViewModel(
     private val preferencesDataStore: PreferencesDataStore,
     private val speechOrchestrator: SpeechOrchestrator,
-    private val recognitionOrchestrator: SpeechRecognitionOrchestrator
+    private val recognitionOrchestrator: SpeechRecognitionOrchestrator,
+    private val ankiDroidHealthRepository: AnkiDroidHealthRepository,
+    private val ankiDroidLauncher: AnkiDroidLauncher
 ) : ViewModel() {
+
+    /**
+     * GATE 02 — live AnkiDroid integration health.
+     *
+     * Observed, never recomputed: the repository is the single application-scoped owner (§26),
+     * and this screen contains no `PackageManager`/`ContentResolver`/permission logic of its own
+     * (§103).
+     */
+    val ankiDroidHealth: StateFlow<AnkiDroidHealthSnapshot> = ankiDroidHealthRepository.health
+
+    /** User-initiated refresh (the Retry/Refresh button, §28). */
+    fun refreshAnkiDroidHealth() {
+        ankiDroidHealthRepository.requestRefresh()
+    }
+
+    /** "Open AnkiDroid" (§31/§98). The result is logged, never surfaced as an exception. */
+    fun openAnkiDroid() {
+        viewModelScope.launch {
+            val result = ankiDroidLauncher.open()
+            AppLogger.i(TAG, "Open AnkiDroid: $result")
+        }
+    }
 
     val settings: StateFlow<AppSettings> = preferencesDataStore.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AppSettings())
@@ -68,6 +96,11 @@ class SettingsViewModel(
     }
 
     init {
+        // Opening the integration settings is a meaningful refresh trigger (§28): the user is
+        // looking at the state and may have just changed something in AnkiDroid. The repository
+        // debounces it, so this cannot turn into polling.
+        ankiDroidHealthRepository.onAppForeground()
+
         // Load once, and reload whenever the engine becomes READY (covers delayed init
         // and engine switches — voice lists are engine-specific).
         viewModelScope.launch {
@@ -109,5 +142,9 @@ class SettingsViewModel(
                 _previewing.value = null
             }
         }
+    }
+
+    private companion object {
+        const val TAG = "SettingsViewModel"
     }
 }

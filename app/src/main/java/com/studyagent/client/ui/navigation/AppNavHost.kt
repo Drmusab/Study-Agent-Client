@@ -108,7 +108,9 @@ fun AppNavHost(
                 SettingsViewModel(
                     preferencesDataStore = container.preferencesDataStore,
                     speechOrchestrator = container.speechOrchestrator,
-                    recognitionOrchestrator = container.recognitionOrchestrator
+                    recognitionOrchestrator = container.recognitionOrchestrator,
+                    ankiDroidHealthRepository = container.ankiDroidHealthRepository,
+                    ankiDroidLauncher = container.ankiDroidLauncher
                 )
             }
             SettingsScreen(

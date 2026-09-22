@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.AppSettingsPolicy
@@ -44,6 +45,7 @@ import com.studyagent.client.core.voice.tts.TtsSettings
 import com.studyagent.client.core.voice.tts.TtsVoiceInfo
 import com.studyagent.client.core.voice.tts.VoiceLatency
 import com.studyagent.client.core.voice.tts.VoiceQuality
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthSnapshot
 import com.studyagent.client.ui.components.AppCard
 import com.studyagent.client.ui.components.BannerTone
 import com.studyagent.client.ui.components.ChoiceRow
@@ -69,6 +71,12 @@ const val SETTINGS_LIST_TEST_TAG = "settings_list"
  */
 fun settingSwitchTestTag(title: String): String = "settings_switch_" + testTagSlug(title)
 
+/** Semantics tag for the Anki integration Refresh action (GATE 02 §33). */
+const val ANKI_REFRESH_TEST_TAG = "settings_anki_refresh"
+
+/** Semantics tag for the Anki integration "Open AnkiDroid" action (GATE 02 §31). */
+const val ANKI_OPEN_TEST_TAG = "settings_anki_open"
+
 private fun testTagSlug(text: String): String {
     val sb = StringBuilder(text.length)
     for (c in text.lowercase()) {
@@ -91,6 +99,7 @@ fun SettingsScreen(
     val previewing by viewModel.previewing.collectAsStateWithLifecycle()
     val recognitionCapabilities by viewModel.recognitionCapabilities.collectAsStateWithLifecycle()
     val persistenceError by viewModel.persistenceError.collectAsStateWithLifecycle()
+    val ankiHealth by viewModel.ankiDroidHealth.collectAsStateWithLifecycle()
     var showResetConfirmation by rememberSaveable { mutableStateOf(false) }
     var showAdvanced by rememberSaveable { mutableStateOf(false) }
 
@@ -451,6 +460,56 @@ fun SettingsScreen(
             }
 
 
+            // ------------------------------------------------------------------------------
+            // Anki integration (GATE 02). Status only: which Anki sources exist and whether the
+            // local one can be reached. Backend selection is a later gate, and this section never
+            // starts or changes a study session (§39/§78).
+            // ------------------------------------------------------------------------------
+            item(key = "anki-integration") { SettingsSectionLabel("Anki integration") }
+
+            item(key = "anki-integration-status") {
+                SettingsCard {
+                    val guidance = ankiHealth.guidance
+                    Text(
+                        text = guidance.headline,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = AppColors.contentPrimary
+                    )
+                    guidance.action?.let { action ->
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = action,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.contentMuted
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    // Only values we actually know are shown; an unknown spec renders as unknown
+                    // rather than as a plausible-looking number (§100).
+                    KeyValueRow(label = "AnkiDroid", value = ankiDroidStatusLabel(ankiHealth))
+                    KeyValueRow(
+                        label = "API spec",
+                        value = ankiHealth.providerSpec?.toString() ?: "Unknown"
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)) {
+                        SecondaryButton(
+                            text = "Refresh",
+                            onClick = { viewModel.refreshAnkiDroidHealth() },
+                            modifier = Modifier.testTag(ANKI_REFRESH_TEST_TAG)
+                        )
+                        SecondaryButton(
+                            text = "Open AnkiDroid",
+                            onClick = { viewModel.openAnkiDroid() },
+                            // Nothing to open when it is provably absent; while the state is still
+                            // unknown (or the provider is unreachable) the action stays attempted.
+                            enabled = ankiHealth.availability !is AnkiAvailability.NotInstalled,
+                            modifier = Modifier.testTag(ANKI_OPEN_TEST_TAG)
+                        )
+                    }
+                }
+            }
+
             // Basic vs Advanced (§36): everyday controls first; engineering knobs behind one switch.
             item(key = "advanced-toggle") {
                 SettingsCard {
@@ -668,6 +727,30 @@ fun SettingsScreen(
 }
 
 // ---------------------------------------------------------------- composables
+
+/**
+ * Short status word for the settings row (GATE 02 §33/§34).
+ *
+ * Pure mapping, no composition: deliberately a function rather than a composable, so the same
+ * vocabulary can be reused by any screen (and unit-tested) without pulling in Compose.
+ *
+ * Deliberately a vocabulary a user understands: no `ContentProvider`, no `SecurityException`,
+ * no exception class names ever reach normal UI. The technical detail lives in Diagnostics, and
+ * the actionable sentence lives in the guidance above the row (§37).
+ */
+private fun ankiDroidStatusLabel(health: AnkiDroidHealthSnapshot): String = when (health.availability) {
+    AnkiAvailability.Checking -> "Checking…"
+    AnkiAvailability.NotInstalled -> "Not installed"
+    is AnkiAvailability.ProviderUnavailable -> "Not reachable"
+    is AnkiAvailability.PermissionRequired -> "Access not granted"
+    AnkiAvailability.CollectionNotInitialized -> "Setup incomplete"
+    is AnkiAvailability.Ready -> "Ready"
+    is AnkiAvailability.TemporarilyUnavailable -> "Busy"
+    is AnkiAvailability.Unsupported -> "Unsupported version"
+    is AnkiAvailability.Fault -> "Check failed"
+    AnkiAvailability.AgentDisconnected,
+    AnkiAvailability.AgentAnkiUnavailable -> "Not checked"
+}
 
 @Composable
 private fun SettingsSectionLabel(title: String) {

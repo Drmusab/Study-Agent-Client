@@ -1,5 +1,6 @@
 package com.studyagent.client.data.repository
 
+import com.studyagent.client.core.anki.statusCode
 import com.studyagent.client.core.audio.AudioDeviceInfoModel
 import com.studyagent.client.core.audio.AudioRouteManager
 import com.studyagent.client.core.audio.DefaultStudyAudioModeResolver
@@ -36,6 +37,8 @@ import com.studyagent.client.core.voice.stt.RecognitionHealthSnapshot
 import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.core.voice.tts.TtsHealthSnapshot
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthRepository
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidProviderSpecSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -120,6 +123,15 @@ interface DiagnosticsRepository {
     /** Settings schema, write errors, cache ages, draft presence (§64). */
     fun persistenceDiagnosticsRows(): List<Pair<String, String>> = emptyList()
 
+    /**
+     * GATE 02 — AnkiDroid integration section (§35/§100): authority, package, provider spec,
+     * permission, collection readiness, last check time, duration and the last failure code.
+     *
+     * Technical by design — this is the section an engineer reads — while remaining content-free:
+     * no card, deck or note data exists here to leak (§68/§69/§104).
+     */
+    fun ankiDroidDiagnosticsRows(): List<Pair<String, String>> = emptyList()
+
     /** Bounded structured timeline, oldest first (§67/§69). */
     fun timelineEvents(limit: Int = DiagnosticTimeline.DEFAULT_EXPORT_LIMIT): List<DiagnosticEvent> = emptyList()
 
@@ -156,7 +168,9 @@ class DefaultDiagnosticsRepository(
     private val persistenceDiagnostics: PersistenceDiagnostics? = null,
     private val persistenceSnapshot: (() -> PersistenceDiagnosticsSnapshot?)? = null,
     private val appInfo: () -> DiagnosticsAppInfo = { DiagnosticsAppInfo() },
-    private val clock: AppClock = SystemAppClock
+    private val clock: AppClock = SystemAppClock,
+    // ---- GATE 02: AnkiDroid integration health (§35/§100) ----
+    private val ankiDroidHealthRepository: AnkiDroidHealthRepository? = null
 ) : DiagnosticsRepository {
 
     override val logs: StateFlow<List<LogEntry>> = AppLogger.logsFlow
@@ -505,6 +519,66 @@ class DefaultDiagnosticsRepository(
         }
     }
 
+    /**
+     * AnkiDroid integration (GATE 02). Every value is either observed or explicitly unknown —
+     * "Unknown" is rendered rather than a plausible-looking default (§100: only expose values
+     * actually known).
+     */
+    override fun ankiDroidDiagnosticsRows(): List<Pair<String, String>> {
+        val repository = ankiDroidHealthRepository
+            ?: return listOf("Integration" to "not wired in this build")
+
+        val snapshot = repository.health.value
+        val detection = snapshot.detection
+        val facts = detection.providerFacts
+        val failure = detection.failure
+
+        val ageMs = clock.nowMillis() - snapshot.checkedAtEpochMs
+        val spec = detection.providerSpec
+        val specText = when {
+            spec == null -> DiagnosticsFormatting.UNKNOWN
+            facts?.providerSpecSource == AnkiDroidProviderSpecSource.METADATA -> "$spec (published)"
+            else -> "$spec (implicit fallback: no metadata)"
+        }
+        val permissionText = when (val granted = detection.permissionGranted) {
+            null -> DiagnosticsFormatting.UNKNOWN
+            else -> {
+                val level = detection.permissionProtectionLevel
+                if (level == null) {
+                    DiagnosticsFormatting.boolean(granted)
+                } else {
+                    "${DiagnosticsFormatting.boolean(granted)} (protectionLevel=$level)"
+                }
+            }
+        }
+
+        return listOf(
+            "Status" to detection.availability.statusCode,
+            "Endpoint" to (detection.endpointLabel ?: DiagnosticsFormatting.NOT_MEASURED),
+            "Authority" to (detection.authority ?: DiagnosticsFormatting.NOT_MEASURED),
+            "Authorities checked" to if (detection.checkedAuthorities.isEmpty()) {
+                DiagnosticsFormatting.NOT_MEASURED
+            } else {
+                detection.checkedAuthorities.joinToString(", ")
+            },
+            "Package" to (detection.packageName ?: DiagnosticsFormatting.UNKNOWN),
+            "Provider" to when {
+                facts == null -> DiagnosticsFormatting.UNKNOWN
+                facts.packageMatchesExpected && facts.enabled -> "available"
+                else -> "unavailable"
+            },
+            "Provider package expected" to DiagnosticsFormatting.boolean(facts?.packageMatchesExpected),
+            "Provider spec" to specText,
+            "Permission" to permissionText,
+            "Collection usable" to DiagnosticsFormatting.boolean(detection.collectionReady),
+            "Last check" to DiagnosticsFormatting.ageMs(ageMs),
+            "Check duration" to DiagnosticsFormatting.millis(snapshot.durationMs),
+            "Last failure code" to (failure?.technicalLabel ?: "None"),
+            "Last failure exception" to (failure?.exceptionClass ?: DiagnosticsFormatting.NOT_MEASURED),
+            "Probe" to "selected_deck (1 row, read-only)"
+        )
+    }
+
     override fun persistenceDiagnosticsRows(): List<Pair<String, String>> {
         val snapshot = persistenceSnapshot?.invoke() ?: persistenceDiagnostics?.snapshot?.value
             ?: PersistenceDiagnosticsSnapshot()
@@ -687,6 +761,7 @@ class DefaultDiagnosticsRepository(
         appendSection(sb, "Dashboard", dashboardDiagnosticsRows())
         appendSection(sb, "Control Center", controlDiagnosticsRows())
         appendSection(sb, "Persistence", persistenceDiagnosticsRows())
+        appendSection(sb, "AnkiDroid integration", ankiDroidDiagnosticsRows())
 
         sb.append("--- Diagnostic timeline (last ${DiagnosticTimeline.DEFAULT_EXPORT_LIMIT}) ---\n")
         sb.append(timeline.render(DiagnosticTimeline.DEFAULT_EXPORT_LIMIT))

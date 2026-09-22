@@ -62,6 +62,13 @@ class DiagnosticsViewModel(
 
     fun persistenceRows(): List<Pair<String, String>> = diagnosticsRepository.persistenceDiagnosticsRows()
 
+    /**
+     * GATE 02 — AnkiDroid integration, technical view (§35/§100): authority, package, provider
+     * spec, permission, collection state, last check, duration and the last failure code.
+     * Content-free by construction: there is no card or deck data in the health snapshot.
+     */
+    fun ankiDroidRows(): List<Pair<String, String>> = diagnosticsRepository.ankiDroidDiagnosticsRows()
+
     /** Last [limit] structured events, oldest first (§67/§69). */
     fun timeline(limit: Int = 200): List<DiagnosticEvent> = diagnosticsRepository.timelineEvents(limit)
 
