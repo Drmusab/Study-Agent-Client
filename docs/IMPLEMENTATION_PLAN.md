@@ -59,15 +59,18 @@ The architecture decouples the mobile client from the server backend. Any PC age
 
 GATE 00 baselined the repository; **GATE 01 ratified the Anki source-of-truth
 architecture contract** (`docs/ANKI_INTEGRATION_ARCHITECTURE.md`, ADRs
-`docs/adr/0001`–`0007`, domain types in `core/anki/`). Later gates implement
-against that contract; anything listed as deferred in its §24 must not land
-early.
+`docs/adr/0001`–`0007`, domain types in `core/anki/`); **GATE 02 delivered the
+AnkiDroid detection, permission and health foundation** (implementation notes:
+`docs/ANKI_INTEGRATION_ARCHITECTURE.md` §25; reference and recovery tables:
+`docs/ANKIDROID_INTEGRATION.md`; report: `docs/GATE_02_ANKIDROID_FOUNDATION.md`).
+Later gates implement against that contract; anything listed as deferred in its
+§24 must not land early.
 
 | Gate | Scope (architecture per contract) | Status |
 |---|---|---|
 | GATE 00 | Repository baseline, safety lock, green-build evidence | Done (conditionally; CI blocked by account billing lock — see `docs/GATE_00_BASELINE.md`) |
 | GATE 01 | Anki fusion architecture & ownership contract; minimal `core/anki` domain types + contract tests; **no** AnkiDroid dependency, no behavior change | Done (this baseline) |
-| GATE 02 | AnkiDroid API bridge: dependency, permissions, installation/permission detection, provider probe — all inside `data/anki/ankidroid/` | Pending |
+| GATE 02 | AnkiDroid detection & permission foundation: provider/package discovery, provider-spec detection, permission visibility, bounded read-only probe, single health owner — all inside `data/anki/ankidroid/`; **no artifact linked** (decision: `docs/ANKIDROID_INTEGRATION.md` §2) | Done — `docs/GATE_02_ANKIDROID_FOUNDATION.md` (Android build/tests still blocked by environment) |
 | GATE 03 | Domain wiring: backend registry + selector + `AnkiBackendMode` preference in settings; PC registered as a backend | Pending |
 | GATE 04 | Backends: `PcAnkiBackend` (existing protocol adapted) + `AnkiDroidBackend` (decks/availability/rendered cards) | Pending |
 | GATE 05 | Decks & library via the gateway (`AnkiDeckRef` identity, cache discipline) | Pending |

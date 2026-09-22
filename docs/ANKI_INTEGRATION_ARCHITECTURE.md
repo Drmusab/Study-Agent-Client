@@ -719,8 +719,18 @@ core/anki/                 ★ this gate — pure domain, JVM-only, backend-neut
 ├── AnkiModels.kt          (deck/rendered card/media/scheduling models)
 └── AnkiBackendSelector.kt (resolution policy — the one behavior this gate ships)
 
-data/anki/ankidroid/       GATE 02+ — AnkiDroid API boundary (only place
-data/anki/remote/          GATE 04+ —  FlashCardsContract/Cursor/protocol may live)
+data/anki/ankidroid/       ★ GATE 02 — the only package that may name AnkiDroid
+├── AnkiDroidApiContract.kt        (authority/permission/spec constants + provenance, endpoints)
+├── AnkiDroidErrors.kt             (failure categories/evidence + classifier)
+├── AnkiDroidHealth.kt             (facts, detection result, snapshot, user guidance)
+├── AnkiDroidProbe.kt              (platform seam: the only interface the logic sees)
+├── AnkiDroidPermissionManager.kt  (permission seam)
+├── AnkiDroidDetector.kt           (one detection pass: the availability state machine)
+├── AnkiDroidHealthCheck.kt        (bounded, timed, total-failure-guaranteed check)
+├── AnkiDroidHealthRepository.kt   (single app-scoped owner, StateFlows, single-flight)
+├── AndroidAnkiDroidProbe.kt       (PackageManager/ContentResolver — platform file 1 of 2)
+└── AnkiDroidLauncher.kt           (Open-AnkiDroid helper — platform file 2 of 2)
+data/anki/remote/          GATE 04+ —  PC protocol types may live)
 ```
 
 ### 15.2 Dependency direction (strict)
@@ -918,7 +928,7 @@ See §12.2 (offline) and §12.3 (hybrid) — both are first-class, neither requi
 ```
 Today:   StudySessionRepository → ConnectionRepository → PC Agent
 Step 1:  Core/anki contract (THIS GATE — no behavior change)
-Step 2:  AnkiDroid API bridge + probe (GATE 02) behind data/anki/ankidroid
+Step 2:  AnkiDroid detection + permission foundation (GATE 02 — DONE; no AnkiDroid artifact linked)
 Step 3:  Registry + selector + preference settings (GATE 03); PC registered
 Step 4:  PcAnkiBackend adapts existing protocol (GATE 04) — same behavior
 Step 5:  Decks via gateway (GATE 05)
@@ -931,7 +941,7 @@ Each step ships independently; the PC path must stay green at every step (§91).
 
 | Gate | Depends on (from this contract) |
 |---|---|
-| GATE 02 — AnkiDroid API bridge | boundary hygiene (§8.1), availability model, permission error taxonomy, package layout |
+| GATE 02 — AnkiDroid detection/permission foundation | boundary hygiene (§8.1), availability model, permission error taxonomy, package layout — **delivered, see §25** |
 | GATE 03 — domain wiring (registry/selector/settings) | selector policy (§6.2), preference≠effective (§6), DI strategy (§15.3) |
 | GATE 04 — backends (`PcAnkiBackend`, `AnkiDroidBackend`) | `AnkiBackend` contract, capabilities, domain models, content model (§9) |
 | GATE 05 — decks/library | deck identity (§5.3), cache policy (§4), deck-source ownership (H7-9) |
@@ -945,6 +955,110 @@ AnkiDroid api artifact dependency · `FlashCardsContract` / `AddContentApi` ·
 ContentResolver query · real API calls. Also deferred: settings persistence of
 `AnkiBackendMode` (GATE 03), commit ledger persistence (GATE 06), licensing
 review (release gate).
+
+> **Status after GATE 02:** detection, permission visibility, a bounded read-only probe and the
+> health owner are implemented (§25). Still deferred: the *compile-time* artifact (decision and
+> evaluation: `docs/ANKIDROID_INTEGRATION.md` §2), deck/card/review calls, settings persistence of
+> the backend mode (GATE 03), commit ledger (GATE 06), licensing review (release gate).
+
+## 25. GATE 02 implementation notes — detection, permission, provider, collection readiness
+
+Delivered by GATE 02 (code: `data/anki/ankidroid/`, ten files listed in §15.1). Detailed reference
+and the user-facing tables: `docs/ANKIDROID_INTEGRATION.md`. This section records only what later
+gates must treat as the *established* design.
+
+### 25.1 The pipeline
+
+```
+MainActivity.onStart / Settings opened / Retry tap
+        │  (debounced 2 000 ms, single-flight, no polling)
+        ▼
+AnkiDroidHealthRepository  ── StateFlow<AnkiDroidHealthSnapshot> + StateFlow<AnkiAvailability>
+        │  one Mutex: at most one check at a time
+        ▼
+AnkiDroidHealthCheck (3 000 ms budget, duration, never throws)
+        ▼
+AnkiDroidDetector ── an ordered, evidence-driven state machine
+        ├─ resolveContentProvider(authority, GET_META_DATA)      [release; debug only in debug]
+        ├─ package mismatch / disabled provider  → ProviderUnavailable
+        ├─ spec < minimum                        → Unsupported
+        ├─ permission not granted                → PermissionRequired (no probe issued)
+        └─ probeCollection: selected_deck, 1 row → Ready  |  classified failure
+        ▼
+AnkiDroidProbe (interface) ◄── AndroidAnkiDroidProbe (the only Android code besides the launcher)
+```
+
+### 25.2 What "Ready" means in this gate
+
+`Ready` = provider resolved **and** served by the expected package **and** enabled **and**
+permission granted **and** provider spec ≥ minimum **and** the collection answered a bounded
+read-only probe. It carries `AnkiCapabilities.NONE` and leaves `isReadyForReview == false`,
+because no deck/review capability has been probed yet — an unprobed capability must be reported as
+unprobed, not assumed (§95/§96, INV-ANKI-DET-02/03). Later gates widen `Ready` only by *proving*
+more.
+
+### 25.3 Availability model amendments (GATE 01 types, reused — no second hierarchy)
+
+`AnkiAvailability` gained exactly two members so detection can express itself without inventing a
+parallel vocabulary: `Checking` (no result yet — never `Ready`, never a failure) and
+`ProviderUnavailable(detail)` (app present, integration provider not reachable — distinct from
+both `NotInstalled` and `Fault`). A `statusCode` extension supplies stable diagnostics tokens
+(`CHECKING`, `NOT_INSTALLED`, `PROVIDER_UNAVAILABLE`, `PERMISSION_REQUIRED`,
+`COLLECTION_NOT_INITIALIZED`, `READY`, `TEMPORARILY_UNAVAILABLE`, `AGENT_DISCONNECTED`,
+`AGENT_ANKI_UNAVAILABLE`, `UNSUPPORTED`, `FAULT`). `AnkiError` gained `ProviderUnavailable`,
+`UnsupportedApi(specVersion, minimumSpec)` and `QueryFailure(causeCategory)`.
+
+### 25.4 Permission taxonomy (replaces "assume dangerous-runtime")
+
+The permission is **third-party-declared** by AnkiDroid and **enforced dynamically** by its
+provider; the grant is resolved by Android at install/update, there is no runtime dialog, and the
+provider's refusal appears as `SecurityException("Permission not granted for: …")` at call time.
+Mapping: `SecurityException` → `PERMISSION_DENIED` (never swallowed); the documented signature →
+`PERMISSION_DENIED`; a *granted* permission plus the provider refusing is still classified, not
+ignored. Study-Agent declares the permission itself (no artifact merges it) and asks no storage or
+database permission. Full detail: `docs/ANKIDROID_INTEGRATION.md` §3.
+
+### 25.5 Failure taxonomy and the mapping table
+
+One classifier, ten categories, evidence-token based, content-free; category → availability
+mapping is normative in `docs/ANKIDROID_INTEGRATION.md` §5. The two rules later gates must not
+soften: **only documented setup signatures may produce `CollectionNotInitialized`**, and an
+unclassified `IllegalStateException` stays a visible provider fault (§61).
+
+### 25.6 Health owner and refresh policy
+
+One application-scoped owner (`AnkiDroidHealthRepository`, built in `AppContainer`) is the single
+source of runtime availability: `StateFlow` snapshot + availability projection, one check at a
+time (Mutex), monotonic publication guard (a superseded result cannot publish), 2 000 ms foreground
+debounce, fire-and-forget single-flight, cancellation propagated and never converted into a state.
+Availability is **never persisted** — no cached `Ready` can survive a restart or a user
+uninstalling AnkiDroid. `Checking` is the initial state so the first frame never blocks on an
+optional integration (INV-ANKI-DET-04/08/09).
+
+### 25.7 Boundary enforcement
+
+Only `data/anki/ankidroid/` may name the AnkiDroid contract; within it, only
+`AndroidAnkiDroidProbe.kt` and `AnkiDroidLauncher.kt` may import `android.*`. The layer reads
+through one bounded, read-only query and contains no mutation API, no Room/SQLite, no WorkManager,
+no `GlobalScope`, no blocking calls. These are enforced by `AnkiDroidIntegrationIsolationTest`
+(source scans) in addition to review, so INV-ANKI-DET-06/07 do not rely on discipline. The
+complement is the device-only `AnkiDroidIntegrationInstrumentedTest` (package
+`com.studyagent.client.anki`), which proves the *platform* half — the real probe answering on the
+published contract, coherence of the verdict, bounded refreshes, no PC-backend vocabulary — while
+requiring no AnkiDroid installation (GATE 02 §106/§107/§108).
+
+### 25.8 Obligations this contract now places on GATE 03+
+
+- Consume availability **only** through the health repository/StateFlows; never re-derive it, never
+  read the package manager or the permission again, never persist `Ready`.
+- Register the AnkiDroid backend in the selector only once it is actually implemented and
+  **review-ready**; `Ready` today means "we can communicate", so the AUTO policy (from the Pc
+  backend's perspective) is unchanged by this gate.
+- Keep the PC path independent: AnkiDroid health must never gate connection, session start or
+  startup (§39/§91).
+- If the official `api` artifact is ever linked, adoption must not change detection semantics, and
+  it must be pinned exactly (no dynamic versions) — evaluation and recipe:
+  `docs/ANKIDROID_INTEGRATION.md` §2.
 
 ---
 
