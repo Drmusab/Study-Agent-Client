@@ -1,7 +1,7 @@
-# AnkiDroid Integration — Dependency, Detection, Permission & Health
+# AnkiDroid Integration — Dependency, Detection, Permission, Health, Gateway & Capabilities
 
-Date: 2026-09-22 · Gate: **GATE 02** (AnkiDroid API dependency, detection & permission foundation)
-Normative companion: [`docs/ANKI_INTEGRATION_ARCHITECTURE.md`](ANKI_INTEGRATION_ARCHITECTURE.md)
+Date: 2026-09-22 · Gates: **GATE 02** (dependency, detection & permission) + **GATE 04** (gateway, capability & health)
+Normative companion: [`docs/ANKI_INTEGRATION_ARCHITECTURE.md`](ANKI_INTEGRATION_ARCHITECTURE.md), [`docs/GATE_04_ANKIDROID_GATEWAY.md`](GATE_04_ANKIDROID_GATEWAY.md)
 Code: `app/src/main/java/com/studyagent/client/data/anki/ankidroid/`
 
 This document is the reference for **how Study-Agent talks to AnkiDroid**: what it may depend on,
@@ -452,7 +452,7 @@ things an instrumented run with AnkiDroid available should confirm.
 
 ---
 
-## 12. Open items for later gates
+## 12. Open items for later gates (pre-GATE 04)
 
 - Broadening `Ready` semantics as capabilities are actually proved: deck listing (GATE 05),
   review/ratings and the commit ledger (GATE 06), rendering/media (GATE 07+).
@@ -462,3 +462,357 @@ things an instrumented run with AnkiDroid available should confirm.
   once a reliable pinned coordinate exists — with unchanged detection semantics (§2.3).
 - Instrumented AnkiDroid contract test (environment-guarded, non-gating) and device verification of
   the items listed at the end of §11.
+
+---
+
+# GATE 04 — AnkiDroid Gateway, Capability Detection & Health
+
+Date: 2026-09-22
+Normative companion: [`docs/GATE_04_ANKIDROID_GATEWAY.md`](GATE_04_ANKIDROID_GATEWAY.md)
+
+## 13. Gateway Architecture
+
+```
+                  Study-Agent Domain
+                         │
+                         ▼
+                   AnkiBackend
+                         │
+                         ▼
+                AnkiDroidBackend
+                         │
+                         ▼
+                 AnkiDroidGateway
+            ┌────────────┼─────────────┐
+            │            │             │
+            ▼            ▼             ▼
+        Detection     Capability      Health
+        / Provider      Probe          Probe
+            │            │             │
+            └────────────┼─────────────┘
+                         ▼
+                 Android ContentResolver
+                         │
+                         ▼
+                  AnkiDroid Public API
+```
+
+Later Gates add Deck/Card/Review/Note/Media gateways, but GATE 04 establishes common foundation.
+
+**Single source of truth** (§45):
+
+```
+AnkiDroidIntegrationState
+       ├── availability
+       ├── capabilities (implemented)
+       ├── apiCapabilities (provider support)
+       ├── metadata
+       ├── healthSnapshot
+       └── capabilityDetails
+```
+
+Derived flows: `availability` and `capabilities` are StateFlows projected from integration state, never three unrelated mutable stores. This prevents transient impossible UI states like `READY + NONE` for several frames (§44).
+
+## 14. Provider Client
+
+`AnkiDroidProviderClient` — low-level provider operations, internal infrastructure (§6).
+
+- Safe queries: Cursor opened → read → mapped → closed via `use {}` (§5, INV-ANKI-GW-02/03)
+- Null Cursor → typed failure, not NPE (§71)
+- Empty Cursor → valid empty result, not failure (§72)
+- SecurityException → PermissionRequired (§76)
+- Cancellation propagates (§33/§34)
+- All calls on Dispatchers.IO (§31)
+- URI construction belongs here (§7), not in backend consumers
+- Authority / contract information centralized (§8): uses `FlashCardsContract` constants via `AnkiDroidApiContract`, no string duplication
+
+`AndroidAnkiDroidProbe` now implements both `AnkiDroidProbe` (GATE 02) and `AnkiDroidProviderClient` (GATE 04), keeping one Android-facing file. Additional `AndroidAnkiDroidProviderClient` exists for explicit client usage.
+
+Fake: `FakeAnkiDroidProviderClient` for JVM tests, no Android dependencies (§128: prefer internal seam so most tests stay simple JVM).
+
+Resource leak audit (§120): Cursor, ParcelFileDescriptor, InputStream closed deterministically. Explicitly tested (§70).
+
+## 15. Capability Detection
+
+Capability detection is NOT backend-name detection (§9):
+
+```kotlin
+// Wrong
+if (backend == ANKIDROID_LOCAL) supportsEverything = true
+
+// Correct
+API contract + runtime readiness + verified implementation
+```
+
+Reuse GATE 03 `AnkiCapabilities` (review, deckListing, renderedCards, reviewIntervals, media, flags, bury, suspendCards, editNotes, createNotes, search). Flat and small, new flags default to false (safe answer).
+
+Three-state support may be better than boolean (§12): SUPPORTED / UNSUPPORTED / UNKNOWN, especially during staged implementation. Example: AnkiDroid supports provider endpoint but Study-Agent has not yet validated media reading → not `media = true`.
+
+Each capability explainable (§13): diagnostics answers Status + Reason.
+
+`AnkiDroidCapabilityProbe` (§14):
+
+```kotlin
+interface AnkiDroidCapabilityProbe {
+    suspend fun probe(detection): CapabilityProbeResult
+}
+```
+
+- Uses API spec + provider metadata + small read-only probes
+- No mutating probes (§15: never add test card, change tag, rate, bury, create deck)
+- No entire collection query (§16: metadata/spec contract or bounded probe)
+- Truthful (§11): true only when supported by current API contract + required access + implementation exists
+
+For GATE 04: returns `NONE` as implemented (deck listing pending GATE 05, review pending GATE 06, etc.), but API report shows SUPPORTED for all known capabilities at spec >=1. This keeps `isReadyForReview` false until GATE 06, preserving PC path isolation.
+
+Compatibility policy (§50):
+
+- Minimum usable provider spec
+- Capability mapping
+- Unsupported versions
+- Forward compatibility (§51): unknown newer provider versions not auto-failed if contract compatible
+- Package version is diagnostic, not business logic (§48)
+- Capability check centralized (§49): no `if (providerSpec >= 2)` in 20 places, use `AnkiDroidCapabilityProbe` or compatibility policy
+
+Internal maturity (§103):
+
+```
+API_UNSUPPORTED
+API_SUPPORTED_NOT_IMPLEMENTED
+IMPLEMENTED
+VERIFIED
+```
+
+Prevents confusing "AnkiDroid can support it" with "Study-Agent has finished it". Not exposed to normal UI.
+
+## 16. Health Model
+
+Health summarizes runtime operability (§17). Reuses GATE 02 health models.
+
+GATE 04 snapshot:
+
+```kotlin
+data class AnkiDroidGatewayHealthSnapshot(
+    val availability: AnkiAvailability,
+    val capabilities: AnkiCapabilities,
+    val apiCapabilities: AnkiDroidApiCapabilityReport,
+    val providerSpec: Int?,
+    val packageVersion: String?,
+    val providerReachable: Boolean,
+    val permissionGranted: Boolean,
+    val collectionReady: Boolean,
+    val checkedAtMs: Long,
+    val latencyMs: Long?,
+    val lastError: AnkiError?
+)
+```
+
+Health ≠ Capabilities (§18):
+
+```
+Health: READY
+Capabilities: Review supported, Flags supported, Note editing unknown, Media unsupported
+```
+
+Do not declare backend unhealthy because optional capability unavailable (§85, INV-ANKI-GW-07).
+
+READY precisely (§19): public AnkiDroid integration endpoint reachable, required permission exists, collection access usable, core integration contract supported. Does NOT mean every future feature implemented.
+
+Core capability set (§20): provider access, collection access, deck/card lookup foundation. Later GATE 06 may raise requirements for actual review mode. Do not prematurely require editing/media.
+
+Health side-effect free (§21, INV-ANKI-GW-05): cannot advance scheduler, select new card destructively, commit rating, change deck, modify note, create media. Verify semantics before using provider query as probe.
+
+Provider metadata (§47): package name, app version, provider spec, authority. Does NOT expose private paths, database path, collection file path.
+
+## 17. Error Mapping
+
+`AnkiDroidErrorMapper` (§26):
+
+| Condition | AnkiError |
+|---|---|
+| SecurityException | PermissionRequired |
+| provider not resolved | ProviderUnavailable |
+| collection initialization | CollectionUnavailable |
+| unsupported provider contract | UnsupportedAction / UnsupportedApi |
+| timeout | QueryFailure(timeout) |
+| null cursor / malformed | QueryFailure / Unknown |
+| unknown | Unknown |
+
+Do not map all IllegalStateException identically (§27): only to CollectionNotReady when evidence supports.
+
+Preserve root cause for diagnostics (§28): domain sees `BackendFailure`, diagnostics/logger records sanitized exception class + operation + URI category. Never full stack trace to UI.
+
+Operation context (§29): health_probe, capability_probe, provider_query, deck_query, review_query. No card/note text logged (§67).
+
+## 18. Threading, Timeouts, Concurrency
+
+Timeouts (§30): bounded where blocking plausible — health probe, metadata probe, normal provider read. No huge shared timeout globally.
+
+No blocking main thread (§31): every ContentResolver/provider call off main thread, Dispatchers.IO or injected dispatcher abstraction if project uses one (§32).
+
+Cancellation (§33): gateway queries cooperate with coroutine cancellation. Never `catch CancellationException → convert to Unknown`. Always rethrow (§34).
+
+Single-flight health refresh (§35): Mutex + shared Deferred, prevents Settings/Dashboard/Lifecycle all running expensive checks simultaneously.
+
+Stale result protection (§36, INV-ANKI-GW-08): generation counter, health probe gen 4 must not be overwritten by late gen 3. Tested explicitly (§81).
+
+Package update invalidates capability cache (§37): cached provider spec/capabilities/health may be stale, refresh them. Do not retain forever.
+
+Permission change invalidates health (§38): previous READY → PermissionRequired on next refresh.
+
+Collection change (§39): health recovers without reinstall/restart — CollectionNotReady → user configures AnkiDroid → foreground return → Ready.
+
+Capability cache policy (§40): capabilities change less frequently than card data, cache key may include package version + provider spec, but in-memory cache sufficient initially, not persisted as permanent truth (§41, INV-ANKI-GW-12).
+
+Backend availability flow (§42): `StateFlow<AnkiAvailability>`, not mutable publicly. Capability flow (§43): `StateFlow<AnkiCapabilities>`, consumers observe, not mutate. Atomic health + capability update (§44): one canonical snapshot internally, derived flows from it to avoid transient impossible UI states.
+
+## 19. Backend Implementation
+
+`AnkiDroidBackend` implements real backend shell behind GATE 03's interface (§22):
+
+- id = ANKIDROID_LOCAL (§23, stable)
+- availability, capabilities, refreshAvailability()
+- Methods not yet implemented return UnsupportedOperation truthfully (§24/§102): `getDecks()` → `UnsupportedAction("deckListingIntegrationPending")`, never empty list (§25) because empty incorrectly means zero decks
+- Empty data ≠ Unsupported (§25, INV-ANKI-GW-13)
+- No deck business logic yet (§24), no real study through AnkiDroid (§91)
+- Safe bounded read probes allowed (§92): provider metadata, spec version, small collection readiness probe, small capability probe. Not allowed: full deck loading, card review queue consumption, mutations (§93-§101)
+- No library UI (§93), no card browser (§94), no card renderer (§95), no review scheduler consumption (§96), no rating mutation (§97), no bury/suspend (§98), no note edit/create (§99-§100), no media write (§101)
+
+App container wiring (§108): application-scoped instances — ProviderClient, Gateway, Backend — using AppContainer architecture, one shared runtime health state. Not recreated per screen (§109), recreated on process restart (§110), rotation/theme change must not trigger multiple probes (§111). Reuse GATE 02 lifecycle refresh logic, do not create second independent package observer (§112). No background WorkManager periodic health job (§113).
+
+Error recovery (§114): PermissionRequired → wait for user/lifecycle refresh, CollectionNotReady → refresh after returning from AnkiDroid, TemporaryProviderFailure → manual retry, Unsupported → no retry loop. No automatic rapid retry (§115): local provider errors don't require exponential network-style retry, use event-driven recheck.
+
+## 20. Diagnostics, Logging, Metrics
+
+Diagnostics integration (§64): Anki section added to Diagnostics repository/model, distinguishes support from implementation (§65):
+
+```
+ANKIDROID CAPABILITIES
+
+Core Provider              Supported
+Collection Access          Supported
+Deck Listing API           Supported
+...
+
+STUDY-AGENT IMPLEMENTATION
+
+Deck Listing               Pending GATE 05
+Review                     Pending GATE 06
+...
+```
+
+Logging (§66): `ANKI_HEALTH_CHECK_STARTED`, `ANKI_HEALTH_READY`, `ANKI_PERMISSION_REQUIRED`, `ANKI_CAPABILITIES_UPDATED`, `ANKI_PROVIDER_FAILURE` using existing logger conventions, no separate framework. Log redaction (§67): never question, answer, note fields, tags, media contents during infrastructure probes.
+
+Metrics (§68) if system supports: health_probe_count, success, failure, latency, capability_probe_latency, bounded.
+
+Diagnostic error history (§116): bounded recent history if timeline supports, last 20 infrastructure events, no unbounded lists.
+
+Performance target (§117): measure provider detection, health probe, capability probe, flag unexpectedly expensive operations. Strict mode / main thread (§118): ensure provider calls don't trigger violations. Memory leak audit (§119): long-lived gateway/repository does not retain Activity/Fragment/View/Composable/Cursor, only application-level dependencies.
+
+Capability report example (§121) and provenance (§122): document whether each capability derived from provider spec, contract availability, runtime probe, Study-Agent implementation state.
+
+Document API boundary (§123) and architecture diagram (§124):
+
+```
+Study-Agent Domain
+        │
+        ▼
+AnkiDroidBackend
+        │
+        ▼
+AnkiDroidGateway
+        │
+        ▼
+Provider Client
+        │
+        ▼
+AnkiDroid ContentProvider
+```
+
+Document what is still NOT implemented (§125): Deck UI, real scheduled review, card display, rating commit, media rendering, editing — README must not imply these exist.
+
+## 21. Testing (GATE 04)
+
+Backend contract tests (§126): run generic GATE 03 backend contract tests against AnkiDroid backend where possible, explicit behavior for not-yet-implemented methods.
+
+Gateway unit tests (§127): mock/fake Android provider boundary, test normal response, empty response, null response, security error, collection unavailable, unsupported spec, unexpected error, cancellation, timeout, stale result, concurrent refresh.
+
+Do not mock ContentResolver everywhere (§128): prefer internal seam `AnkiDroidProviderClient` so most tests stay simple JVM tests.
+
+Instrumented tests (§129) where environment permits: provider resolves, health probe succeeds, API spec reads correctly, collection readiness works, no mutation occurs.
+
+Do not require AnkiDroid in ordinary JVM CI (§130): normal CI deterministic, real AnkiDroid instrumented tests dedicated/optional/manual.
+
+Real-device manual check (§131): AnkiDroid installed/configured, missing, disabled, first-run incomplete, background/foreground, updated, PC offline — document only actual runs.
+
+Required test matrix (§133):
+
+| Scenario | Expected |
+|---|---|
+| Provider ready | Ready |
+| Provider missing | BackendUnavailable |
+| Permission denied | PermissionRequired |
+| Collection not ready | CollectionNotReady |
+| Unsupported provider spec | Unsupported |
+| Unknown newer compatible spec | safely evaluated |
+| Empty query | valid empty result |
+| Null provider result | typed failure |
+| Missing required field | typed malformed response |
+| Missing optional field | graceful degradation |
+| SecurityException | typed permission error |
+| Cancellation | propagated |
+| Timeout | typed timeout/failure |
+| 10 concurrent refreshes | consistent state |
+| stale earlier probe | ignored |
+| optional capability unavailable | backend still usable |
+| AnkiDroid ready + PC offline | valid |
+| no AnkiDroid | existing app still usable |
+
+## 22. Invariants (GATE 04)
+
+| ID | Invariant |
+|---|---|
+| INV-ANKI-GW-01 | Only the AnkiDroid integration layer directly accesses public AnkiDroid provider APIs. |
+| INV-ANKI-GW-02 | No Cursor escapes the gateway. |
+| INV-ANKI-GW-03 | Every provider resource is closed deterministically. |
+| INV-ANKI-GW-04 | Cancellation is never converted into a domain failure. |
+| INV-ANKI-GW-05 | Health probes perform no scheduling or collection mutation. |
+| INV-ANKI-GW-06 | Capability state is derived from evidence, never from backend name alone. |
+| INV-ANKI-GW-07 | Optional capability absence does not make the whole backend unavailable. |
+| INV-ANKI-GW-08 | A stale probe result cannot overwrite newer integration state. |
+| INV-ANKI-GW-09 | Provider failures are translated into typed Anki domain errors. |
+| INV-ANKI-GW-10 | Backend-specific Android types do not cross into core/anki. |
+| INV-ANKI-GW-11 | AnkiDroid availability remains independent from PC Agent availability. |
+| INV-ANKI-GW-12 | Runtime health/capabilities are recomputable and are not persisted as permanent truth. |
+| INV-ANKI-GW-13 | Unsupported and empty results remain semantically distinct. |
+| INV-ANKI-GW-14 | GATE 04 performs no Anki review mutation. |
+
+## 23. Open items for later gates (post-GATE 04)
+
+- Real deck listing (GATE 05)
+- Deck counts
+- Scheduled cards / ReviewInfo (GATE 06)
+- Card rendering / WebView (GATE 08)
+- Media read/write (GATE 09)
+- Rating commits (GATE 11)
+- Bury / Suspend
+- Note editing / creation (GATE 17)
+- Library UI / DeckDetailsScreen (GATE 14)
+- Card browser / search
+
+## 24. Verification provenance (GATE 04)
+
+Same upstream sources as GATE 02, plus:
+
+| Fact | Source |
+|---|---|
+| Gateway boundary isolates ContentResolver/Cursor | `AnkiDroidGateway.kt`, `AnkiDroidProviderClient.kt` source scan, isolation test |
+| No Cursor leakage | `AnkiDroidIntegrationIsolationTest` + `AnkiDroidProviderClientTest` |
+| Capability probe read-only | `AnkiDroidCapabilityProbe.kt` — no insert/update/delete, no mutation |
+| Health probe side-effect free | `AnkiDroidHealthProbe.kt` + `AndroidAnkiDroidProbe` — only selected_deck read |
+| Error mapping typed | `AnkiDroidErrorMapper.kt` + `AnkiDroidErrorMapperTest.kt` |
+| Single-flight + stale protection | `AnkiDroidGateway.kt` generation counter + `AnkiDroidGatewayTest.kt` concurrent & stale tests |
+| Backend returns Unsupported truthfully | `AnkiDroidBackend.kt` + `AnkiDroidBackendTest.kt` |
+
+**Not verified here**: real-device AnkiDroid provider interaction (no device/emulator environment in this gate).
+

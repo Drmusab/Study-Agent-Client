@@ -37,8 +37,11 @@ import com.studyagent.client.core.voice.stt.RecognitionHealthSnapshot
 import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.core.voice.tts.TtsHealthSnapshot
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthRepository
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidProviderSpecSource
+import com.studyagent.client.data.anki.ankidroid.CapabilitySupport
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -170,7 +173,10 @@ class DefaultDiagnosticsRepository(
     private val appInfo: () -> DiagnosticsAppInfo = { DiagnosticsAppInfo() },
     private val clock: AppClock = SystemAppClock,
     // ---- GATE 02: AnkiDroid integration health (§35/§100) ----
-    private val ankiDroidHealthRepository: AnkiDroidHealthRepository? = null
+    private val ankiDroidHealthRepository: AnkiDroidHealthRepository? = null,
+    // ---- GATE 04: gateway + backend for capability matrix (§64/§65/§121) ----
+    private val ankiDroidGateway: AnkiDroidGateway? = null,
+    private val ankiDroidBackend: AnkiDroidBackend? = null
 ) : DiagnosticsRepository {
 
     override val logs: StateFlow<List<LogEntry>> = AppLogger.logsFlow
@@ -520,63 +526,132 @@ class DefaultDiagnosticsRepository(
     }
 
     /**
-     * AnkiDroid integration (GATE 02). Every value is either observed or explicitly unknown —
+     * AnkiDroid integration (GATE 02 + GATE 04).
+     * Every value is either observed or explicitly unknown —
      * "Unknown" is rendered rather than a plausible-looking default (§100: only expose values
      * actually known).
+     *
+     * GATE 04 adds:
+     * - backend id, gateway state, capability matrix
+     * - API support vs Study-Agent implementation status (§64/§65/§121)
      */
     override fun ankiDroidDiagnosticsRows(): List<Pair<String, String>> {
         val repository = ankiDroidHealthRepository
-            ?: return listOf("Integration" to "not wired in this build")
+        val gateway = ankiDroidGateway
+        val backend = ankiDroidBackend
 
-        val snapshot = repository.health.value
-        val detection = snapshot.detection
-        val facts = detection.providerFacts
-        val failure = detection.failure
+        // If neither is wired, report not wired
+        if (repository == null && gateway == null) {
+            return listOf("Integration" to "not wired in this build")
+        }
 
-        val ageMs = clock.nowMillis() - snapshot.checkedAtEpochMs
-        val spec = detection.providerSpec
+        // Prefer gateway state when available (GATE 04 single source of truth, §45)
+        val integrationState = gateway?.currentState()
+        val snapshot = repository?.health?.value
+        val detection = integrationState?.healthSnapshot?.detection ?: snapshot?.detection
+
+        if (detection == null && integrationState == null) {
+            return listOf("Integration" to "no data yet")
+        }
+
+        val facts = detection?.providerFacts
+        val failure = detection?.failure ?: integrationState?.healthSnapshot?.detection?.failure
+
+        val checkedAtMs = integrationState?.lastCheckAtMs ?: snapshot?.checkedAtEpochMs ?: 0L
+        val ageMs = if (checkedAtMs > 0) clock.nowMillis() - checkedAtMs else -1L
+
+        val spec = integrationState?.metadata?.providerSpec ?: detection?.providerSpec
         val specText = when {
             spec == null -> DiagnosticsFormatting.UNKNOWN
             facts?.providerSpecSource == AnkiDroidProviderSpecSource.METADATA -> "$spec (published)"
+            integrationState?.metadata?.providerSpecSource == AnkiDroidProviderSpecSource.METADATA -> "$spec (published)"
             else -> "$spec (implicit fallback: no metadata)"
         }
-        val permissionText = when (val granted = detection.permissionGranted) {
+
+        val permissionGranted = integrationState?.metadata?.permissionGranted ?: detection?.permissionGranted
+        val permissionText = when (permissionGranted) {
             null -> DiagnosticsFormatting.UNKNOWN
             else -> {
-                val level = detection.permissionProtectionLevel
-                if (level == null) {
-                    DiagnosticsFormatting.boolean(granted)
-                } else {
-                    "${DiagnosticsFormatting.boolean(granted)} (protectionLevel=$level)"
-                }
+                val level = detection?.permissionProtectionLevel
+                if (level == null) DiagnosticsFormatting.boolean(permissionGranted)
+                else "${DiagnosticsFormatting.boolean(permissionGranted)} (protectionLevel=$level)"
             }
         }
 
-        return listOf(
-            "Status" to detection.availability.statusCode,
-            "Endpoint" to (detection.endpointLabel ?: DiagnosticsFormatting.NOT_MEASURED),
-            "Authority" to (detection.authority ?: DiagnosticsFormatting.NOT_MEASURED),
-            "Authorities checked" to if (detection.checkedAuthorities.isEmpty()) {
-                DiagnosticsFormatting.NOT_MEASURED
-            } else {
-                detection.checkedAuthorities.joinToString(", ")
-            },
-            "Package" to (detection.packageName ?: DiagnosticsFormatting.UNKNOWN),
-            "Provider" to when {
-                facts == null -> DiagnosticsFormatting.UNKNOWN
-                facts.packageMatchesExpected && facts.enabled -> "available"
-                else -> "unavailable"
-            },
-            "Provider package expected" to DiagnosticsFormatting.boolean(facts?.packageMatchesExpected),
-            "Provider spec" to specText,
-            "Permission" to permissionText,
-            "Collection usable" to DiagnosticsFormatting.boolean(detection.collectionReady),
-            "Last check" to DiagnosticsFormatting.ageMs(ageMs),
-            "Check duration" to DiagnosticsFormatting.millis(snapshot.durationMs),
-            "Last failure code" to (failure?.technicalLabel ?: "None"),
-            "Last failure exception" to (failure?.exceptionClass ?: DiagnosticsFormatting.NOT_MEASURED),
-            "Probe" to "selected_deck (1 row, read-only)"
-        )
+        val rows = mutableListOf<Pair<String, String>>()
+
+        // Basic health (GATE 02)
+        rows.add("Status" to (detection?.availability?.statusCode ?: integrationState?.availability?.statusCode ?: DiagnosticsFormatting.UNKNOWN))
+        rows.add("Backend" to (backend?.id?.stableId ?: "ankidroid_local"))
+        rows.add("Endpoint" to (detection?.endpointLabel ?: integrationState?.metadata?.endpointLabel ?: DiagnosticsFormatting.NOT_MEASURED))
+        rows.add("Authority" to (detection?.authority ?: integrationState?.metadata?.authority ?: DiagnosticsFormatting.NOT_MEASURED))
+        rows.add("Authorities checked" to if (detection?.checkedAuthorities?.isEmpty() == false) detection.checkedAuthorities.joinToString(", ") else integrationState?.metadata?.checkedAuthorities?.joinToString(", ") ?: DiagnosticsFormatting.NOT_MEASURED)
+        rows.add("Package" to (detection?.packageName ?: integrationState?.metadata?.packageName ?: DiagnosticsFormatting.UNKNOWN))
+        rows.add("Package version" to (integrationState?.metadata?.packageVersion ?: DiagnosticsFormatting.UNKNOWN))
+        rows.add("Provider" to when {
+            facts == null && integrationState?.metadata == null -> DiagnosticsFormatting.UNKNOWN
+            (facts?.packageMatchesExpected == true && facts.enabled) || (integrationState?.metadata?.providerReachable == true) -> "available"
+            else -> "unavailable"
+        })
+        rows.add("Provider package expected" to DiagnosticsFormatting.boolean(facts?.packageMatchesExpected))
+        rows.add("Provider spec" to specText)
+        rows.add("Permission" to permissionText)
+        rows.add("Collection usable" to DiagnosticsFormatting.boolean(detection?.collectionReady ?: integrationState?.metadata?.collectionReady))
+        rows.add("Last check" to DiagnosticsFormatting.ageMs(if (ageMs >= 0) ageMs else null))
+        rows.add("Check duration" to DiagnosticsFormatting.millis(integrationState?.latencyMs ?: snapshot?.durationMs))
+        rows.add("Last failure code" to (failure?.technicalLabel ?: integrationState?.lastError?.let { it::class.simpleName } ?: "None"))
+        rows.add("Last failure exception" to (failure?.exceptionClass ?: DiagnosticsFormatting.NOT_MEASURED))
+        rows.add("Probe" to "selected_deck (1 row, read-only)")
+
+        // GATE 04: capability matrix (§121)
+        val apiReport = integrationState?.apiCapabilities
+        if (apiReport != null) {
+            rows.add("--- API Capabilities (provider) ---" to "")
+            rows.add("Deck Listing API" to apiReport.deckListing.name)
+            rows.add("Deck Counts API" to apiReport.deckCounts.name)
+            rows.add("Scheduled Review API" to apiReport.scheduledReview.name)
+            rows.add("Rendered Card API" to apiReport.renderedCards.name)
+            rows.add("Simple Text API" to apiReport.simpleCardText.name)
+            rows.add("Next Intervals API" to apiReport.nextReviewIntervals.name)
+            rows.add("Rating Mutation API" to apiReport.ratingCommit.name)
+            rows.add("Flags API" to apiReport.flags.name)
+            rows.add("Bury API" to apiReport.bury.name)
+            rows.add("Suspend API" to apiReport.suspend.name)
+            rows.add("Note Read API" to apiReport.noteRead.name)
+            rows.add("Note Edit API" to apiReport.noteEdit.name)
+            rows.add("Note Create API" to apiReport.noteCreate.name)
+            rows.add("Media Read API" to apiReport.mediaRead.name)
+            rows.add("Media Write API" to apiReport.mediaWrite.name)
+            rows.add("Search API" to apiReport.search.name)
+        }
+
+        val capabilities = integrationState?.capabilities ?: detection?.capabilities
+        if (capabilities != null) {
+            rows.add("--- Study-Agent Implementation (GATE 04) ---" to "")
+            rows.add("Deck Listing" to if (capabilities.deckListing) "Implemented" else "Pending GATE 05")
+            rows.add("Review" to if (capabilities.review) "Implemented" else "Pending GATE 06")
+            rows.add("Rendered Cards" to if (capabilities.renderedCards) "Implemented" else "Pending GATE 08")
+            rows.add("Review Intervals" to if (capabilities.reviewIntervals) "Implemented" else "Pending GATE 06")
+            rows.add("Media" to if (capabilities.media) "Implemented" else "Pending GATE 09")
+            rows.add("Flags" to if (capabilities.flags) "Implemented" else "Pending GATE 11")
+            rows.add("Bury" to if (capabilities.bury) "Implemented" else "Pending GATE 11")
+            rows.add("Suspend" to if (capabilities.suspendCards) "Implemented" else "Pending GATE 11")
+            rows.add("Edit Notes" to if (capabilities.editNotes) "Implemented" else "Pending GATE 17")
+            rows.add("Create Notes" to if (capabilities.createNotes) "Implemented" else "Pending GATE 17")
+            rows.add("Search" to if (capabilities.search) "Implemented" else "Pending GATE 14")
+        }
+
+        // Detailed capability provenance (§122)
+        integrationState?.capabilityDetails?.forEach { detail ->
+            val apiSupport = detail.apiSupport.name
+            val maturity = detail.maturity.name
+            rows.add("Capability ${detail.name}" to "$apiSupport / $maturity (${detail.reason})")
+        }
+
+        // Last error
+        rows.add("Last Error" to (integrationState?.lastError?.message ?: "None"))
+
+        return rows
     }
 
     override fun persistenceDiagnosticsRows(): List<Pair<String, String>> {

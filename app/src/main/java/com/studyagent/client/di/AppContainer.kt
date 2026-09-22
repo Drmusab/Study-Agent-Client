@@ -32,12 +32,21 @@ import com.studyagent.client.core.voice.tts.TtsEngineAdapter
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidLauncher
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidPermissionManager
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidProbe
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidCapabilityProbe
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidEndpoint
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidEndpoints
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidGateway
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthProbe
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthRepository
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidLauncher
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidProviderClient
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidCapabilityProbe
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidDetector
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidGateway
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidHealthCheck
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidHealthProbe
+import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.data.preferences.DefaultProfileRepository
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import com.studyagent.client.data.preferences.ProfileRepository
@@ -105,7 +114,12 @@ interface AppContainer {
     /** "Open AnkiDroid" helper (§31). Distribution-neutral and crash-free when it is absent. */
     val ankiDroidLauncher: AnkiDroidLauncher
 
-    /** GATE 03 seam only; no incomplete backend participates in production selection. */
+    /** GATE 04 — provider client, gateway, backend (single source of truth, §45) */
+    val ankiDroidProviderClient: AnkiDroidProviderClient
+    val ankiDroidGateway: AnkiDroidGateway
+    val ankiDroidBackend: AnkiBackend
+
+    /** GATE 03 + GATE 04 — registry now includes real AnkiDroid backend */
     val ankiBackendRegistry: AnkiBackendRegistry
     val ankiBackendSelector: AnkiBackendSelector
 }
@@ -117,8 +131,73 @@ interface AppContainer {
  * the foreground service observe the same engine, never create their own.
  */
 class DefaultAppContainer(private val context: Context) : AppContainer {
-    override val ankiBackendRegistry: AnkiBackendRegistry by lazy { AnkiBackendRegistry(emptyList()) }
-    override val ankiBackendSelector: AnkiBackendSelector by lazy { AnkiBackendSelector(ankiBackendRegistry) }
+    private val ankiDroidScope = CoroutineScope(SupervisorJob() + DefaultDispatcherProvider().default)
+
+    override val ankiDroidProviderClient: AnkiDroidProviderClient by lazy {
+        AndroidAnkiDroidProbe(context)
+    }
+
+    private val ankiDroidProbe: AndroidAnkiDroidProbe by lazy {
+        // Single instance that serves as both probe and provider client
+        // (AndroidAnkiDroidProbe now implements AnkiDroidProviderClient)
+        ankiDroidProviderClient as AndroidAnkiDroidProbe
+    }
+
+    private val ankiDroidPermissionManager by lazy {
+        AndroidAnkiDroidPermissionManager(context)
+    }
+
+    private val ankiDroidDetector by lazy {
+        DefaultAnkiDroidDetector(
+            probe = ankiDroidProbe,
+            permissions = ankiDroidPermissionManager,
+            endpoints = ankiDroidEndpoints
+        )
+    }
+
+    private val ankiDroidHealthCheck by lazy {
+        DefaultAnkiDroidHealthCheck(
+            detector = ankiDroidDetector,
+            clock = SystemAppClock
+        )
+    }
+
+    private val ankiDroidCapabilityProbe: AnkiDroidCapabilityProbe by lazy {
+        DefaultAnkiDroidCapabilityProbe()
+    }
+
+    private val ankiDroidHealthProbe: AnkiDroidHealthProbe by lazy {
+        DefaultAnkiDroidHealthProbe(
+            healthCheck = ankiDroidHealthCheck,
+            capabilityProbe = ankiDroidCapabilityProbe,
+            providerClient = ankiDroidProviderClient,
+            endpoints = ankiDroidEndpoints
+        )
+    }
+
+    override val ankiDroidGateway: AnkiDroidGateway by lazy {
+        DefaultAnkiDroidGateway(
+            healthProbe = ankiDroidHealthProbe,
+            capabilityProbe = ankiDroidCapabilityProbe,
+            providerClient = ankiDroidProviderClient,
+            endpoints = ankiDroidEndpoints
+        )
+    }
+
+    override val ankiDroidBackend: AnkiBackend by lazy {
+        AnkiDroidBackend(
+            gateway = ankiDroidGateway,
+            scope = ankiDroidScope
+        )
+    }
+
+    override val ankiBackendRegistry: AnkiBackendRegistry by lazy {
+        AnkiBackendRegistry(listOf(ankiDroidBackend))
+    }
+
+    override val ankiBackendSelector: AnkiBackendSelector by lazy {
+        AnkiBackendSelector(ankiBackendRegistry)
+    }
 
     override val dispatchers: DispatcherProvider by lazy { DefaultDispatcherProvider() }
 
@@ -300,7 +379,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             appInfo = { diagnosticsAppInfo() },
             // GATE 02: the AnkiDroid integration section, owned by one application-scoped
             // repository — Diagnostics renders its snapshot, it does not probe anything itself.
-            ankiDroidHealthRepository = ankiDroidHealthRepository
+            ankiDroidHealthRepository = ankiDroidHealthRepository,
+            // GATE 04: gateway + backend for capability matrix (§64/§121)
+            ankiDroidGateway = ankiDroidGateway,
+            ankiDroidBackend = ankiDroidBackend as? AnkiDroidBackend
         )
     }
 
@@ -322,17 +404,13 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
      * Nothing here performs I/O at construction time: the first provider call happens only when
      * the activity reports a foreground event, so app start is never blocked on AnkiDroid
      * (§89/§90).
+     *
+     * GATE 04: reuses the same detector/healthCheck that the gateway uses, so health repository
+     * and gateway remain consistent (single source of truth).
      */
     override val ankiDroidHealthRepository: AnkiDroidHealthRepository by lazy {
         AnkiDroidHealthRepository(
-            check = DefaultAnkiDroidHealthCheck(
-                detector = DefaultAnkiDroidDetector(
-                    probe = AndroidAnkiDroidProbe(context),
-                    permissions = AndroidAnkiDroidPermissionManager(context),
-                    endpoints = ankiDroidEndpoints
-                ),
-                clock = SystemAppClock
-            ),
+            check = ankiDroidHealthCheck,
             scope = CoroutineScope(SupervisorJob() + dispatchers.default),
             clock = SystemAppClock
         )
