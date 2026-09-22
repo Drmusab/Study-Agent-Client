@@ -114,7 +114,7 @@ class FakeAnkiBackendTest {
         val backend = fake(nextErrors = listOf(error))
         val session = backend.begin()
         assertEquals(NextCardResult.Failure(error), backend.nextCard(session))
-        assertEquals(card("A").ref, (backend.nextCard(session) as NextCardResult.Card).turn.card.ref)
+        assertEquals(card("A").ref, (backend.nextCard(session) as NextCardResult.Card).turn.cardRef)
     }
 
     @Test fun `deck and begin errors are typed`() = runTest {
@@ -172,7 +172,7 @@ class FakeAnkiBackendTest {
     @Test fun `collection and deck filtering cannot return foreign collection cards`() = runTest {
         val backend = fake(cards = listOf(card("other", key = "other-collection"), card("A")))
         val session = backend.begin()
-        assertEquals(card("A").ref, (backend.nextCard(session) as NextCardResult.Card).turn.card.ref)
+        assertEquals(card("A").ref, (backend.nextCard(session) as NextCardResult.Card).turn.cardRef)
     }
 
     @Test fun `wrong card and wrong session rating are rejected before mutation`() = runTest {
@@ -256,7 +256,45 @@ class FakeAnkiBackendTest {
         tags += "late"
         times[Rating.GOOD] = "wrong"
         val turn = (backend.nextCard(backend.begin()) as NextCardResult.Card).turn
-        assertEquals(setOf("original"), turn.card.metadata.tags)
-        assertEquals("4d", turn.card.scheduling?.nextReviewTimes?.get(Rating.GOOD))
+        assertEquals(setOf("original"), turn.renderedCard?.metadata?.tags)
+        assertEquals("4d", turn.renderedCard?.scheduling?.nextReviewTimes?.get(Rating.GOOD))
+    }
+
+    // ---------------------------------------------------------------- GATE 06 scheduled review
+
+    @Test fun `an exhausted deck is Finished rather than a failure`() = runTest {
+        val backend = fake(cards = emptyList())
+        val session = backend.begin()
+        assertEquals(NextCardResult.Finished, backend.nextCard(session))
+        assertEquals(NextCardResult.Finished, backend.nextCard(session))
+        // "nothing due" and "backend down" stay different facts (§74/§127).
+        assertTrue(backend.availability.value is AnkiAvailability.Ready)
+    }
+
+    @Test fun `a repeated read before commit never advances to the next card`() = runTest {
+        val backend = fake()
+        val session = backend.begin()
+        val first = (backend.nextCard(session) as NextCardResult.Card).turn
+        repeat(5) {
+            assertEquals(first, (backend.nextCard(session) as NextCardResult.Card).turn)
+        }
+        assertEquals("A", first.cardRef.noteId)
+        // The stand-in mirrors the real backend's one-active-turn rule, which is what makes GATE
+        // 10's StudySession tests meaningful without AnkiDroid (§102/§167).
+        assertEquals(backend.capabilities.value.scheduledReview, true)
+    }
+
+    @Test fun `a rated turn advances once and only once`() = runTest {
+        val backend = fake()
+        val session = backend.begin()
+        val first = (backend.nextCard(session) as NextCardResult.Card).turn
+        assertTrue(backend.commitRating(first.request(Rating.GOOD)) is CommitRatingResult.Committed)
+
+        val second = (backend.nextCard(session) as NextCardResult.Card).turn
+        assertEquals("B", second.cardRef.noteId)
+        assertNotEquals("a new presentation is a new turn identity", first.turnId, second.turnId)
+        assertEquals("B", (backend.nextCard(session) as NextCardResult.Card).turn.cardRef.noteId)
+        assertTrue(backend.commitRating(second.request(Rating.GOOD)) is CommitRatingResult.Committed)
+        assertEquals(NextCardResult.Finished, backend.nextCard(session))
     }
 }

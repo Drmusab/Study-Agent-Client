@@ -30,11 +30,31 @@ interface AnkiBackend {
      */
     suspend fun getSelectedDeck(): AnkiResult<AnkiDeckRef?>
 
+    /**
+     * Open a scheduled-review session bound immutably to this backend, one collection and one
+     * deck (§10/§130). The deck is validated against the live collection before the session
+     * exists, so a stale reference fails here rather than mid-session (§45/§46).
+     *
+     * Idempotent per user study session (§85): repeating the identical request returns the same
+     * handle; a *different* request for a session that is already open is refused instead of
+     * silently replacing the review context (§128/§129).
+     */
     suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession>
 
     /**
-     * A read retry returns the same uncommitted turn, not a new presentation. An ambiguous
-     * or rejected commit blocks progression with a typed failure until recovery decides otherwise.
+     * The next card **the backend's scheduler** currently wants reviewed — not the first card of
+     * the deck, not a locally ordered due list (INV-ANKI-REV-01/02).
+     *
+     * One session has at most one active uncommitted turn (INV-ANKI-REV-03): while a turn is
+     * unresolved this returns *that* turn again rather than asking the scheduler for another card,
+     * so a UI double tap, a voice command and a reconnect callback cannot produce two active
+     * presentations (§63-§66/§92/§93). A retry after a read that changed nothing is therefore
+     * safe and returns the same uncommitted turn.
+     *
+     * `Finished` is a valid end state, not an error: it means the scheduler has nothing more for
+     * this session. It is never conflated with a failed or unavailable backend
+     * (INV-ANKI-REV-06, §31/§32/§74). An ambiguous or rejected commit blocks progression with a
+     * typed failure until recovery decides otherwise.
      */
     suspend fun nextCard(session: AnkiReviewSession): NextCardResult
 
@@ -56,11 +76,42 @@ data class AnkiReviewSession(val context: AnkiSessionContext, val backendSession
     init { require(backendSessionRef.isNotBlank()) }
 }
 
-/** Immutable binding of a presentation to the user session and backend; card fields stay nested. */
+/**
+ * What one review turn currently knows about its card (§27/§122/§123).
+ *
+ * A turn is created from scheduler identity alone ([Scheduled]) and only later carries card
+ * content ([Rendered]). Modelling the two phases instead of filling an [AnkiRenderedCard] with
+ * placeholder question/answer strings is what keeps "this card's answer is genuinely empty"
+ * distinguishable from "this card has not been loaded yet" (§28).
+ */
+sealed interface AnkiReviewTurnContent {
+    val ref: AnkiCardRef
+    val media: List<AnkiMediaRef>
+
+    /** Scheduler identity and metadata only; GATE 07 replaces this with [Rendered] on hydration. */
+    data class Scheduled(val card: AnkiScheduledCard) : AnkiReviewTurnContent {
+        override val ref: AnkiCardRef get() = card.ref
+        override val media: List<AnkiMediaRef> get() = card.media
+    }
+
+    data class Rendered(val card: AnkiRenderedCard) : AnkiReviewTurnContent {
+        override val ref: AnkiCardRef get() = card.ref
+        override val media: List<AnkiMediaRef> get() = card.media
+    }
+}
+
+/**
+ * Immutable binding of one presentation to the user session and backend.
+ *
+ * A turn is a *presentation*, not a card: the same card legitimately produces many turns with
+ * distinct [turnId]s (INV-ANKI-REV-04/05). AnkiDroid owns card identity; Study-Agent owns turn
+ * identity, and a turn id is created only once a scheduled card has actually been accepted as
+ * current — a failed provider read never leaves an orphaned turn behind (§58/§59).
+ */
 data class AnkiReviewTurn(
     val turnId: ReviewTurnId,
     val studySessionId: String,
-    val card: AnkiRenderedCard,
+    val content: AnkiReviewTurnContent,
     val position: Int? = null,
     val remaining: Int? = null
 ) {
@@ -69,7 +120,10 @@ data class AnkiReviewTurn(
         require(position == null || position > 0)
         require(remaining == null || remaining >= 0)
     }
-    val backendId: AnkiBackendId get() = card.ref.backendId
+    val cardRef: AnkiCardRef get() = content.ref
+    /** Non-null only after GATE 07 hydration; never a placeholder. */
+    val renderedCard: AnkiRenderedCard? get() = (content as? AnkiReviewTurnContent.Rendered)?.card
+    val backendId: AnkiBackendId get() = cardRef.backendId
     val commitId: ReviewCommitId get() = ReviewCommitId(backendId, studySessionId, turnId)
 }
 

@@ -133,6 +133,95 @@ object AnkiDroidApiContract {
         DECK_ID_COLUMN,
         DECK_NAME_COLUMN
     )
+
+    // ------------------------------------------------------------------------------------------
+    // GATE 06 — scheduled-review contract (review-info endpoint, verified at v2.24.1)
+    //
+    // | Fact | Value | Verified from |
+    // |---|---|---|
+    // | Endpoint URI | `content://<authority>/schedule` | `FlashCardsContract.ReviewInfo.CONTENT_URI = Uri.withAppendedPath(AUTHORITY_URI, "schedule")`; `CardContentProvider` `addUri("schedule/", SCHEDULE = 3000)` |
+    // | Query arguments | `selection` string `"limit=?, deckID=?"`; `?` consumes `selectionArgs` **in order** | `CardContentProvider.query` `SCHEDULE` branch: `selection.split(",")` → `arg.split("=")` → placeholder pulled from `selectionArgs[selectionArgIndex++]` |
+    // | Unrecognised argument key | silently ignored (no error) | same branch: `if ("limit" == …) … else if ("deckID" == …)` — no `else` |
+    // | Unparseable argument value | `NumberFormatException` caught + logged, previous default kept | same branch: `catch (nfe: NumberFormatException) { Timber.w(nfe) }` |
+    // | `limit` default | `1` | same branch: `var limit = 1` |
+    // | `limit` meaning | maximum number of **rows** returned | `FlashCardsContract.ReviewInfo` KDoc: "The maximum number of cards (rows) that will be returned"; implemented as `getQueuedCards(fetchLimit = limit)` then `while (k < limit)` |
+    // | `deckID` semantics | the deck the queue is drawn from; **absent** → AnkiDroid's currently selected deck | KDoc default column: "The deck, that was last selected for reviewing by the user in the Deck chooser dialog" |
+    // | Unknown `deckID` | provider returns an **empty cursor** (indistinguishable from "nothing due") | `if (!selectDeckWithCheck(col, deckId)) return rv` |
+    // | Query side effect | temporarily selects `deckID`, then restores the previous selection | `col.decks.select(deckIdOfTemporarilySelectedDeck)` … `col.decks.select(selectedDeckBeforeQuery)`; `Collection.set_current_deck` is a transacted `Op::SetCurrentDeck` config write |
+    // | Restore is skipped | if anything throws between the two `select` calls | the restore is the last statement of the branch, not a `finally` |
+    // | `note_id` | `long`, read-only; the note the row belongs to | `ReviewInfo.NOTE_ID = "note_id"`; matched in `addReviewInfoToCursor` via `Card.NOTE_ID` (same string) |
+    // | `ord` | `int`, read-only; the card ordinal within the note | `ReviewInfo.CARD_ORD = "ord"` |
+    // | `button_count` | `int`, read-only, documented range 2..4 | `ReviewInfo.BUTTON_COUNT`; **the v2.24.1 provider hard-codes `val buttonCount = 4`** |
+    // | `next_review_times` | `JSONArray` of interval labels, transported as text; "must equal the number of buttons" | `ReviewInfo.NEXT_REVIEW_TIMES`; `rb.add(nextReviewTimesJson.toString())` |
+    // | Interval label order | index `i` ← `nextIvlStr(card, CardAnswer.Rating.forNumber(i))` for `i` in `0 until buttonCount` | `CardContentProvider.query` `SCHEDULE` branch; `CardAnswer.Rating` is `AGAIN = 0, HARD = 1, GOOD = 2, EASY = 3` (`proto/anki/scheduler.proto`) ⇒ index 0..3 = again/hard/good/easy |
+    // | `media_files` | `JSONArray` of filenames, transported as text | `ReviewInfo.MEDIA_FILES`; `rb.add(JSONArray(col.media.filesInStr(currentCard)))` |
+    // | Unknown projection column | **throws** `UnsupportedOperationException("Queue \"<col>\" is unknown")` | `addReviewInfoToCursor` — unlike `addDeckToCursor`, there is no silent skip |
+    // | Provider spec gate | none | `CardContentProvider` v2.24.1 contains no `requireApiLevel` call at all |
+    // | Permission | same `READ_WRITE_PERMISSION`, enforced on `query` | `if (!hasReadWritePermission() && shouldEnforceQueryOrInsertSecurity()) throwSecurityException("query", uri)` |
+    // | Rating mutation | lives on `update`, **not** `query` | `update` `SCHEDULE` branch reads `answer_ease`/`time_taken`/`buried`/`suspended` and calls `col.sched.answerCard` — GATE 06 never issues an `update` |
+    // | No wrapper in the api artifact | `AddContentApi` exposes no schedule/`getSched` member at v2.24.1 | read of `api/src/main/java/com/ichi2/anki/api/AddContentApi.kt` in full; the api module contains only `AddContentApi`, `BasicModel`, `Basic2Model`, `Ease`, `NoteInfo`, `Utils` |
+    // ------------------------------------------------------------------------------------------
+
+    /** URI path of the scheduled-review endpoint (`ReviewInfo.CONTENT_URI`). */
+    const val SCHEDULE_PATH: String = "schedule"
+
+    /** Review row column: the note the card belongs to. */
+    const val REVIEW_NOTE_ID_COLUMN: String = "note_id"
+
+    /** Review row column: the card ordinal inside that note. */
+    const val REVIEW_CARD_ORD_COLUMN: String = "ord"
+
+    /** Review row column: how many rating buttons the scheduler offers. */
+    const val REVIEW_BUTTON_COUNT_COLUMN: String = "button_count"
+
+    /** Review row column: backend-rendered interval labels, one per button. */
+    const val REVIEW_NEXT_REVIEW_TIMES_COLUMN: String = "next_review_times"
+
+    /** Review row column: filenames of the media referenced by the card. */
+    const val REVIEW_MEDIA_FILES_COLUMN: String = "media_files"
+
+    /** Selection key that scopes the queue to one deck. */
+    const val REVIEW_DECK_ID_SELECTION_KEY: String = "deckID"
+
+    /** Selection key that bounds how many rows come back. */
+    const val REVIEW_LIMIT_SELECTION_KEY: String = "limit"
+
+    /** Separator between selection entries (`"limit=?, deckID=?"`). */
+    const val REVIEW_SELECTION_ENTRY_SEPARATOR: String = ","
+
+    /** Separator between a selection key and its value. */
+    const val REVIEW_SELECTION_KEY_VALUE_SEPARATOR: String = "="
+
+    /** The placeholder whose value is taken from `selectionArgs`, in order. */
+    const val REVIEW_SELECTION_PLACEHOLDER: String = "?"
+
+    /** The provider's own default when `limit` is not supplied. */
+    const val REVIEW_DEFAULT_LIMIT: Int = 1
+
+    /**
+     * Upper bound this build will ever ask for. The endpoint is bounded on purpose: Study-Agent
+     * retrieves one scheduled card at a time so that no stale queue is ever held locally
+     * (§13/§14/§39/§40/§79). `limit = 0` is additionally rejected rather than forwarded — Anki's
+     * queue builder applies it as `take(0)`, i.e. it answers "nothing is due", which can never be
+     * the meaning of a zero limit (§41/§42/§78).
+     */
+    const val REVIEW_MAX_LIMIT: Int = 32
+
+    /** The provider's documented button-count range. Anything outside it is not a real answer. */
+    const val REVIEW_MIN_BUTTON_COUNT: Int = 2
+    const val REVIEW_MAX_BUTTON_COUNT: Int = 4
+
+    /**
+     * Projection of the scheduled-review read. Only columns the endpoint recognises may appear
+     * here: an unknown name makes the provider throw instead of shifting the row (see the table).
+     */
+    val REVIEW_PROJECTION: Array<String> = arrayOf(
+        REVIEW_NOTE_ID_COLUMN,
+        REVIEW_CARD_ORD_COLUMN,
+        REVIEW_BUTTON_COUNT_COLUMN,
+        REVIEW_NEXT_REVIEW_TIMES_COLUMN,
+        REVIEW_MEDIA_FILES_COLUMN
+    )
 }
 
 /**

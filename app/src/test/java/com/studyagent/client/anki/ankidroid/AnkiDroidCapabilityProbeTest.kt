@@ -28,7 +28,13 @@ class AnkiDroidCapabilityProbeTest {
 
         assertTrue(result.implemented.deckListing)
         assertFalse(result.implemented.deckCounts)
+        // GATE 06 — scheduled review is implemented; the full review loop still is not, because
+        // rating commit belongs to GATE 11 (§75/§147).
+        assertTrue(result.implemented.scheduledReview)
+        assertTrue(result.implemented.reviewIntervals)
         assertFalse(result.implemented.review)
+        assertFalse(result.implemented.renderedCards)
+        assertFalse(result.implemented.media)
         assertEquals(CapabilitySupport.SUPPORTED, result.apiReport.deckListing)
         assertEquals(CapabilitySupport.SUPPORTED, result.apiReport.scheduledReview)
         assertEquals(2, result.apiReport.specVersion)

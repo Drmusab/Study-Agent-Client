@@ -832,3 +832,67 @@ Cache is in-memory, backend-scoped, not scheduling authority. Read-only.
 `AnkiCapabilities.deckListing = true` when Ready. `deckCounts` stays false until real-device
 verification. Review remains unimplemented.
 
+## 26. GATE 06 — Scheduled review: the `schedule` endpoint
+
+Full contract, provenance table and semantics audit: `docs/GATE_06_ANKI_REVIEW.md`.
+
+Pipeline: public `schedule` provider URI → `AnkiDroidReviewGateway` → `AnkiDroidBackend.nextCard()`
+→ `AnkiReviewTurn` (+ `AnkiReviewSession` ownership) → future `StudySessionMachine` (GATE 10).
+
+### 26.1 Endpoint
+
+```
+content://<authority>/schedule        ReviewInfo.CONTENT_URI
+```
+
+Query arguments travel in the `selection` string, **not** in `selectionArgs` alone:
+
+```
+selection     = "limit=1, deckID=1700000000000"
+selectionArgs = null
+```
+
+`limit` is the maximum number of **rows**; the provider defaults it to `1`. `deckID` scopes the
+queue to one deck; when absent the endpoint draws from AnkiDroid's *currently selected* deck.
+
+### 26.2 Columns
+
+| Column | Type (as transported) | Use |
+|---|---|---|
+| `note_id` | `long` | card identity — with `ord` |
+| `ord` | `int` | card identity — with `note_id` |
+| `button_count` | `int` | how many rating buttons the scheduler offers |
+| `next_review_times` | `JSONArray` **text** | interval label per button, display only |
+| `media_files` | `JSONArray` **text** | filenames the card references, display/resolution only |
+
+Write-only columns (`answer_ease`, `time_taken`, `buried`, `suspended`) exist on the same URI and
+belong to GATE 11 and beyond. This gate never issues an `update` on any AnkiDroid URI.
+
+### 26.3 Verified semantics (v2.24.1 pin)
+
+- **Does reading mutate review history?** No. The read calls the backend's queue fetch; it never
+  calls the answer path, so no revlog entry and no due-state commit occurs.
+- **Does a second read before rating return the same card?** Yes for the queue's own ordering; the
+  card chosen among *equally due* cards can vary, because AnkiDroid's own contract test notes that
+  resetting the queue "randomly chooses between multiple cards". Study-Agent therefore never
+  prefetches: it asks once per unresolved turn.
+- **Provider-side current-card state?** None that a caller can rely on. What the query *does* do is
+  temporarily select the requested deck and restore the previous selection — a persisted,
+  undoable collection-config write. Study-Agent issues no selection write of its own.
+- **What does `limit` mean?** Rows returned. `0` is not "unlimited" and not "nothing due": the
+  queue builder applies it as `take(0)`, so Study-Agent rejects non-positive limits instead.
+- **Parent decks?** Anki's own queue builder decides which decks a selection gathers from.
+  Study-Agent passes the deck the user chose and never expands, filters or re-orders it.
+
+### 26.4 Ambiguity that is resolved, not guessed
+
+The endpoint answers an **unknown `deckID`** with the *same empty cursor* it uses for an exhausted
+deck. An empty answer is therefore not proof that nothing is due: the backend re-checks the deck
+against the deck listing, and reports `DeckNotFound` if it is gone. That check costs one query and
+happens only at the moment a session would otherwise finish.
+
+### 26.5 Capabilities
+
+`AnkiCapabilities.scheduledReview = true` and `reviewIntervals = true` when Ready at a supported
+spec. `review` (the complete loop, including rating commit) stays `false` until GATE 11;
+`renderedCards` until GATE 07; `media` until GATE 09. The capability matrix reports exactly that.

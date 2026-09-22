@@ -110,11 +110,66 @@ class AnkiDomainModelTest {
         invalid { card.copy(deckRef = card.deckRef?.copy(collectionKey = "other")) }
     }
 
+    @Test fun `rating options describe what the scheduler offers and refuse to invent it`() {
+        val known = AnkiRatingOptions.Known(listOf(Rating.AGAIN, Rating.HARD))
+        assertEquals(2, known.buttonCount)
+        assertTrue(known.supports(Rating.AGAIN))
+        assertFalse("a two button card must not claim GOOD", known.supports(Rating.GOOD))
+        invalid { AnkiRatingOptions.Known(emptyList()) }
+        invalid { AnkiRatingOptions.Known(listOf(Rating.AGAIN, Rating.AGAIN)) }
+        invalid { AnkiRatingOptions.Unmapped(-1) }
+        assertEquals(0, AnkiRatingOptions.Unmapped(0).buttonCount)
+    }
+
+    @Test fun `a scheduled card binds one backend and never fakes a card id`() {
+        val backend = AnkiBackendId.AnkiDroidLocal
+        val deck = AnkiDeckRef(backend, "10")
+        val scheduled = AnkiScheduledCard(
+            ref = AnkiCardRef(backend, cardId = null, noteId = "20", cardOrd = 1),
+            noteRef = AnkiNoteRef(backend, "20"),
+            deckRef = deck,
+            ratingOptions = AnkiRatingOptions.Known(listOf(Rating.AGAIN))
+        )
+        assertEquals("20", scheduled.ref.noteId)
+        assertEquals(1, scheduled.ref.cardOrd)
+
+        // Cross-backend and cross-note combinations are not representable, and a card with no
+        // identity at all still is not (INV-ANKI-REV-04, §17/§18).
+        invalid { scheduled.copy(deckRef = deck.copy(backendId = AnkiBackendId.PcAgent("p"))) }
+        invalid { scheduled.copy(noteRef = AnkiNoteRef(backend, "21")) }
+        invalid {
+            scheduled.copy(
+                noteRef = AnkiNoteRef(backend, "20", "collection-a"),
+                deckRef = deck.copy(collectionKey = "collection-b")
+            )
+        }
+        invalid { AnkiCardRef(backend, noteId = "20") }
+    }
+
+    @Test fun `a turn without content is not representable`() {
+        val rendered = AnkiReviewTurnContent.Rendered(card())
+        val turn = AnkiReviewTurn(ReviewTurnId("t1"), "s", rendered)
+        assertEquals(card().ref, turn.cardRef)
+        assertEquals(rendered.card, turn.renderedCard)
+
+        // A scheduled turn has identity but explicitly no rendered card — never an empty one.
+        val scheduled = AnkiScheduledCard(
+            ref = card().ref,
+            noteRef = null,
+            deckRef = card().deckRef!!,
+            ratingOptions = AnkiRatingOptions.Known(listOf(Rating.GOOD))
+        )
+        val schedulerTurn = AnkiReviewTurn(ReviewTurnId("t2"), "s", AnkiReviewTurnContent.Scheduled(scheduled))
+        assertNull(schedulerTurn.renderedCard)
+        assertEquals(scheduled.ref, schedulerTurn.cardRef)
+        assertEquals(schedulerTurn.turnId, schedulerTurn.commitId.turnId)
+    }
+
     @Test fun `request validation is local and does not invent scheduler values`() {
         invalid { BeginReviewRequest(context(), 0) }
         invalid { BeginReviewRequest(context(), -1) }
         invalid { AnkiReviewSession(context(), " ") }
-        val turn = AnkiReviewTurn(ReviewTurnId("t"), "s", card())
+        val turn = AnkiReviewTurn(ReviewTurnId("t"), "s", AnkiReviewTurnContent.Rendered(card()))
         invalid { turn.copy(studySessionId = " ") }
         invalid { turn.copy(position = 0) }
         invalid { turn.copy(remaining = -1) }

@@ -140,7 +140,9 @@ class FakeAnkiBackend(
             val context = request.context
             if (context.backendId != id) return@withLock AnkiResult.Failure(AnkiError.SessionInvalid())
             usabilityError()?.let { return@withLock AnkiResult.Failure(it) }
-            if (!capabilities.value.review || !context.capabilities.review) {
+            if (!capabilities.value.scheduledReview || !capabilities.value.review ||
+                !context.capabilities.scheduledReview || !context.capabilities.review
+            ) {
                 return@withLock AnkiResult.Failure(unsupported("review"))
             }
             beginError?.let { return@withLock AnkiResult.Failure(it) }
@@ -176,13 +178,15 @@ class FakeAnkiBackend(
         return mutex.withLock {
             if (this.session != session) return@withLock NextCardResult.Failure(AnkiError.SessionInvalid())
             usabilityError()?.let { return@withLock NextCardResult.BackendUnavailable(it) }
-            if (!capabilities.value.review) return@withLock NextCardResult.Failure(unsupported("review"))
+            if (!capabilities.value.scheduledReview) {
+                return@withLock NextCardResult.Failure(unsupported("scheduledReview"))
+            }
             nextFailures.removeFirstOrNull()?.let { return@withLock NextCardResult.Failure(it) }
             active?.let { turn ->
                 when (ledger[turn.commitId]?.result) {
                     is CommitRatingResult.Committed -> Unit
                     is CommitRatingResult.Ambiguous, is CommitRatingResult.Rejected ->
-                        return@withLock NextCardResult.Failure(AnkiError.CommitConflict(turn.card.ref))
+                        return@withLock NextCardResult.Failure(AnkiError.CommitConflict(turn.cardRef))
                     else -> return@withLock NextCardResult.Card(turn)
                 }
             }
@@ -191,7 +195,7 @@ class FakeAnkiBackend(
             cursor += 1
             val turn = AnkiReviewTurn(
                 ReviewTurnId("$instanceId:turn:${++serial}"), session.context.studySessionId,
-                card, position = cursor, remaining = queue.size - cursor
+                AnkiReviewTurnContent.Rendered(card), position = cursor, remaining = queue.size - cursor
             )
             active = turn
             NextCardResult.Card(turn)
@@ -214,7 +218,7 @@ class FakeAnkiBackend(
                 return@withLock CommitRatingResult.Rejected(AnkiError.SessionInvalid())
             }
             val turn = active
-            if (turn == null || turn.turnId != request.commitId.turnId || turn.card.ref != request.card) {
+            if (turn == null || turn.turnId != request.commitId.turnId || turn.cardRef != request.card) {
                 return@withLock CommitRatingResult.Rejected(AnkiError.StaleTurn())
             }
             if (previous == null && ledger.size >= maxLedgerEntries) {
@@ -237,8 +241,8 @@ class FakeAnkiBackend(
     private fun unsupported(action: String) = AnkiError.UnsupportedAction(action)
 
     companion object {
-        val REVIEW_CAPABILITIES = AnkiCapabilities(review = true, deckListing = true, renderedCards = true,
-            reviewIntervals = true)
+        val REVIEW_CAPABILITIES = AnkiCapabilities(review = true, scheduledReview = true, deckListing = true,
+            renderedCards = true, reviewIntervals = true)
 
         private fun coherent(state: AnkiAvailability, capabilities: AnkiCapabilities): AnkiAvailability =
             if (state is AnkiAvailability.Ready) AnkiAvailability.Ready(capabilities) else state

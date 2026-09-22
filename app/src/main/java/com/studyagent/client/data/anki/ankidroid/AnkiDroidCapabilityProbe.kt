@@ -94,38 +94,21 @@ internal class DefaultAnkiDroidCapabilityProbe(
         implemented: AnkiCapabilities,
         detection: AnkiDroidDetectionResult
     ): List<AnkiDroidCapabilityDetail> {
-        val base = apiReport.toCapabilityDetailList()
-        return base.map { detail ->
-            val isImplemented = when (detail.name) {
-                "deckListing" -> implemented.deckListing
-                "renderedCards" -> implemented.renderedCards
-                "review" -> implemented.review
-                "reviewIntervals" -> implemented.reviewIntervals
-                "media" -> implemented.media
-                "flags" -> implemented.flags
-                "bury" -> implemented.bury
-                "suspend" -> implemented.suspendCards
-                "editNotes" -> implemented.editNotes
-                "createNotes" -> implemented.createNotes
-                "search" -> implemented.search
-                else -> false
-            }
-
-            val maturity = when {
-                detail.apiSupport == CapabilitySupport.UNSUPPORTED -> CapabilityMaturity.API_UNSUPPORTED
-                detail.apiSupport == CapabilitySupport.SUPPORTED && !isImplemented -> CapabilityMaturity.API_SUPPORTED_NOT_IMPLEMENTED
-                isImplemented -> CapabilityMaturity.IMPLEMENTED
-                else -> CapabilityMaturity.API_SUPPORTED_NOT_IMPLEMENTED
-            }
-
+        // The rows are built from the *same* AnkiCapabilities the probe publishes, so a row can
+        // never claim more than the backend actually offers (GATE 06 replaced the previous
+        // name-matching, whose keys did not line up with the report's own row names and therefore
+        // reported every row as unimplemented).
+        return apiReport.toCapabilityDetailList(implemented).map { detail ->
             val reason = when {
-                detection.availability !is AnkiAvailability.Ready -> "backend not ready: ${detection.availability::class.simpleName}"
-                detail.apiSupport == CapabilitySupport.UNSUPPORTED -> "API unsupported at spec ${apiReport.specVersion}"
-                !isImplemented -> "API supported, Study-Agent implementation pending"
-                else -> "implemented and verified"
+                detection.availability !is AnkiAvailability.Ready ->
+                    "backend not ready: ${detection.availability::class.simpleName}"
+                detail.apiSupport == CapabilitySupport.UNSUPPORTED ->
+                    "API unsupported at spec ${apiReport.specVersion}"
+                detail.maturity == CapabilityMaturity.API_SUPPORTED_NOT_IMPLEMENTED ->
+                    "API supported, Study-Agent implementation pending"
+                else -> "implemented; not yet verified on a real device"
             }
-
-            detail.copy(maturity = maturity, reason = reason)
+            detail.copy(reason = reason)
         }
     }
 }

@@ -96,6 +96,19 @@ sealed interface AnkiError {
         override val message: String = "This Anki backend does not support the requested action."
     ) : AnkiError
 
+    /**
+     * GATE 06 amendment — the request itself violates the domain contract, so it was rejected
+     * before any backend was called (foreign backend reference, unmappable deck id, out-of-range
+     * session limit). Distinct from [UnsupportedAction] (the backend was asked and cannot do it)
+     * and from [DeckNotFound] (the backend was asked and the deck is genuinely gone): here nothing
+     * was asked at all, and the caller has a bug or a stale reference. [detail] is a small stable
+     * token (for example `deck_id_unmappable`), never provider text or content.
+     */
+    data class InvalidRequest(
+        val detail: String? = null,
+        override val message: String = "The request is not valid for this Anki backend."
+    ) : AnkiError
+
     data class NoteNotFound(
         override val message: String = "The note no longer exists."
     ) : AnkiError
