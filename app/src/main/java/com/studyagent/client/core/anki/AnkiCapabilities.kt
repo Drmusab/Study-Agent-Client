@@ -17,6 +17,7 @@ data class AnkiCapabilities(
     val review: Boolean = false,
     val deckListing: Boolean = false,
     val renderedCards: Boolean = false,
+    val reviewIntervals: Boolean = false,
     val media: Boolean = false,
     val flags: Boolean = false,
     val bury: Boolean = false,

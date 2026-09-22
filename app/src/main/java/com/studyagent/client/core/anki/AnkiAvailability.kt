@@ -49,7 +49,7 @@ sealed interface AnkiAvailability {
     /** Installed, but no initialized collection is accessible yet. */
     data object CollectionNotInitialized : AnkiAvailability
 
-    /** The backend can accept new review sessions right now. */
+    /** Usable now; each operation still requires its capability (Ready is not review support). */
     data class Ready(val capabilities: AnkiCapabilities) : AnkiAvailability
 
     /** Expected to recover by itself (provider locked, collection closed and reopening). */

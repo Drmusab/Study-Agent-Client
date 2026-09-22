@@ -1,88 +1,77 @@
 package com.studyagent.client.core.anki
 
-/**
- * GATE 01 contract — backend-neutral domain models (§20-§22).
- *
- * No AnkiDroid type (`FlashCardsContract`, `Cursor`, `ContentResolver`,
- * `AddContentApi`) and no PC-protocol type (`ProtocolMessage`, `ServerMessage`,
- * socket) may reach this package — those live behind the backend gateways in
- * `data/anki/...` (INV-ANKI-06, §18-§19).
- */
+import com.studyagent.client.core.models.Rating
 
-/** One deck as listed by a backend. Identity is [ref]; [name] is display-only. */
+/** No guessed zeros or totals. Values are backend-reported display snapshots, not scheduler input. */
+data class AnkiDeckCounts(
+    val new: Int? = null,
+    val learning: Int? = null,
+    val review: Int? = null,
+    val totalDue: Int? = null
+) {
+    init { require(listOf(new, learning, review, totalDue).all { it == null || it >= 0 }) }
+}
+
+/** Name and parsed hierarchy are display-only; renaming never changes ref. */
 data class AnkiDeck(
     val ref: AnkiDeckRef,
     val name: String,
-    val newCount: Int = 0,
-    val dueCount: Int = 0,
-    val learningCount: Int = 0,
-    val isDynamic: Boolean = false
-)
+    val parentRef: AnkiDeckRef? = null,
+    val isFiltered: Boolean? = null,
+    val counts: AnkiDeckCounts? = null
+) {
+    init {
+        require(name.isNotBlank())
+        require(parentRef == null || parentRef.backendId == ref.backendId)
+        require(parentRef == null || parentRef != ref)
+        require(parentRef?.collectionKey == null || ref.collectionKey == null ||
+            parentRef.collectionKey == ref.collectionKey)
+    }
+    val path: List<String> get() = name.split("::")
+}
 
-/**
- * Due/new counts for one deck. Counts are *freshness-graded cache* (§25):
- * they may be shown stale with [asOfEpochMs], but never treated as scheduler
- * authority — the next card always comes from the backend, never from counts
- * (INV-ANKI-04, INV-ANKI-09).
- */
-data class AnkiDeckSummary(
-    val deck: AnkiDeckRef,
-    val newCount: Int = 0,
-    val dueCount: Int = 0,
-    val learningCount: Int = 0,
-    /** When these numbers were obtained; null when the backend did not say. */
-    val asOfEpochMs: Long? = null
-)
-
-/**
- * Media is *referenced*, never copied into Study-Agent storage (§23).
- * Filesystem paths are intentionally absent from the contract.
- */
+/** References only: never File, Android Uri, audio/image bytes or copied media. */
 sealed interface AnkiMediaRef {
-    /** Android content URI served by the backend's provider (string form stays Android-free). */
-    data class ContentUri(val uri: String, val mimeType: String? = null) : AnkiMediaRef
-
-    /** Opaque stream the backend opens on demand (gateway-mediated). */
-    data class BackendStream(val streamId: String, val mimeType: String? = null) : AnkiMediaRef
-
-    /** Remote URL reachable from this device (PC agent media endpoint). */
-    data class RemoteUrl(val url: String, val mimeType: String? = null) : AnkiMediaRef
-
-    /** Media exists on the card but cannot be served right now (render degrades, §37). */
+    data class ContentUri(val uri: String, val mimeType: String? = null) : AnkiMediaRef {
+        init { require(uri.isNotBlank()) }
+    }
+    data class BackendStream(val streamId: String, val mimeType: String? = null) : AnkiMediaRef {
+        init { require(streamId.isNotBlank()) }
+    }
+    data class RemoteUrl(val url: String, val mimeType: String? = null) : AnkiMediaRef {
+        init { require(url.isNotBlank()) }
+    }
     data class Unavailable(val reason: String? = null) : AnkiMediaRef
 }
 
-/**
- * Scheduler-owned *display hints* only (§21). These labels describe what Anki
- * already computed; they are never inputs to any Study-Agent re-scheduling,
- * and they are never persisted as due-state authority (INV-ANKI-04).
- */
+/** FSRS facts are informational only; Study-Agent does not calculate scheduling. */
+data class AnkiFsrsInfo(
+    val stability: Double? = null,
+    val difficulty: Double? = null,
+    val desiredRetention: Double? = null
+)
+
+/** Backend-rendered labels (including "4d", "6m") are never parsed into scheduling logic. */
 data class AnkiSchedulingInfo(
     val intervalLabel: String? = null,
     val dueStateLabel: String? = null,
-    /** Per-button preview labels ("10m", "1d"...) exactly as the backend rendered them. */
-    val easePreviewLabels: List<String> = emptyList()
+    val nextReviewTimes: Map<Rating, String> = emptyMap(),
+    val fsrs: AnkiFsrsInfo? = null
 )
 
-/** Non-content card facts safe for display and diagnostics. */
+/** Content facts only; tags are not a database or UI selection state. */
 data class AnkiCardMetadata(
     val deckName: String? = null,
     val noteTypeName: String? = null,
-    val tags: List<String> = emptyList()
+    val tags: Set<String> = emptySet()
 )
 
 /**
- * One card, normalized once by the backend into the three representations the
- * app consumes (§21-§22):
- *
- *  - VISUAL: [questionHtml]/[answerHtml] — Anki-rendered, templates/cloze owned
- *    by Anki; Study-Agent displays, never reinterprets (§51-§52, INV-ANKI-12).
- *  - SPEECH: [questionText]/[answerText] — plain text for TTS.
- *  - EVALUATION: [pureAnswerText] — the reference answer for the AI evaluator,
- *    free of cloze/template decoration when the backend can provide it.
- *
- * Privacy (§70): instances of this class are never logged whole; diagnostics
- * log refs and lengths only.
+ * Backend-normalized content, without AI evaluation, speech normalization or UI state.
+ * answerText: clean display/plain-text view. pureAnswerText: optional evaluator reference,
+ * without front-side/template repetition when the backend can supply it. Never fabricate it.
+ * Collections supplied to domain values must be immutable snapshots, not mutable backing stores.
+ * Do not log or persist whole cards/HTML as part of session identity recovery.
  */
 data class AnkiRenderedCard(
     val ref: AnkiCardRef,
@@ -93,5 +82,17 @@ data class AnkiRenderedCard(
     val pureAnswerText: String?,
     val media: List<AnkiMediaRef> = emptyList(),
     val scheduling: AnkiSchedulingInfo? = null,
-    val metadata: AnkiCardMetadata = AnkiCardMetadata()
-)
+    val metadata: AnkiCardMetadata = AnkiCardMetadata(),
+    val noteRef: AnkiNoteRef? = null,
+    val deckRef: AnkiDeckRef? = null
+) {
+    init {
+        require(noteRef == null || noteRef.backendId == ref.backendId)
+        require(deckRef == null || deckRef.backendId == ref.backendId)
+        require(noteRef == null || ref.noteId == null || noteRef.noteId == ref.noteId)
+        require(noteRef?.collectionKey == null || ref.collectionKey == null ||
+            noteRef.collectionKey == ref.collectionKey)
+        require(listOfNotNull(ref.collectionKey, noteRef?.collectionKey, deckRef?.collectionKey)
+            .distinct().size <= 1)
+    }
+}
