@@ -23,7 +23,7 @@ class AnkiDroidIntegrationStateTest {
     }
 
     @Test
-    fun `compatibility policy accepts spec >= min`() {
+    fun `compatibility policy accepts spec at or above min`() {
         assertTrue(AnkiDroidCompatibilityPolicy.isSpecSupported(1))
         assertTrue(AnkiDroidCompatibilityPolicy.isSpecSupported(2))
         assertTrue(AnkiDroidCompatibilityPolicy.isSpecSupported(99)) // forward compat §51
@@ -52,9 +52,11 @@ class AnkiDroidIntegrationStateTest {
     }
 
     @Test
-    fun `implemented capabilities for GATE 04 are NONE even when ready`() {
+    fun `implemented capabilities for GATE 05 include deckListing when ready`() {
         val caps = AnkiDroidCompatibilityPolicy.implementedCapabilitiesFor(spec = 2, isReady = true)
-        assertEquals(AnkiCapabilities.NONE, caps)
+        assertTrue(caps.deckListing)
+        assertFalse(caps.review)
+        assertFalse(caps.deckCounts)
     }
 
     @Test

@@ -8,6 +8,7 @@ import android.os.Build
 import com.studyagent.client.core.common.DispatcherProvider
 import com.studyagent.client.core.common.DefaultDispatcherProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
@@ -26,7 +27,7 @@ import kotlinx.coroutines.withContext
  *
  * Upper layers must not construct arbitrary URIs — URI construction belongs here (§7).
  */
-internal interface AnkiDroidProviderClient {
+interface AnkiDroidProviderClient {
 
     suspend fun providerFacts(endpoint: AnkiDroidEndpoint): AnkiDroidProviderFacts?
 
@@ -37,9 +38,13 @@ internal interface AnkiDroidProviderClient {
     suspend fun probeCollection(endpoint: AnkiDroidEndpoint): AnkiDroidProbeOutcome
 
     /**
-     * Safe query helper for future deck/card queries.
-     * Executes off main thread, closes Cursor deterministically, maps errors.
-     * Does NOT expose Cursor to callers.
+     * Safe projected query (GATE 05: deck list and selected deck; later gates: cards).
+     *
+     * Executes off the main thread, closes the Cursor deterministically, classifies platform
+     * failures and hands every row to [mapper] as a platform-neutral [AnkiDroidProviderRow]
+     * (INV-ANKI-DECK-02). The Cursor itself never reaches the caller. A mapper that throws fails
+     * the whole query (`mapping_failed`) — per-row *policies* (skip vs fail) are implemented by
+     * mappers returning outcome values instead of throwing.
      */
     suspend fun <T> safeQuery(
         authority: String,
@@ -48,20 +53,36 @@ internal interface AnkiDroidProviderClient {
         selection: String?,
         selectionArgs: Array<String>?,
         sortOrder: String?,
-        mapper: (Cursor) -> T
+        mapper: (AnkiDroidProviderRow) -> T
     ): ProviderQueryResult<T>
 }
 
 /**
- * Result of a safe provider query — never contains Cursor.
+ * Result of a safe provider query — never contains a Cursor.
+ *
+ * [Empty] is a *successful* query that returned no rows (a valid "zero decks" answer, §17);
+ * [Failure] is a classified provider/platform failure. Callers must never fold a failure into an
+ * empty list (INV-ANKI-DECK-06).
  */
-internal sealed interface ProviderQueryResult<out T> {
+sealed interface ProviderQueryResult<out T> {
     data class Success<T>(val data: List<T>) : ProviderQueryResult<T>
     data class Empty<T>(val reason: String = "empty") : ProviderQueryResult<T>
     data class Failure<T>(
         val failure: AnkiDroidFailure,
         val operation: String
     ) : ProviderQueryResult<T>
+}
+
+/**
+ * The one Cursor → [AnkiDroidProviderRow] adapter (GATE 05 §7). Private to this platform file so
+ * `android.database.Cursor` can never be referenced by a mapper by accident.
+ */
+private class CursorProviderRow(private val cursor: Cursor) : AnkiDroidProviderRow {
+    override fun columnIndex(name: String): Int = cursor.getColumnIndex(name)
+    override fun isNull(index: Int): Boolean = cursor.isNull(index)
+    override fun getLong(index: Int): Long = cursor.getLong(index)
+    override fun getInt(index: Int): Int = cursor.getInt(index)
+    override fun getString(index: Int): String? = cursor.getString(index)
 }
 
 /**
@@ -196,7 +217,7 @@ internal class AndroidAnkiDroidProviderClient(
         selection: String?,
         selectionArgs: Array<String>?,
         sortOrder: String?,
-        mapper: (Cursor) -> T
+        mapper: (AnkiDroidProviderRow) -> T
     ): ProviderQueryResult<T> = withContext(dispatchers.io) {
         val uri = Uri.parse("content://$authority/$path")
         try {
@@ -224,10 +245,13 @@ internal class AndroidAnkiDroidProviderClient(
                     return@withContext ProviderQueryResult.Empty()
                 }
 
-                val results = mutableListOf<T>()
+                val row = CursorProviderRow(c)
+                val results = ArrayList<T>()
                 do {
                     try {
-                        results.add(mapper(c))
+                        results.add(mapper(row))
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
                     } catch (mappingError: Throwable) {
                         // Mapping failure still closes Cursor via use {}, but reports typed failure
                         return@withContext ProviderQueryResult.Failure(
@@ -248,10 +272,23 @@ internal class AndroidAnkiDroidProviderClient(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (throwable: Throwable) {
-            val failure = AnkiDroidFailureClassifier.classify(throwable, AnkiDroidOperationStage.COLLECTION_PROBE)
+            val failure = AnkiDroidFailureClassifier.classify(throwable, AnkiDroidOperationStage.PROVIDER_QUERY)
             ProviderQueryResult.Failure(failure = failure, operation = "query:$path")
         }
     }
+}
+
+/**
+ * Scripted answer of [FakeAnkiDroidProviderClient.safeQuery] for one provider path.
+ *
+ * [Rows] serves in-memory rows through the same mapper contract the Android client uses, so deck
+ * mapping is exercised end-to-end on the JVM; [Fail] simulates a classified provider failure;
+ * [Throw] simulates a throwable escaping the client (used for cancellation propagation tests).
+ */
+sealed interface FakeProviderQueryResponse {
+    data class Rows(val rows: List<Map<String, Any?>>) : FakeProviderQueryResponse
+    data class Fail(val failure: AnkiDroidFailure) : FakeProviderQueryResponse
+    data class Throw(val throwable: Throwable) : FakeProviderQueryResponse
 }
 
 /**
@@ -268,6 +305,23 @@ internal class FakeAnkiDroidProviderClient(
     var probeThrowable: Throwable? = null
 
     val queryLog: MutableList<String> = mutableListOf()
+
+    /** Scripted responses keyed by provider path (`decks`, `selected_deck`). Unscripted → Empty. */
+    val queryResponses: MutableMap<String, FakeProviderQueryResponse> = mutableMapOf()
+
+    /** Simulated provider latency, applied through the caller's (test) scheduler. */
+    var queryDelayMs: Long = 0L
+
+    /** Projections observed per query, in call order — lets tests pin the requested columns. */
+    val projectionLog: MutableList<List<String>?> = mutableListOf()
+
+    fun scriptRows(path: String, rows: List<Map<String, Any?>>) {
+        queryResponses[path] = FakeProviderQueryResponse.Rows(rows)
+    }
+
+    fun scriptFailure(path: String, failure: AnkiDroidFailure) {
+        queryResponses[path] = FakeProviderQueryResponse.Fail(failure)
+    }
 
     override suspend fun providerFacts(endpoint: AnkiDroidEndpoint): AnkiDroidProviderFacts? {
         return providerFactsMap[endpoint.authority] ?: probe?.providerFacts(endpoint)
@@ -293,11 +347,37 @@ internal class FakeAnkiDroidProviderClient(
         selection: String?,
         selectionArgs: Array<String>?,
         sortOrder: String?,
-        mapper: (Cursor) -> T
+        mapper: (AnkiDroidProviderRow) -> T
     ): ProviderQueryResult<T> {
         queryLog.add("$authority/$path")
-        // In JVM tests we cannot create a real Cursor, so return empty by default.
-        // Tests that need specific rows should override this fake or use a dedicated test double.
-        return ProviderQueryResult.Empty("fake_empty")
+        projectionLog.add(projection?.toList())
+        if (queryDelayMs > 0L) delay(queryDelayMs)
+        return when (val response = queryResponses[path]) {
+            null -> ProviderQueryResult.Empty("fake_empty")
+            is FakeProviderQueryResponse.Throw -> throw response.throwable
+            is FakeProviderQueryResponse.Fail -> ProviderQueryResult.Failure(response.failure, "query:$path")
+            is FakeProviderQueryResponse.Rows -> {
+                if (response.rows.isEmpty()) return ProviderQueryResult.Empty()
+                val results = ArrayList<T>(response.rows.size)
+                for (values in response.rows) {
+                    try {
+                        results.add(mapper(InMemoryProviderRow(values)))
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (mappingError: Throwable) {
+                        return ProviderQueryResult.Failure(
+                            failure = AnkiDroidFailure(
+                                category = AnkiDroidFailureCategory.PROVIDER_ERROR,
+                                evidence = AnkiDroidFailureEvidence.UNCLASSIFIED,
+                                exceptionClass = mappingError::class.java.simpleName,
+                                evidenceToken = "mapping_failed"
+                            ),
+                            operation = "query:$path"
+                        )
+                    }
+                }
+                ProviderQueryResult.Success(results)
+            }
+        }
     }
 }

@@ -124,7 +124,10 @@ enum class AnkiDroidFailureEvidence {
 enum class AnkiDroidOperationStage {
     PROVIDER_RESOLUTION,
     PERMISSION_CHECK,
-    COLLECTION_PROBE
+    COLLECTION_PROBE,
+
+    /** GATE 05 — a projected data query (deck list, selected deck) rather than the health probe. */
+    PROVIDER_QUERY
 }
 
 /**

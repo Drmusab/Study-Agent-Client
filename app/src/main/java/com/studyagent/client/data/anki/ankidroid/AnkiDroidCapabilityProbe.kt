@@ -51,9 +51,7 @@ internal class DefaultAnkiDroidCapabilityProbe(
 
                 val apiReport = AnkiDroidCompatibilityPolicy.apiCapabilitiesForSpec(spec)
 
-                // GATE 04: implemented capabilities remain NONE because deck listing,
-                // review, rendering, etc. are pending future gates.
-                // This is truthful (§11): provider supports but Study-Agent not yet implemented.
+                // GATE 05: deckListing is implemented when Ready; review/media/edit stay false.
                 val implemented = AnkiDroidCompatibilityPolicy.implementedCapabilitiesFor(spec, isReady)
 
                 val details = buildDetails(apiReport, implemented, detection)
@@ -123,7 +121,7 @@ internal class DefaultAnkiDroidCapabilityProbe(
             val reason = when {
                 detection.availability !is AnkiAvailability.Ready -> "backend not ready: ${detection.availability::class.simpleName}"
                 detail.apiSupport == CapabilitySupport.UNSUPPORTED -> "API unsupported at spec ${apiReport.specVersion}"
-                !isImplemented -> "API supported, Study-Agent implementation pending GATE 05+"
+                !isImplemented -> "API supported, Study-Agent implementation pending"
                 else -> "implemented and verified"
             }
 

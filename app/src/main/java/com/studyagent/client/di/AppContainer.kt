@@ -32,7 +32,10 @@ import com.studyagent.client.core.voice.tts.TtsEngineAdapter
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidLauncher
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidPermissionManager
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidProbe
+import com.studyagent.client.data.anki.AnkiLibraryRepository
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidDeckGateway
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidDeckGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCapabilityProbe
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidEndpoint
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidEndpoints
@@ -117,7 +120,11 @@ interface AppContainer {
     /** GATE 04 — provider client, gateway, backend (single source of truth, §45) */
     val ankiDroidProviderClient: AnkiDroidProviderClient
     val ankiDroidGateway: AnkiDroidGateway
+    val ankiDroidDeckGateway: AnkiDroidDeckGateway
     val ankiDroidBackend: AnkiBackend
+
+    /** GATE 05 — Library-ready deck snapshot. Observes [ankiDroidBackend]; no Compose. */
+    val ankiLibraryRepository: AnkiLibraryRepository
 
     /** GATE 03 + GATE 04 — registry now includes real AnkiDroid backend */
     val ankiBackendRegistry: AnkiBackendRegistry
@@ -185,11 +192,20 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         )
     }
 
+    override val ankiDroidDeckGateway: AnkiDroidDeckGateway by lazy {
+        DefaultAnkiDroidDeckGateway(providerClient = ankiDroidProviderClient)
+    }
+
     override val ankiDroidBackend: AnkiBackend by lazy {
         AnkiDroidBackend(
             gateway = ankiDroidGateway,
-            scope = ankiDroidScope
+            scope = ankiDroidScope,
+            deckGateway = ankiDroidDeckGateway
         )
+    }
+
+    override val ankiLibraryRepository: AnkiLibraryRepository by lazy {
+        AnkiLibraryRepository(backend = ankiDroidBackend)
     }
 
     override val ankiBackendRegistry: AnkiBackendRegistry by lazy {

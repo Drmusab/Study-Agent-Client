@@ -44,7 +44,11 @@ class FakeAnkiBackend(
     )
 
     private val mutex = Mutex()
-    private val deckData = decks.toList()
+    private val deckData = decks.toMutableList()
+    var selectedDeckRef: AnkiDeckRef? = decks.firstOrNull()?.ref
+    var selectedDeckError: AnkiError? = null
+    var getDecksCalls: Int = 0
+        private set
     // Defensively detach caller-owned collections so fixture mutation cannot rewrite an active turn.
     private val cardData = cards.map { card ->
         card.copy(media = card.media.toList(), metadata = card.metadata.copy(tags = card.metadata.tags.toSet()),
@@ -101,13 +105,32 @@ class FakeAnkiBackend(
 
     override suspend fun refreshAvailability() { delay(latencyMs) }
 
+    suspend fun replaceDecks(decks: List<AnkiDeck>) = mutex.withLock {
+        require(decks.all { it.ref.backendId == id })
+        require(decks.map { it.ref }.distinct().size == decks.size)
+        deckData.clear()
+        deckData.addAll(decks)
+        if (selectedDeckRef != null && decks.none { it.ref == selectedDeckRef }) selectedDeckRef = null
+    }
+
     override suspend fun getDecks(): AnkiResult<List<AnkiDeck>> {
         delay(latencyMs)
         return mutex.withLock {
+            getDecksCalls += 1
             usabilityError()?.let { return@withLock AnkiResult.Failure(it) }
             if (!capabilities.value.deckListing) return@withLock AnkiResult.Failure(unsupported("deck_listing"))
             decksError?.let { return@withLock AnkiResult.Failure(it) }
             AnkiResult.Success(deckData.toList())
+        }
+    }
+
+    override suspend fun getSelectedDeck(): AnkiResult<AnkiDeckRef?> {
+        delay(latencyMs)
+        return mutex.withLock {
+            usabilityError()?.let { return@withLock AnkiResult.Failure(it) }
+            if (!capabilities.value.deckListing) return@withLock AnkiResult.Failure(unsupported("deck_listing"))
+            selectedDeckError?.let { return@withLock AnkiResult.Failure(it) }
+            AnkiResult.Success(selectedDeckRef)
         }
     }
 

@@ -176,9 +176,11 @@ object AppLogger {
     }
 
     private fun scheduleTrailingPublish(dueAtMs: Long) {
-        val executor = publishExecutor
+        // Resolve the executor before the lock: a smart cast established inside the
+        // `synchronized` lambda does not survive past it on every Kotlin compiler version.
+        val executor = publishExecutor ?: return
         synchronized(lock) {
-            if (executor == null || trailingPublishScheduled || !dirty) return
+            if (trailingPublishScheduled || !dirty) return
             trailingPublishScheduled = true
         }
         val delayMs = (dueAtMs - clock()).coerceAtLeast(1L)

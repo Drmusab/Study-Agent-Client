@@ -1288,3 +1288,21 @@ recovery semantics can be preserved. GATE 04 starts the local gateway, not this 
 | **INV-ANKI-DOM-10** | Backend preference and effective backend are distinct. |
 | **INV-ANKI-DOM-11** | AUTO resolution occurs before session binding, not during each review turn. |
 | **INV-ANKI-DOM-12** | A backend becoming unavailable does not silently switch the current session to another backend. |
+
+---
+
+## GATE 05 — Deck & Library data foundation
+
+See `docs/GATE_05_ANKI_DECK.md` for the full contract (API columns, count semantics, hierarchy,
+cache, invariants).
+
+Domain additions (Android-free): `AnkiDeckTree` / `AnkiDeckTreeNode` (real vs virtual),
+`AnkiDeckOrder`, `AnkiDeckFilter`, `LibrarySnapshot`, `LibraryDataState`, `AnkiDeckSummary`,
+`AnkiBackend.getSelectedDeck()`, `AnkiError.MalformedResponse`, `AnkiCapabilities.deckCounts`.
+
+AnkiDroid mapping lives entirely under `data/anki/ankidroid/`. Upper layers call `AnkiBackend`.
+The in-memory `AnkiLibraryRepository` is the Library data hook; there is no Library UI in this gate.
+
+Count semantics: provider `[learn, review, new]` are **due today, recursive (include children)**.
+Do not sum a parent with its children. `totalDue` is never derived.
+

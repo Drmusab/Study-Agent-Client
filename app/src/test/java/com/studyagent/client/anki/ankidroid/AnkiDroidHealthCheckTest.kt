@@ -56,7 +56,7 @@ class AnkiDroidHealthCheckTest {
 
         val availability = snapshot.detection.availability
         assertTrue("a hang is a fault, not an absence", availability is AnkiAvailability.Fault)
-        assertEquals(AnkiError.QueryFailure(causeCategory = "timeout"), availability.error)
+        assertEquals(AnkiError.QueryFailure(causeCategory = "timeout"), (availability as AnkiAvailability.Fault).error)
         assertEquals(AnkiDroidFailureCategory.TIMEOUT, snapshot.failure?.category)
         assertEquals(AnkiDroidFailureEvidence.TIMEOUT_BUDGET, snapshot.failure?.evidence)
         assertFalse(
@@ -91,7 +91,7 @@ class AnkiDroidHealthCheckTest {
 
         val availability = snapshot.detection.availability
         assertTrue(availability is AnkiAvailability.Fault)
-        assertEquals(AnkiError.Unknown(cause = "IllegalStateException"), availability.error)
+        assertEquals(AnkiError.Unknown(cause = "IllegalStateException"), (availability as AnkiAvailability.Fault).error)
         assertEquals(AnkiDroidFailureCategory.PROVIDER_ERROR, snapshot.failure?.category)
         assertEquals("FAULT", snapshot.availability.statusCode)
     }

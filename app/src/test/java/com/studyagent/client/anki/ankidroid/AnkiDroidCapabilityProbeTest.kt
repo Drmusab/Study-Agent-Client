@@ -15,7 +15,7 @@ import org.junit.Test
 class AnkiDroidCapabilityProbeTest {
 
     @Test
-    fun `capability probe returns NONE for GATE 04 when ready`() = runTest {
+    fun `capability probe reports deckListing implemented when ready`() = runTest {
         val probe = DefaultAnkiDroidCapabilityProbe(clock = { 0L })
         val detection = testDetection(
             availability = AnkiAvailability.Ready(AnkiCapabilities.NONE),
@@ -26,8 +26,9 @@ class AnkiDroidCapabilityProbeTest {
 
         val result = probe.probe(detection)
 
-        // GATE 04 has not implemented review, deck listing etc.
-        assertEquals(AnkiCapabilities.NONE, result.implemented)
+        assertTrue(result.implemented.deckListing)
+        assertFalse(result.implemented.deckCounts)
+        assertFalse(result.implemented.review)
         assertEquals(CapabilitySupport.SUPPORTED, result.apiReport.deckListing)
         assertEquals(CapabilitySupport.SUPPORTED, result.apiReport.scheduledReview)
         assertEquals(2, result.apiReport.specVersion)
@@ -108,7 +109,7 @@ class AnkiDroidCapabilityProbeTest {
         assertTrue(result.details.isNotEmpty())
         val deckDetail = result.details.find { it.name == "deckListing" }
         assertNotNull(deckDetail)
-        assertTrue(deckDetail!!.reason.contains("pending") || deckDetail.reason.contains("GATE"))
+        assertTrue(deckDetail!!.reason.contains("implemented") || deckDetail.reason.contains("verified"))
     }
 
     @Test

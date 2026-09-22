@@ -5,7 +5,9 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.studyagent.client.appContainer
 import com.studyagent.client.core.anki.AnkiAvailability
+import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCapabilities
+import com.studyagent.client.core.anki.AnkiResult
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidApiContract
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidEndpoints
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidOpenResult
@@ -177,5 +179,28 @@ class AnkiDroidIntegrationInstrumentedTest {
             AnkiDroidOpenResult.NotInstalled,
             runBlocking { container.ankiDroidLauncher.open() }
         )
+    }
+
+    @Test
+    fun `deck listing is a typed result and never throws`() {
+        val container = appContainer()
+        runBlocking { container.ankiDroidHealthRepository.refresh() }
+        val backend = container.ankiDroidBackend
+        val result = runBlocking { backend.getDecks() }
+        when (result) {
+            is AnkiResult.Success -> {
+                assertTrue(result.value.all { it.ref.backendId == AnkiBackendId.AnkiDroidLocal })
+                assertEquals(result.value.map { it.ref }.distinct(), result.value.map { it.ref })
+                result.value.forEach { deck ->
+                    assertTrue(deck.ref.deckId.isNotBlank())
+                    assertTrue(deck.name.isNotBlank())
+                }
+            }
+            is AnkiResult.Failure -> {
+                assertTrue(result.error.message.isNotBlank())
+            }
+        }
+        val selected = runBlocking { backend.getSelectedDeck() }
+        assertTrue(selected is AnkiResult.Success || selected is AnkiResult.Failure)
     }
 }

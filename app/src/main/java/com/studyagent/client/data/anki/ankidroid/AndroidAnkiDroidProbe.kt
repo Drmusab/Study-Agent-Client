@@ -155,24 +155,16 @@ class AndroidAnkiDroidProbe(
             }
         }
 
-    @Suppress(\"DEPRECATION\")
-    override suspend fun getPackageVersion(packageName: String): String? = withContext(dispatchers.io) {
-        try {
-            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                appContext.packageManager.getPackageInfo(
-                    packageName,
-                    PackageManager.PackageInfoFlags.of(0L)
-                )
-            } else {
-                appContext.packageManager.getPackageInfo(packageName, 0)
-            }
-            info.versionName
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            null
-        }
-    }
+    /**
+     * GATE 04/05 — generic provider access (package version lookup, projected queries) has exactly
+     * one owner, [AndroidAnkiDroidProviderClient]; the probe delegates so the Cursor→row adapter,
+     * the null-cursor handling and the failure classification are never duplicated
+     * (INV-ANKI-GW-01/02, INV-ANKI-DECK-02).
+     */
+    private val providerClient = AndroidAnkiDroidProviderClient(appContext, dispatchers)
+
+    override suspend fun getPackageVersion(packageName: String): String? =
+        providerClient.getPackageVersion(packageName)
 
     override suspend fun <T> safeQuery(
         authority: String,
@@ -181,60 +173,9 @@ class AndroidAnkiDroidProbe(
         selection: String?,
         selectionArgs: Array<String>?,
         sortOrder: String?,
-        mapper: (android.database.Cursor) -> T
-    ): ProviderQueryResult<T> = withContext(dispatchers.io) {
-        val uri = Uri.parse(\"content://$authority/$path\")
-        try {
-            val cursor = appContext.contentResolver.query(
-                uri,
-                projection,
-                selection,
-                selectionArgs,
-                sortOrder
-            )
-
-            if (cursor == null) {
-                return@withContext ProviderQueryResult.Failure(
-                    failure = AnkiDroidFailure(
-                        category = AnkiDroidFailureCategory.PROVIDER_ERROR,
-                        evidence = AnkiDroidFailureEvidence.UNCLASSIFIED_PROVIDER_STATE,
-                        evidenceToken = \"null_cursor\"
-                    ),
-                    operation = \"query:$path\"
-                )
-            }
-
-            cursor.use { c ->
-                if (!c.moveToFirst()) {
-                    return@withContext ProviderQueryResult.Empty()
-                }
-                val results = mutableListOf<T>()
-                do {
-                    try {
-                        results.add(mapper(c))
-                    } catch (mappingError: Throwable) {
-                        return@withContext ProviderQueryResult.Failure(
-                            failure = AnkiDroidFailure(
-                                category = AnkiDroidFailureCategory.PROVIDER_ERROR,
-                                evidence = AnkiDroidFailureEvidence.UNCLASSIFIED,
-                                exceptionClass = mappingError::class.java.simpleName,
-                                evidenceToken = \"mapping_failed\"
-                            ),
-                            operation = \"query:$path\"
-                        )
-                    }
-                } while (c.moveToNext())
-
-                if (results.isEmpty()) ProviderQueryResult.Empty()
-                else ProviderQueryResult.Success(results)
-            }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (throwable: Throwable) {
-            val failure = AnkiDroidFailureClassifier.classify(throwable, AnkiDroidOperationStage.COLLECTION_PROBE)
-            ProviderQueryResult.Failure(failure = failure, operation = \"query:$path\")
-        }
-    }
+        mapper: (AnkiDroidProviderRow) -> T
+    ): ProviderQueryResult<T> =
+        providerClient.safeQuery(authority, path, projection, selection, selectionArgs, sortOrder, mapper)
 }
 
 /**

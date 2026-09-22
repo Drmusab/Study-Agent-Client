@@ -27,7 +27,10 @@ data class AnkiDeck(
         require(parentRef?.collectionKey == null || ref.collectionKey == null ||
             parentRef.collectionKey == ref.collectionKey)
     }
+    /** `::`-split of [name]; empty segments from `::::` are preserved, never dropped. */
     val path: List<String> get() = name.split("::")
+    /** Last path segment; equal to [name] for a top-level deck. Not an identity. */
+    val leafName: String get() = path.last()
 }
 
 /** References only: never File, Android Uri, audio/image bytes or copied media. */
