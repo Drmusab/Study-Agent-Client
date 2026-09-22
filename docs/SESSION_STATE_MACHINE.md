@@ -262,3 +262,13 @@ stateDiagram-v2
 * `review_turn_id` Depends on server v2; on v1 the client-generated `epoch:cardId:generation` provides equivalent local safety but cannot disambiguate Anki redelivered same card across server restarts beyond generation.
 * Foreground service delegates pause/resume/stop via same `dispatch(User*Requested)` events; it does not implement a parallel machine but process still relies on Android lifecycle.
 * Voice-turn ownership via `effectId` is enforced; however STT purpose selection still requires up-to-date `AppSettings` (handsFree, listenForSpokenRating) at effect execution time — settings change mid-action is handled by reducer re-evaluating at next transition (§70).
+
+## 16. Anki Composition (GATE 01 contract)
+
+The machine stays the single authority of **user-flow** state when Anki backends beyond the PC agent exist (contract: `docs/ANKI_INTEGRATION_ARCHITECTURE.md` §10, ADR 0004).
+
+* **No mega state machine.** Anki conditions are NOT added to `SessionPhase`/`StudyState`. Presentation derives from orthogonal, separately-owned states: session phase × Anki availability × Anki session binding (`AnkiSessionContext`) × connection state × voice state. No `ListeningWithAnkiConnected…`-style combinatorial states.
+* **Backend = effect dependency.** Future effects (`LoadNextAnkiCard`, `CommitAnkiRating`, `BuryAnkiCard`, `SuspendAnkiCard`, `RefreshDeckSummary`) execute through the gateway and complete by dispatching events (`AnkiCardLoaded`, `AnkiCardLoadFailed`, `AnkiRatingCommitted`, `AnkiRatingCommitFailed`, `AnkiBackendUnavailable`). Backend callbacks never mutate state directly.
+* **Rating transaction joins the ledger model.** `ReviewCommitId` (backend + study session + review turn) extends the existing exactly-once discipline to the *scheduler*: one turn ⇒ at most one mutation; `AMBIGUOUS` commit outcomes block progression until reconciled (INV-ANKI-02/08/11). The existing `CardTurn.turnId` IS the review-turn identity the commit id builds on.
+* **Connection loss becomes backend-scoped (future change, hotspot H4).** Today `observeConnection` forces `Recovering` for any active session. With an `ANKIDROID_LOCAL` session, PC connection loss must not pause local study — the reaction is scoped by the session's resolved Anki backend (GATE 06). Until then the machine's PC behavior is unchanged.
+* **Reconciliation gains a second form.** `SessionReconciler` (protocol snapshots) remains the PC form; the Anki form reconciles the session context, commit ledger and current card against the backend before advancing after restart or ambiguous commits (contract §11, implemented GATE 06).

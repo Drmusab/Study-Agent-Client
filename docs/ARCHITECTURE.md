@@ -425,3 +425,44 @@ Key points:
 - Diagnostics: richer, sanitized, no tokens
 
 See docs/TESTING_STRATEGY.md and server/mock_pc_agent.py --chaos mode.
+
+## 11. Anki Fusion Layer (GATE 01 contract)
+
+The PC Study Agent is no longer the only Anki provider. The ratified contract
+lives in `docs/ANKI_INTEGRATION_ARCHITECTURE.md`; the normative domain types
+live in `core/anki/`. Summary of what changed architecturally (no runtime
+behavior change yet):
+
+```
+StudySessionMachine (user flow — unchanged authority)
+        │  effects invoke gateway; callbacks return as events
+        ▼
+core/anki domain (backend-neutral: refs, availability, capabilities,
+                  session context, rendered card, errors)
+        ▼
+AnkiBackend ──┬── AnkiDroidBackend (GATE 04; AnkiDroid integration API)
+              └── PcAnkiBackend      (GATE 04/06; existing PC protocol)
+```
+
+Key rules, all with stable invariant IDs (INV-ANKI-01…14) in the contract:
+
+- **Anki owns learning-state truth** (scheduling, FSRS, due state, review
+  history, collection, sync). Study-Agent owns interaction-state truth
+  (session machine, voice, evaluation, analytics). No second scheduler.
+- **One review session = one writable Anki backend**, resolved once at session
+  start into `AnkiSessionContext`; no silent mid-session failover.
+- **One review turn = at most one scheduling mutation**, keyed by
+  `ReviewCommitId` (backend + session + turn — never card id alone); ambiguous
+  commits block progression until reconciled.
+- **Suggested ≠ selected ≠ committed rating**; the user is the final rating
+  authority by default.
+- **Backend-specific types never cross the gateway**: no AnkiDroid
+  provider/contract types and no PC protocol types above `core/anki`.
+- **Anki backend choice is independent of AI/TTS/STT providers**; offline
+  AnkiDroid review without a PC connection and hybrid configurations are
+  first-class.
+
+ADRs: `docs/adr/0001`–`0007`. GATE 01 addendum for the layered diagram: the
+Anki domain layer sits between "FEATURE REPOSITORIES" and the backends; the PC
+"AGENT API LAYER" becomes the transport for `PcAnkiBackend` (data/anki/remote),
+not a second study path.

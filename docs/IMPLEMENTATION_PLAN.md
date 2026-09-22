@@ -52,3 +52,27 @@ The architecture decouples the mobile client from the server backend. Any PC age
 - **Cloud LLMs** (Claude 3.5, GPT-4o)
 - **Custom Spaced Repetition Engines** (FSRS, SM-2, AnkiConnect)
 - **LAN Discovery via mDNS / NSD** (Zero-configuration PC discovery)
+
+---
+
+## 3. Anki Fusion Roadmap (GATE 00 → GATE 06+)
+
+GATE 00 baselined the repository; **GATE 01 ratified the Anki source-of-truth
+architecture contract** (`docs/ANKI_INTEGRATION_ARCHITECTURE.md`, ADRs
+`docs/adr/0001`–`0007`, domain types in `core/anki/`). Later gates implement
+against that contract; anything listed as deferred in its §24 must not land
+early.
+
+| Gate | Scope (architecture per contract) | Status |
+|---|---|---|
+| GATE 00 | Repository baseline, safety lock, green-build evidence | Done (conditionally; CI blocked by account billing lock — see `docs/GATE_00_BASELINE.md`) |
+| GATE 01 | Anki fusion architecture & ownership contract; minimal `core/anki` domain types + contract tests; **no** AnkiDroid dependency, no behavior change | Done (this baseline) |
+| GATE 02 | AnkiDroid API bridge: dependency, permissions, installation/permission detection, provider probe — all inside `data/anki/ankidroid/` | Pending |
+| GATE 03 | Domain wiring: backend registry + selector + `AnkiBackendMode` preference in settings; PC registered as a backend | Pending |
+| GATE 04 | Backends: `PcAnkiBackend` (existing protocol adapted) + `AnkiDroidBackend` (decks/availability/rendered cards) | Pending |
+| GATE 05 | Decks & library via the gateway (`AnkiDeckRef` identity, cache discipline) | Pending |
+| GATE 06 | Review & rating through the gateway: commit ledger, exactly-once, ambiguous-commit reconciliation, backend-scoped connection handling, offline/hybrid review | Pending |
+| GATE 07+ | Presentation modes, media, mistake notebook, analytics, AI semantic search | Pending |
+
+Backward-compatibility rule for the whole roadmap: the PC-agent study path must
+stay green at every gate (contract §22 migration strategy).
