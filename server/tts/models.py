@@ -4,7 +4,8 @@ Wire + domain models for the PC Agent TTS subsystem.
 These are the single source of truth for the canonical media format and the
 typed provider error codes. Android maps the error codes (string values) to its
 own ``SpeechErrorCode``; the strings are part of the protocol contract, so they
-are stable and must never be changed casually (see docs/CLOUD_TTS.md).
+are stable and must never be changed casually (see docs/PROTOCOL.md, section
+21 "Remote TTS Subprotocol").
 """
 
 from __future__ import annotations

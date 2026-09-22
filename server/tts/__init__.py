@@ -16,7 +16,7 @@ Provider ownership lives here, on the PC. Android never sees provider keys:
         ▼
     PC Agent streams normalized PCM s16le mono 24 kHz
 
-Design rules (see docs/CLOUD_TTS.md):
+Design rules (see docs/PROTOCOL.md, section 21 "Remote TTS Subprotocol"):
   * Canonical media format: PCM s16le, mono, 24 000 Hz — native for both providers.
   * Every provider difference (auth headers, URLs, model ids, error codes) stays
     inside its adapter behind the TtsProvider interface.
