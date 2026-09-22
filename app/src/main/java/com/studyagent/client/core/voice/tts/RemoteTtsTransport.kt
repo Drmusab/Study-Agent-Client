@@ -62,6 +62,7 @@ data class RemoteProviderInfo(
     val models: List<String> = emptyList(),
     val defaultModel: String? = null,
     val supportsRate: Boolean = true,
+    val supportsPitch: Boolean = true,
     val supportsStyleInstructions: Boolean = false,
     val supportsVoiceSettings: Boolean = false,
     val supportsCustomVoices: Boolean = false,

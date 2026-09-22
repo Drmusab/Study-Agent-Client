@@ -622,7 +622,93 @@ See server/mock_pc_agent.py with --chaos, --v1, --partial modes, and FakeAgentCo
 
 Golden fixtures in protocol-fixtures/ (hello, welcome, question, evaluation, rating, error, dashboard, config, snapshot).
 
-## 21. Version History
+## 21. Remote TTS Subprotocol (v2 agent capability `tts`)
+
+Agents that offer remote (cloud) speech advertise `tts`, `tts:streaming`,
+`tts:voice_catalog` plus one `tts:<provider>` entry per configured provider
+(openai, elevenlabs) in the `welcome.capabilities` list. Android treats these
+as OPTIONAL: an agent without them is a study-only agent.
+
+Two planes, one credential:
+
+- **Control plane** — the existing WebSocket JSON protocol. All requests are
+  correlated with `in_reply_to` like every other v2 message.
+- **Media plane** — plain authenticated HTTP streaming of raw PCM
+  (`GET /v1/tts/stream/{stream_id}`). It carries NO request/response
+  semantics of its own: a stream is always created by a prior
+  `tts_synthesize` reply.
+
+### 21.1 Messages
+
+| Client request | Server response | Mutating? | Notes |
+|---|---|---|---|
+| tts_capabilities_request | tts_capabilities | No | Per-provider capability/health blocks + media plane descriptor |
+| tts_voices_request | tts_voices | No | Namespaced catalog (`openai:coral`, `elevenlabs:<id>`); unknown provider → `error INVALID_REQUEST` |
+| tts_synthesize | tts_stream \| error | Yes (paid) | Eager synthesis; failures surface as typed WS errors, never a doomed HTTP stream |
+| tts_cancel | tts_cancelled | Yes | Cancel by `stream_id` or by `speech_request_id`; `cancelled` = number cancelled |
+| tts_test_provider | tts_provider_test | No | Cheap probe: configured / authentication / reachable / voice_list + latency_ms |
+
+`welcome`/`tts_*` while unauthenticated (auth required) → `error` with code
+`AUTH_REQUIRED`.
+
+`media` block in `tts_capabilities`:
+
+```json
+{"format": "pcm_s16le", "sample_rate": 24000, "channels": 1,
+ "auth": "bearer", "auth_required": true, "port": 8766}
+```
+
+`auth` names the scheme (always `bearer`); `auth_required` says whether the
+agent actually enforces it. The media plane is served by the same host as the
+agent's WebSocket connection — only the port differs.
+
+`stream_path` in `tts_synthesize` is a PATH only (`/v1/tts/stream/st_...`);
+Android builds the URL from the agent host + `media.port`.
+
+### 21.2 Media plane
+
+```
+GET /v1/tts/stream/{stream_id}
+Authorization: Bearer <Study Agent credential>   (only when auth_required)
+
+200 → audio/pcm; codecs=pcm_s16le, rate=24000, channels=1
+      headers: X-Stream-Id, X-Speech-Request-Id, X-Cache-Hit (0|1)
+401 → missing / wrong credential (vague body, never echoes the header)
+404 → unknown stream
+410 → expired, cancelled, or already consumed (streams are SINGLE-USE, short-lived)
+```
+
+Canonical format: PCM s16le, mono, 24 kHz — the agent normalizes provider
+output; Android does no decoding.
+
+### 21.3 Stable provider error codes
+
+`error.code` values (stable contract, mirrored by Android's `SpeechErrorCode`):
+
+```
+PROVIDER_UNAVAILABLE      PROVIDER_NOT_CONFIGURED   PROVIDER_AUTH_FAILED
+PROVIDER_RATE_LIMITED     PROVIDER_QUOTA_EXCEEDED   VOICE_NOT_FOUND
+MODEL_UNAVAILABLE         SYNTHESIS_FAILED          STREAM_FAILED
+STREAM_TIMEOUT            STREAM_EXPIRED            STREAM_NOT_FOUND
+STREAM_NOT_AUTHENTICATED  INVALID_REQUEST           TEXT_TOO_LONG
+```
+
+`PROVIDER_RATE_LIMITED` carries `retryable: true`; rate limits do NOT change
+provider health (they are transient, per-request).
+
+### 21.4 Credential hygiene
+
+Provider keys (OpenAI / ElevenLabs) live ONLY on the PC running the agent.
+They never appear in protocol frames, logs, URLs, or diagnostics — the agent
+sends capabilities and error codes only. The single credential Android
+ever holds (the Study Agent credential) travels in a Bearer header,
+never in the URL.
+
+Contract tests: `server/test_tts_contract.py` (in-process, hermetic — the CI
+gate for this subprotocol).
+
+## 22. Version History
 
 - v1: basic study
 - v2: welcome handshake, selected_protocol, in_reply_to correlation, session_recovery, management surface, component health, idempotency, turn identity, agent_id
+- v2 + `tts` capability: remote TTS subprotocol (section 21)

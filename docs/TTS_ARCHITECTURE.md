@@ -37,9 +37,16 @@ Cross-cutting: `AudioFocusController` (focus), `AudioRouteManager` (headset
 state), `VoiceHandoffController` (TTS→STT transition policy), `TtsSettings`
 (from `PreferencesDataStore`), Diagnostics (`TtsHealthSnapshot`).
 
-**The PC agent cannot inject speech.** Server payloads are text-only; Android
-decides locale, voice, rate, pitch, chunking, and playback (§2 of the master
-prompt; no cloud TTS, no bundled engine).
+**The PC agent cannot inject speech content.** Study payloads are text-only;
+Android decides locale, voice, rate, pitch, chunking, and playback.
+
+> **Baseline note (Gate 00, 2026-09-22):** a *remote TTS* subsystem now exists
+> in `core/voice/tts/` (`SpeechBackend` / `ProviderBackendRouter` /
+> `RemoteSpeechBackend`, protocol in `docs/PROTOCOL.md` §21) so the PC agent
+> can serve cloud speech (OpenAI / ElevenLabs) over the authenticated media
+> plane. In this baseline it is **dormant**: `AppContainer` still wires the
+> local-only orchestrator, the cloud settings are not persisted yet, and the
+> local engine remains the active path with the behavior documented below.
 
 ## 3. Domain model (`core/voice/tts/SpeechModels.kt`)
 
@@ -50,7 +57,7 @@ prompt; no cloud TTS, no bundled engine).
 | `SpeechPriority` | CRITICAL > HIGH > NORMAL > LOW (ranked, deterministic) |
 | `QueuePolicy` | REPLACE / APPEND / INTERRUPT / IGNORE_IF_DUPLICATE |
 | `SpeechResult` | `Completed` / `Cancelled` / `Failed(SpeechError)` — exactly once per accepted request |
-| `SpeechErrorCode` | ENGINE_NOT_INITIALIZED, ENGINE_INITIALIZATION_FAILED, ENGINE_UNAVAILABLE, LANGUAGE_UNSUPPORTED, VOICE_UNAVAILABLE, MISSING_LANGUAGE_DATA, AUDIO_FOCUS_DENIED, AUDIO_FOCUS_LOST, SPEAK_FAILED, PLAYBACK_ERROR, TIMEOUT, ROUTE_LOST, QUEUE_FULL |
+| `SpeechErrorCode` | ENGINE_NOT_INITIALIZED, ENGINE_INITIALIZATION_FAILED, ENGINE_UNAVAILABLE, LANGUAGE_UNSUPPORTED, VOICE_UNAVAILABLE, MISSING_LANGUAGE_DATA, AUDIO_FOCUS_DENIED, AUDIO_FOCUS_LOST, SPEAK_FAILED, PLAYBACK_ERROR, TIMEOUT, ROUTE_LOST, QUEUE_FULL, PROVIDER_UNAVAILABLE, PROVIDER_NOT_CONFIGURED, PROVIDER_AUTH_FAILED, PROVIDER_RATE_LIMITED, PROVIDER_QUOTA_EXCEEDED, MODEL_UNAVAILABLE, CLOUD_STREAM_FAILED (the cloud members are part of the remote-TTS contract, see `docs/PROTOCOL.md` §21.3) |
 | `TtsState` | Uninitialized / Initializing / Ready(engine,enVoice,arVoice) / Speaking(id,purpose,chunk,chunks,queue) / Error / Released |
 | `SpeechIds` | unique utterance ids `q_<cardId>_<uuid8>`, chunks `…#3` — never contain content |
 

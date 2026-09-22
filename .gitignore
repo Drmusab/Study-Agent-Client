@@ -28,3 +28,9 @@ Thumbs.db
 *.hprof
 app/release/
 app/debug/
+# Secrets / local environment
+.env
+.env.*
+*.jks
+# Python test outputs
+.pytest_cache/

@@ -15,9 +15,15 @@ async def test_full_loop():
         res = await ws.recv()
         print(f"Received: {res}")
 
-        # Start session
+        # Start session. The v2 agent sends a legacy "capabilities" frame right
+        # after the welcome, so skip any frame that is not the session_started reply.
         await ws.send(json.dumps({"protocol_version": "1", "type": "start_session", "deck": "Toronto Notes"}))
-        started = json.loads(await ws.recv())
+        started = None
+        for _ in range(5):
+            frame = json.loads(await ws.recv())
+            if frame.get("type") == "session_started":
+                started = frame
+                break
         print(f"Session started: {started}")
         session_id = started["session_id"]
 

@@ -65,6 +65,37 @@ jobs:
         run: python3 -m py_compile server/mock_pc_agent.py server/test_contract.py server/test_client.py
 
   # ---------------------------------------------------------------------------------------------
+  # Gate 0b — remote TTS contract. Same in-process, hermetic design as the protocol gate:
+  # the mock agent (WS control plane + HTTP media plane) runs with the deterministic mock
+  # providers, so no network, no API keys, no paid synthesis. This is the CI gate for the
+  # whole TTS protocol (capabilities / catalog / synthesis / streams / auth / cancel /
+  # typed failures / caching / credential hygiene).
+  # ---------------------------------------------------------------------------------------------
+  tts-contract-tests:
+    name: TTS contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        # websockets<14: the in-process harness uses the legacy server/client API
+        # (extra_headers), which newer releases removed.
+        run: python3 -m pip install --quiet "pytest" "pytest-asyncio" "websockets<14"
+
+      - name: TTS mock provider + protocol contract tests (hermetic)
+        run: python3 -m pytest server/test_tts_mock_provider.py server/test_tts_contract.py -v
+
+      - name: TTS subsystem compiles
+        run: python3 -m py_compile server/tts/*.py server/test_tts_contract.py server/test_tts_mock_provider.py server/test_tts_providers_live.py
+
+  # ---------------------------------------------------------------------------------------------
   # Gate 1 — the fast gate. This is the one that must never be skipped or soft-failed.
   # ---------------------------------------------------------------------------------------------
   unit-tests:

@@ -1,0 +1,67 @@
+{
+  "gate": "00",
+  "status": "CONDITIONALLY BLOCKED",
+  "generated_at": "2026-09-22T13:00:00Z",
+  "repository": "Drmusab/Study-Agent-Client",
+  "branch": "arena/01a0c90e-study-agent-client",
+  "base_commit": "50b54990ecc14ca9c8e0b474dd54e2b36afd72f9",
+  "final_commit": "see branch head (lock commit)",
+  "toolchain": {
+    "jdk_required": "17",
+    "jdk_in_sandbox": null,
+    "gradle": "8.7",
+    "agp": "8.4.2",
+    "kotlin": "1.9.24",
+    "compileSdk": 34,
+    "targetSdk": 34,
+    "minSdk": 26,
+    "versionCode": 1,
+    "versionName": "1.0.0"
+  },
+  "checks": {
+    "clean": "BLOCKED_BY_ENVIRONMENT",
+    "unit_tests": "BLOCKED_BY_ENVIRONMENT",
+    "lint": "BLOCKED_BY_ENVIRONMENT",
+    "assemble_debug": "BLOCKED_BY_ENVIRONMENT",
+    "assemble_release": "BLOCKED_BY_ENVIRONMENT",
+    "server_protocol_tests": "PASS",
+    "tts_mock_provider_tests": "PASS",
+    "tts_contract_tests": "PASS",
+    "mock_agent_end_to_end": "PASS",
+    "instrumented_tests": "NOT_RUN",
+    "ci": "INFRASTRUCTURE_BLOCKED"
+  },
+  "test_counts": {
+    "server_contract": "all passed (stdlib run)",
+    "tts_mock_provider": 28,
+    "tts_contract": 22
+  },
+  "blockers": [
+    {
+      "id": "G1",
+      "kind": "ci-infrastructure",
+      "detail": "GitHub account locked due to a billing issue; every Actions job fails at zero steps (runs 35700778737, 35728104833, +28 more). Owner action required.",
+      "owner_action": "resolve account billing lock, re-run CI on the gate branch"
+    },
+    {
+      "id": "G2",
+      "kind": "sandbox-environment",
+      "detail": "No JDK/Gradle/Android SDK in the gate sandbox; egress limited to GitHub + PyPI, so toolchain/dependencies cannot be downloaded.",
+      "owner_action": "none (environment constraint); CI is the verification path once G1 is resolved"
+    }
+  ],
+  "fixed_in_gate": [
+    "A1: RemoteProviderInfo.supportsPitch (P0 compile)",
+    "A2: 7 cloud SpeechErrorCode members (P0 compile)",
+    "A3: 5 cloud TtsSettings fields (P0 compile)",
+    "B1: TTS subsystem wired into mock PC agent (P1 test collection)",
+    "B2: test_client.py handshake frame handling (P2)",
+    "C1: untracked .gradle cache (P2)",
+    "C2: .gitignore env/keystore/test-output rules (P3)",
+    "D2: CI TTS contract job added (P2)",
+    "E1-E3: protocol doc + dangling doc references (P2/P3)"
+  ],
+  "ankidroid_integration_started": false,
+  "secrets_found": false,
+  "pass_condition": "first green GitHub Actions run on this branch (or master after the billing fix) with unit tests, lint, assembleDebug, assembleRelease, contract tests and TTS contract tests all passing"
+}
