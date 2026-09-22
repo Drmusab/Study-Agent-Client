@@ -62,7 +62,25 @@ data class TtsSettings(
     val headsetDisconnectBehavior: HeadsetDisconnectBehavior = HeadsetDisconnectBehavior.PAUSE_SPEECH,
 
     /** Acoustic separation between end-of-speech and microphone activation. */
-    val acousticGapMs: Int = DEFAULT_ACOUSTIC_GAP_MS
+    val acousticGapMs: Int = DEFAULT_ACOUSTIC_GAP_MS,
+
+    // ------------------------------------------------------------------ cloud TTS
+    // Cloud-provider view. Defaults reproduce the pre-cloud, local-only behavior
+    // exactly: the router selects [TtsProvider.ANDROID], so nothing in the app's
+    // current wiring (or in persistence) changes until a later gate surfaces these
+    // settings in the UI and maps them from AppSettings.
+    /** Preferred provider; [TtsProvider.ANDROID] = the local engine (default). */
+    val ttsProvider: TtsProvider = TtsProvider.ANDROID,
+
+    /** What to do when the preferred cloud provider fails mid-utterance (§13). */
+    val cloudTtsFallback: CloudTtsFallbackPolicy = CloudTtsFallbackPolicy.FALLBACK_TO_ANDROID,
+
+    /** Client-side cloud audio cache policy (session-scoped, bounded, in-memory). */
+    val cloudTtsCache: CloudTtsCachePolicy = CloudTtsCachePolicy.SESSION,
+
+    /** Explicit cloud model overrides; null = the PC Agent's default model. */
+    val openaiModelId: String? = null,
+    val elevenlabsModelId: String? = null
 ) {
     init {
         require(acousticGapMs in MIN_ACOUSTIC_GAP_MS..MAX_ACOUSTIC_GAP_MS) {
@@ -77,7 +95,14 @@ data class TtsSettings(
     }
 }
 
-/** Maps the (flat, migration-safe) persisted settings onto the structured TTS view. */
+/**
+ * Maps the (flat, migration-safe) persisted settings onto the structured TTS view.
+ *
+ * The cloud-TTS fields ([TtsSettings.ttsProvider], fallback/cache policies, model
+ * overrides) are intentionally NOT mapped here yet: AppSettings does not persist
+ * them in this baseline, so the structured view keeps its local-only defaults.
+ * Persisting + exposing them is later Gate work, not a baseline behavior change.
+ */
 fun AppSettings.toTtsSettings(): TtsSettings = TtsSettings(
     engineId = ttsEngineId,
     englishVoiceId = englishVoiceId,

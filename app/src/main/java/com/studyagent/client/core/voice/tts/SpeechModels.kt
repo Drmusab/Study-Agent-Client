@@ -107,7 +107,16 @@ enum class SpeechErrorCode {
     PLAYBACK_ERROR,
     TIMEOUT,
     ROUTE_LOST,
-    QUEUE_FULL
+    QUEUE_FULL,
+    // Cloud (remote) TTS — mirrors the stable PC Agent provider codes
+    // (server/tts/models.py TtsErrorCode; see docs/PROTOCOL.md, Remote TTS).
+    PROVIDER_UNAVAILABLE,
+    PROVIDER_NOT_CONFIGURED,
+    PROVIDER_AUTH_FAILED,
+    PROVIDER_RATE_LIMITED,
+    PROVIDER_QUOTA_EXCEEDED,
+    MODEL_UNAVAILABLE,
+    CLOUD_STREAM_FAILED
 }
 
 /**
