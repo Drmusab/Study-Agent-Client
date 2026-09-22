@@ -7,7 +7,11 @@ import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.AnkiRatingOptions
 import com.studyagent.client.core.anki.AnkiResult
+import com.studyagent.client.core.anki.AnkiReviewTurn
+import com.studyagent.client.core.anki.AnkiReviewTurnContent
+import com.studyagent.client.core.anki.AnkiScheduledCard
 import com.studyagent.client.core.anki.unavailabilityError
 import com.studyagent.client.core.anki.BeginReviewRequest
 import com.studyagent.client.core.anki.CommitRatingRequest
@@ -29,6 +33,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.UUID
 
 /**
  * GATE 04 — real backend shell behind GATE 03's AnkiBackend interface (§22).
@@ -40,28 +45,36 @@ import kotlinx.coroutines.sync.withLock
  * - refreshAvailability()
  *
  * GATE 05 implements [getDecks] / [getSelectedDeck] through [AnkiDroidDeckGateway].
- * Review / rating methods still return UnsupportedAction truthfully (§24/§102),
- * never an empty list standing in for "not implemented" (INV-ANKI-DECK-06).
+ * GATE 06 implements [beginReview] / [nextCard] through [AnkiDroidReviewGateway], and owns the
+ * one piece of runtime state that cannot live in the gateway: **the active review turn of the
+ * active session** (§60/§61). [commitRating] still refuses truthfully (§146) — rating mutation is
+ * GATE 11 and nothing here may pretend otherwise.
  *
  * Architecture:
- * AnkiDroidGateway (health) + AnkiDroidDeckGateway (decks)
+ * AnkiDroidGateway (health) + AnkiDroidDeckGateway (decks) + AnkiDroidReviewGateway (scheduler)
  *   ↓
- * AnkiDroidBackend
+ * AnkiDroidBackend  (session ownership, one active turn per session)
  *   ↓
  * AnkiBackend (domain)
  *
  * No Cursor, ContentResolver, Uri or provider JSON escapes (§4/§10).
- * Deck operations are read-only (INV-ANKI-DECK-12). No card or review queries.
+ * Deck and review operations are read-only (INV-ANKI-DECK-12, INV-ANKI-REV-07/15): the scheduler
+ * selects the card, Study-Agent only reports what it selected.
  */
 class AnkiDroidBackend(
     private val gateway: AnkiDroidGateway,
     private val scope: CoroutineScope,
     private val clock: AppClock = SystemAppClock,
     private val dispatchers: DispatcherProvider = DefaultDispatcherProvider(),
-    private val deckGateway: AnkiDroidDeckGateway
+    private val deckGateway: AnkiDroidDeckGateway,
+    private val reviewGateway: AnkiDroidReviewGateway,
+    private val turnIds: ReviewTurnIdSource = SequentialReviewTurnIdSource()
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
+
+    /** Distinguishes handles this instance issued from handles issued by a previous process. */
+    private val instanceId: String = UUID.randomUUID().toString()
 
     // Single source of truth (§45): integration state internally, derived flows externally (§44)
     private val _integrationState = MutableStateFlow(gateway.currentState())
@@ -81,6 +94,29 @@ class AnkiDroidBackend(
     private val refreshMutex = Mutex()
     private var generation: Long = 0L
     private val publicationGuard = AnkiDroidHealthPublicationGuard()
+
+    /**
+     * GATE 06 — the scheduled-review serialization point (§63/§64/§161/§162).
+     *
+     * One lock covers "read the session, ask the scheduler, install the turn". That single span is
+     * what makes three separate guarantees true at once, rather than three hopeful checks:
+     *
+     * - **one active turn** — a second caller waits, then observes the turn the first installed
+     *   instead of asking the scheduler again (§63-§65);
+     * - **no stale installation** — a result can only ever be installed into the record it was
+     *   read for, because no other operation (a new session, an ended session, a health change)
+     *   can interleave between the read and the install (§161);
+     * - **one scheduler query per card** — double-taps, voice commands and reconnect callbacks
+     *   converge instead of stampeding the provider (§143).
+     *
+     * Holding a mutex across a provider read is deliberate: this is the operation whose
+     * interleaving is expensive (a second scheduler read, or a card presented to a session that no
+     * longer exists), and it is never held by ordinary deck or health reads.
+     */
+    private val reviewMutex = Mutex()
+    private var reviewGeneration: Long = 0L
+    private var reviewRecords: MutableMap<String, ReviewSessionRecord> = mutableMapOf()
+    private var lastReviewDiagnostics: AnkiReviewDiagnostics = AnkiReviewDiagnostics.NONE
 
     init {
         AppLogger.i("AnkiDroidBackend", "AnkiDroidBackend created id=${id.stableId}")
@@ -167,37 +203,298 @@ class AnkiDroidBackend(
 
     private fun currentAuthority(): String? = _integrationState.value.metadata?.authority
 
+    /**
+     * Opens a scheduled-review session bound to exactly one backend, one collection and one deck
+     * (§9/§10/§130). Nothing is written to AnkiDroid (INV-ANKI-REV-15); the deck is only *read* to
+     * prove it still exists, because the `schedule` endpoint cannot distinguish "that deck is
+     * gone" from "nothing is due" and Study-Agent must not guess (§46).
+     */
     override suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession> {
         try {
-            AppLogger.i("AnkiDroidBackend", "beginReview called — not yet implemented (GATE 06)")
-            return AnkiResult.Failure(
-                AnkiError.UnsupportedAction(action = "reviewIntegrationPending")
-            )
+            return reviewMutex.withLock { beginReviewLocked(request) }
         } catch (cancellation: CancellationException) {
             throw cancellation
+        } catch (throwable: Throwable) {
+            AppLogger.w(TAG, "ANKI_REVIEW_SESSION_START_FAILED ${throwable::class.java.simpleName}")
+            return AnkiResult.Failure(
+                AnkiError.Unknown(cause = throwable::class.java.simpleName)
+            )
         }
     }
 
+    private suspend fun beginReviewLocked(request: BeginReviewRequest): AnkiResult<AnkiReviewSession> {
+        val context = request.context
+
+        // A foreign backend id is never reinterpreted as this one (§8).
+        if (context.backendId != id) return AnkiResult.Failure(AnkiError.SessionInvalid())
+
+        usabilityError()?.let { return AnkiResult.Failure(it) }
+        // GATE 06 gates on scheduledReview, not on the full review loop: this backend can ask the
+        // scheduler for a card and cannot yet commit a rating, and both of those are true at once
+        // (§75/§146). Gating on `review` here would make the gate's own feature unreachable.
+        if (!_integrationState.value.capabilities.scheduledReview) {
+            return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "scheduledReview"))
+        }
+
+        // One session, one deck (§130/§131): "whichever deck AnkiDroid happens to have selected"
+        // is not an acceptable review context, so a null deck ref is refused rather than resolved
+        // by guessing. The caller resolves AnkiDroid's selected deck through getSelectedDeck().
+        val deckRef = context.deckRef
+            ?: return AnkiResult.Failure(AnkiError.InvalidRequest(detail = "review_requires_deck_ref"))
+
+        request.limit?.let { limit ->
+            if (limit <= 0 || limit > MAX_SESSION_CARD_LIMIT) {
+                return AnkiResult.Failure(AnkiError.InvalidRequest(detail = "review_limit_out_of_range"))
+            }
+        }
+
+        // Idempotent per user study session (§85): a repeat of the identical request returns the
+        // handle that is already open; a *different* request for the same session is refused
+        // rather than silently replacing the review context (§128/§129).
+        reviewRecords.values
+            .firstOrNull { it.session.context.studySessionId == context.studySessionId }
+            ?.let { existing ->
+                return if (existing.request == request) {
+                    AnkiResult.Success(existing.session)
+                } else {
+                    AnkiResult.Failure(AnkiError.SessionInvalid())
+                }
+            }
+
+        val authority = currentAuthority()
+            ?: return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+
+        // Confirm the deck belongs to the collection as it is right now (§45/§46/§77).
+        when (val listing = deckGateway.queryDecks(authority)) {
+            is AnkiResult.Failure -> return listing
+            is AnkiResult.Success -> {
+                if (listing.value.decks.none { it.ref == deckRef }) {
+                    return AnkiResult.Failure(AnkiError.DeckNotFound(deckRef))
+                }
+            }
+        }
+
+        val session = AnkiReviewSession(
+            context = context,
+            backendSessionRef = "$instanceId:review:${++reviewGeneration}"
+        )
+        reviewRecords[session.backendSessionRef] = ReviewSessionRecord(
+            session = session,
+            request = request,
+            deckRef = deckRef,
+            limit = request.limit
+        )
+        recordDiagnostics(status = "STARTED", deckRef = deckRef, session = session)
+        AppLogger.i(
+            TAG,
+            "ANKI_REVIEW_SESSION_STARTED deck=${deckRef.deckId} limit=${request.limit ?: "none"}"
+        )
+        return AnkiResult.Success(session)
+    }
+
+    /**
+     * The next card **AnkiDroid's scheduler** selects (§4/INV-ANKI-REV-01/02).
+     *
+     * Ordering is never computed here: no due comparison, no FSRS, no learning steps, no local
+     * queue (§38). The gateway asks for exactly one row and this method presents it once.
+     *
+     * While a turn is unresolved this returns *that same turn* instead of asking again
+     * (INV-ANKI-REV-03/08, §63-§66/§92/§93). That matters at Gate 06 exactly as much as it will
+     * after Gate 11: with no commit path yet, the correct answer to a second `nextCard()` is the
+     * card the user is already looking at, not a second card.
+     */
     override suspend fun nextCard(session: AnkiReviewSession): NextCardResult {
         try {
-            AppLogger.i("AnkiDroidBackend", "nextCard called — not yet implemented (GATE 06)")
-            return NextCardResult.Failure(
-                AnkiError.UnsupportedAction(action = "reviewIntegrationPending")
-            )
+            return reviewMutex.withLock { nextCardLocked(session) }
         } catch (cancellation: CancellationException) {
+            // Cancellation is never converted into a domain failure (§140/INV-ANKI-REV-13).
             throw cancellation
+        } catch (throwable: Throwable) {
+            AppLogger.w(TAG, "ANKI_NEXT_CARD_FAILED ${throwable::class.java.simpleName}")
+            return NextCardResult.Failure(AnkiError.Unknown(cause = throwable::class.java.simpleName))
         }
     }
 
+    private suspend fun nextCardLocked(session: AnkiReviewSession): NextCardResult {
+        // A handle this backend did not issue, or one that a later session superseded, is refused
+        // rather than reinterpreted (§161/§162).
+        val record = reviewRecords[session.backendSessionRef]
+        if (record == null || record.session != session) {
+            return NextCardResult.Failure(AnkiError.SessionInvalid())
+        }
+
+        // AnkiDroid disabled, uninstalled, unpermitted, or its collection closed mid-session:
+        // report the typed reason and never fall back to another backend (§47-§49/§132).
+        usabilityError()?.let { return NextCardResult.BackendUnavailable(it) }
+        if (!_integrationState.value.capabilities.scheduledReview) {
+            return NextCardResult.Failure(AnkiError.UnsupportedAction(action = "scheduledReview"))
+        }
+
+        record.activeTurn?.let { return NextCardResult.Card(it) }
+        if (record.schedulerExhausted) return NextCardResult.Finished
+
+        val authority = currentAuthority()
+            ?: return NextCardResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+
+        val query = reviewGateway.queryNextScheduledCard(
+            authority = authority,
+            deckRef = record.deckRef,
+            limit = SINGLE_CARD_QUERY_LIMIT
+        )
+
+        val outcome = when (query) {
+            is AnkiResult.Failure -> return NextCardResult.Failure(query.error)
+            is AnkiResult.Success -> query.value
+        }
+
+        return when (outcome) {
+            is AnkiDroidScheduledCardQuery.NoCardDue -> resolveEmptyAnswer(record)
+            is AnkiDroidScheduledCardQuery.Scheduled -> present(record, outcome.card)
+        }
+    }
+
+    /**
+     * The `schedule` endpoint answers an unknown deck id with the same empty cursor it uses for an
+     * exhausted deck, so "nothing due" and "that deck is gone" are not distinguishable from the
+     * card read alone. Resolving it against the deck list is the only honest way to keep §46
+     * (deleted deck → typed failure) and §32 (exhausted deck → a valid end state) apart — and it
+     * costs one query, only at the moment a session would otherwise finish.
+     */
+    private suspend fun resolveEmptyAnswer(record: ReviewSessionRecord): NextCardResult {
+        val authority = currentAuthority()
+            ?: return NextCardResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+        when (val listing = deckGateway.queryDecks(authority)) {
+            is AnkiResult.Failure -> return NextCardResult.Failure(listing.error)
+            is AnkiResult.Success -> {
+                if (listing.value.decks.none { it.ref == record.deckRef }) {
+                    AppLogger.w(TAG, "ANKI_REVIEW_DECK_GONE deck=${record.deckRef.deckId}")
+                    reviewRecords.remove(record.session.backendSessionRef)
+                    return NextCardResult.Failure(AnkiError.DeckNotFound(record.deckRef))
+                }
+            }
+        }
+        record.schedulerExhausted = true
+        recordDiagnostics(status = "FINISHED", deckRef = record.deckRef, session = record.session)
+        AppLogger.i(TAG, "ANKI_REVIEW_SESSION_FINISHED deck=${record.deckRef.deckId} presented=${record.presentedCount}")
+        return NextCardResult.Finished
+    }
+
+    /** Creates the presentation identity. Study-Agent owns turns; AnkiDroid owns cards (§57). */
+    private fun present(record: ReviewSessionRecord, card: AnkiScheduledCard): NextCardResult {
+        val turn = AnkiReviewTurn(
+            turnId = turnIds.next(),
+            studySessionId = record.session.context.studySessionId,
+            content = AnkiReviewTurnContent.Scheduled(card),
+            position = record.presentedCount + 1,
+            remaining = null
+        )
+        record.activeTurn = turn
+        record.presentedCount += 1
+        recordDiagnostics(status = "CARD_AVAILABLE", deckRef = record.deckRef, session = record.session, turn = turn)
+        return NextCardResult.Card(turn)
+    }
+
+    /**
+     * Session-scoped progress for the future coordinator (§33/§34), never a scheduling decision.
+     *
+     * The distinction between "the scheduler ran out" and "the user's own session limit was
+     * reached" is modelled here as data rather than as a second `NextCardResult` variant: with no
+     * commit path yet, a limit cannot become reachable, and inventing an unreachable result
+     * variant would be untestable. The count is Study-Agent's; the *cards* remain AnkiDroid's.
+     */
+    fun reviewProgress(session: AnkiReviewSession): AnkiReviewSessionProgress? =
+        reviewRecords[session.backendSessionRef]?.let { record ->
+            AnkiReviewSessionProgress(
+                backendSessionRef = record.session.backendSessionRef,
+                deckRef = record.deckRef,
+                limit = record.limit,
+                presentedTurnCount = record.presentedCount,
+                hasActiveTurn = record.activeTurn != null,
+                schedulerExhausted = record.schedulerExhausted
+            )
+        }
+
+    /**
+     * GATE 06 §86 — close a review session and forget its runtime record.
+     *
+     * Deliberately a no-op towards AnkiDroid: ending a Study-Agent session must not mutate a card,
+     * change a listing or touch the scheduler. It forgets a handle, and a forgotten handle is then
+     * refused like any other unknown one — which is also the observable proof that recovery after
+     * process/backend recreation cannot resurrect a stale turn (§97/§99/§161).
+     */
+    suspend fun endReview(session: AnkiReviewSession): Boolean = reviewMutex.withLock {
+        val removed = reviewRecords.remove(session.backendSessionRef) != null
+        if (removed) {
+            AppLogger.i(TAG, "ANKI_REVIEW_SESSION_ENDED ref=${session.backendSessionRef}")
+        }
+        removed
+    }
+
+    /** Content-free diagnostics for settings and the debug harness (§82/§84). Never card text. */
+    fun reviewDiagnostics(): AnkiReviewDiagnostics = lastReviewDiagnostics
+
+    fun reviewGatewayDiagnostics(): AnkiDroidReviewQueryDiagnostics = reviewGateway.lastQueryDiagnostics()
+
+    private fun recordDiagnostics(
+        status: String,
+        deckRef: AnkiDeckRef,
+        session: AnkiReviewSession,
+        turn: AnkiReviewTurn? = null
+    ) {
+        lastReviewDiagnostics = AnkiReviewDiagnostics(
+            lastStatus = status,
+            backendId = id.stableId,
+            sessionRef = session.backendSessionRef,
+            deckRef = deckRef,
+            turnId = turn?.turnId?.value,
+            cardRef = turn?.cardRef,
+            buttonCount = turn?.let { buttonCountOf(it) },
+            lastAtMs = clock.nowMillis()
+        )
+    }
+
+    /**
+     * GATE 06 deliberately does not implement this (§35/§36/§146).
+     *
+     * Rating mutation needs card extraction, rendering, StudySession wiring and an exactly-once
+     * ledger before it can be safe; until GATE 11 owns all of those, the honest answer is a typed
+     * refusal — never a fabricated success. `Rejected` (not `Ambiguous`) is correct and provable:
+     * nothing was dispatched, so no write can have happened.
+     */
     override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
         try {
-            AppLogger.i("AnkiDroidBackend", "commitRating called — not yet implemented (GATE 11)")
+            AppLogger.i(TAG, "ANKI_RATING_COMMIT_REFUSED (GATE 11 owns rating mutation)")
             return CommitRatingResult.Rejected(
                 AnkiError.UnsupportedAction(action = "ratingCommitIntegrationPending")
             )
         } catch (cancellation: CancellationException) {
             throw cancellation
         }
+    }
+
+    private fun usabilityError(): AnkiError? =
+        _integrationState.value.availability.unavailabilityError()
+
+    private fun buttonCountOf(turn: AnkiReviewTurn): Int? =
+        (turn.content as? AnkiReviewTurnContent.Scheduled)?.card?.let { buttonCountOf(it) }
+
+    private fun buttonCountOf(card: AnkiScheduledCard): Int = when (val options = card.ratingOptions) {
+        is AnkiRatingOptions.Known -> options.buttonCount
+        is AnkiRatingOptions.Unmapped -> options.buttonCount
+    }
+
+    private companion object {
+        const val TAG = "AnkiDroidBackend"
+
+        /**
+         * GATE 06 asks for exactly one card (§13/§40). Preloading a queue would hold scheduler
+         * state that the next rating invalidates, and §15 forbids assuming a prefetched card is
+         * still next.
+         */
+        const val SINGLE_CARD_QUERY_LIMIT = 1
+
+        /** AnkiDroid owns the real daily limits; this only bounds the user's own session (§78). */
+        const val MAX_SESSION_CARD_LIMIT = 500
     }
 
     /**

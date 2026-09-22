@@ -105,15 +105,33 @@ object AnkiDroidCompatibilityPolicy {
      * GATE 05: [AnkiCapabilities.deckListing] is true when the backend is Ready at a supported
      * spec. [AnkiCapabilities.deckCounts] stays false — counts are mapped best-effort from the
      * provider but their recursive-vs-self semantics have not been verified on a real device,
-     * so UI must treat them as nullable/advisory. Review stays false until GATE 06
-     * (`isReadyForReview` remains false; PC path isolation holds).
+     * so UI must treat them as nullable/advisory.
+     *
+     * GATE 06: [AnkiCapabilities.scheduledReview] becomes true — the backend can ask AnkiDroid's
+     * scheduler for the next card and map the answer, and [AnkiCapabilities.reviewIntervals] with
+     * it, because the interval labels are mapped as display metadata. Everything the review path
+     * does *not* have stays false:
+     *
+     * - [AnkiCapabilities.review] — the full loop still needs rating commit (GATE 11), so
+     *   `isReadyForReview` stays false and no production flow may start a rated session;
+     * - [AnkiCapabilities.renderedCards] — GATE 06 maps scheduler identity, not card content
+     *   (GATE 07);
+     * - [AnkiCapabilities.media] — media names are kept as references, nothing is resolved or
+     *   read (GATE 09).
+     *
+     * Marking any of those true to make a screen look complete would be exactly the capability
+     * lie GATE 01 §16 forbids.
      */
     fun implementedCapabilitiesFor(
         spec: Int?,
         isReady: Boolean
     ): AnkiCapabilities {
         if (!isReady || spec == null || !isSpecSupported(spec)) return AnkiCapabilities.NONE
-        return AnkiCapabilities(deckListing = true)
+        return AnkiCapabilities(
+            deckListing = true,
+            scheduledReview = true,
+            reviewIntervals = true
+        )
     }
 }
 
@@ -188,25 +206,35 @@ data class AnkiDroidApiCapabilityReport(
         )
     }
 
-    fun toCapabilityDetailList(): List<AnkiDroidCapabilityDetail> = listOf(
-        AnkiDroidCapabilityDetail("deckListing", deckListing, maturityFor(deckListing, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("deckCounts", deckCounts, maturityFor(deckCounts, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("scheduledReview", scheduledReview, maturityFor(scheduledReview, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("renderedCards", renderedCards, maturityFor(renderedCards, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("simpleCardText", simpleCardText, maturityFor(simpleCardText, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("nextReviewIntervals", nextReviewIntervals, maturityFor(nextReviewIntervals, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("ratingCommit", ratingCommit, maturityFor(ratingCommit, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("flags", flags, maturityFor(flags, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("bury", bury, maturityFor(bury, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("suspend", suspend, maturityFor(suspend, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("noteRead", noteRead, maturityFor(noteRead, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("noteEdit", noteEdit, maturityFor(noteEdit, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("noteCreate", noteCreate, maturityFor(noteCreate, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("mediaRead", mediaRead, maturityFor(mediaRead, implemented = false), "not yet validated"),
-        AnkiDroidCapabilityDetail("mediaWrite", mediaWrite, maturityFor(mediaWrite, implemented = false), "not yet validated"),
-        AnkiDroidCapabilityDetail("search", search, maturityFor(search, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("noteTypes", noteTypes, maturityFor(noteTypes, implemented = false), "provider contract"),
-        AnkiDroidCapabilityDetail("cardTemplates", cardTemplates, maturityFor(cardTemplates, implemented = false), "provider contract")
+    /**
+     * The capability matrix as rows.
+     *
+     * [implemented] is the same [AnkiCapabilities] the probe publishes, so a row can never claim
+     * more than the backend actually offers. Before GATE 06 every row took the default of "API
+     * support only"; the review rows now reflect what is genuinely wired, and `ratingCommit`
+     * still does not (§75/§147).
+     */
+    fun toCapabilityDetailList(
+        implemented: AnkiCapabilities = AnkiCapabilities.NONE
+    ): List<AnkiDroidCapabilityDetail> = listOf(
+        AnkiDroidCapabilityDetail("deckListing", deckListing, maturityFor(deckListing, implemented.deckListing), "provider contract"),
+        AnkiDroidCapabilityDetail("deckCounts", deckCounts, maturityFor(deckCounts, implemented.deckCounts), "provider contract"),
+        AnkiDroidCapabilityDetail("scheduledReview", scheduledReview, maturityFor(scheduledReview, implemented.scheduledReview), "GATE 06 — schedule endpoint"),
+        AnkiDroidCapabilityDetail("renderedCards", renderedCards, maturityFor(renderedCards, implemented.renderedCards), "provider contract"),
+        AnkiDroidCapabilityDetail("simpleCardText", simpleCardText, maturityFor(simpleCardText, implemented.renderedCards), "provider contract"),
+        AnkiDroidCapabilityDetail("nextReviewIntervals", nextReviewIntervals, maturityFor(nextReviewIntervals, implemented.reviewIntervals), "GATE 06 — mapped as display labels"),
+        AnkiDroidCapabilityDetail("ratingCommit", ratingCommit, maturityFor(ratingCommit, implemented.review), "GATE 11"),
+        AnkiDroidCapabilityDetail("flags", flags, maturityFor(flags, implemented.flags), "provider contract"),
+        AnkiDroidCapabilityDetail("bury", bury, maturityFor(bury, implemented.bury), "provider contract"),
+        AnkiDroidCapabilityDetail("suspend", suspend, maturityFor(suspend, implemented.suspendCards), "provider contract"),
+        AnkiDroidCapabilityDetail("noteRead", noteRead, maturityFor(noteRead, implemented.renderedCards), "provider contract"),
+        AnkiDroidCapabilityDetail("noteEdit", noteEdit, maturityFor(noteEdit, implemented.editNotes), "provider contract"),
+        AnkiDroidCapabilityDetail("noteCreate", noteCreate, maturityFor(noteCreate, implemented.createNotes), "provider contract"),
+        AnkiDroidCapabilityDetail("mediaRead", mediaRead, maturityFor(mediaRead, implemented.media), "not yet validated"),
+        AnkiDroidCapabilityDetail("mediaWrite", mediaWrite, maturityFor(mediaWrite, implemented.media && implemented.createNotes), "not yet validated"),
+        AnkiDroidCapabilityDetail("search", search, maturityFor(search, implemented.search), "provider contract"),
+        AnkiDroidCapabilityDetail("noteTypes", noteTypes, maturityFor(noteTypes, implemented.renderedCards), "provider contract"),
+        AnkiDroidCapabilityDetail("cardTemplates", cardTemplates, maturityFor(cardTemplates, implemented.renderedCards), "provider contract")
     )
 
     private fun maturityFor(support: CapabilitySupport, implemented: Boolean): CapabilityMaturity = when {

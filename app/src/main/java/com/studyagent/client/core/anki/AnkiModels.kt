@@ -47,6 +47,76 @@ sealed interface AnkiMediaRef {
     data class Unavailable(val reason: String? = null) : AnkiMediaRef
 }
 
+/**
+ * GATE 06 — which rating buttons the *scheduler* is currently offering for one scheduled card.
+ *
+ * The number of available buttons is a scheduler fact, not a UI constant (§20/§21): Anki shows
+ * fewer buttons for some card states, and a future backend may expose a different set. UI must
+ * render [Known.ratings] and never hard-code all four.
+ *
+ * [Unmapped] is the honest alternative to guessing. When a backend announces a button count whose
+ * identity or order this build has not verified, no rating may be offered: picking `[AGAIN, HARD]`
+ * out of a bare `2` would be inventing a scheduling mapping (§22/INV-ANKI-REV-09).
+ */
+sealed interface AnkiRatingOptions {
+    /** Buttons this build can name, in the scheduler's own order. */
+    data class Known(val ratings: List<Rating>) : AnkiRatingOptions {
+        init {
+            require(ratings.isNotEmpty()) { "At least one rating button must be available" }
+            require(ratings.distinct().size == ratings.size) { "Rating buttons must be distinct" }
+        }
+
+        val buttonCount: Int get() = ratings.size
+
+        fun supports(rating: Rating): Boolean = ratings.contains(rating)
+    }
+
+    /** The scheduler announced [buttonCount] buttons whose identity/order this build cannot map. */
+    data class Unmapped(val buttonCount: Int) : AnkiRatingOptions {
+        init { require(buttonCount >= 0) { "A button count is never negative" } }
+    }
+}
+
+/**
+ * GATE 06 — a card the backend's scheduler selected for review, *before* its content is rendered.
+ *
+ * This is deliberately not an [AnkiRenderedCard]: this gate does not have the question/answer and
+ * will not fabricate empty ones (§27/§122). GATE 07 hydrates a scheduled card into rendered
+ * content; until then the turn carries identity, scheduler metadata and media references only.
+ *
+ * Identity is whatever the backend actually reported. When a backend addresses a card by
+ * `noteId + ordinal` and does not expose a card id, [ref] carries exactly that pair — a missing
+ * card id is never synthesized (§17/§18).
+ *
+ * [media] entries are *references*: a name the backend owns, not a path, not an open file, and
+ * not a promise that the file is readable from this process (§24/§25).
+ */
+data class AnkiScheduledCard(
+    val ref: AnkiCardRef,
+    val noteRef: AnkiNoteRef?,
+    val deckRef: AnkiDeckRef,
+    val ratingOptions: AnkiRatingOptions,
+    /** Backend-rendered labels for display. Never parsed into scheduling arithmetic (§23). */
+    val scheduling: AnkiSchedulingInfo? = null,
+    val media: List<AnkiMediaRef> = emptyList(),
+    /**
+     * Content-free tokens for metadata this build could not read (for example
+     * `review_media_unparseable`). Diagnostics only — never shown as card content, never a
+     * reason to fail a card whose identity is trustworthy (§51/§54).
+     */
+    val degradations: List<String> = emptyList()
+) {
+    init {
+        require(noteRef == null || noteRef.backendId == ref.backendId)
+        require(deckRef.backendId == ref.backendId)
+        require(noteRef == null || ref.noteId == null || noteRef.noteId == ref.noteId)
+        // Same rule as AnkiRenderedCard: at most one *known* collection across the three refs.
+        // Unknown (null) is not a wildcard, so two different known collections are unrepresentable.
+        require(listOfNotNull(ref.collectionKey, noteRef?.collectionKey, deckRef.collectionKey)
+            .distinct().size <= 1)
+    }
+}
+
 /** FSRS facts are informational only; Study-Agent does not calculate scheduling. */
 data class AnkiFsrsInfo(
     val stability: Double? = null,

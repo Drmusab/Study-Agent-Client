@@ -632,8 +632,12 @@ class DefaultDiagnosticsRepository(
             rows.add("--- Study-Agent Implementation ---" to "")
             rows.add("Deck Listing" to if (capabilities.deckListing) "Implemented" else "Pending")
             rows.add("Deck Counts" to if (capabilities.deckCounts) "Verified" else "Mapped, not verified")
-            rows.add("Review" to if (capabilities.review) "Implemented" else "Pending GATE 06")
-            rows.add("Rendered Cards" to if (capabilities.renderedCards) "Implemented" else "Pending GATE 08")
+            // GATE 06 split the review row in two on purpose: the scheduler can be asked for the
+            // next card, and a rating still cannot be written. One row would have had to call one
+            // of those "implemented" when it is not (§75/§147).
+            rows.add("Scheduled Review" to if (capabilities.scheduledReview) "Implemented" else "Pending GATE 06")
+            rows.add("Rating Commit" to if (capabilities.review) "Implemented" else "Pending GATE 11")
+            rows.add("Rendered Cards" to if (capabilities.renderedCards) "Implemented" else "Pending GATE 07")
             rows.add("Review Intervals" to if (capabilities.reviewIntervals) "Implemented" else "Pending GATE 06")
             rows.add("Media" to if (capabilities.media) "Implemented" else "Pending GATE 09")
             rows.add("Flags" to if (capabilities.flags) "Implemented" else "Pending GATE 11")

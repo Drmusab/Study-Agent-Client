@@ -64,13 +64,13 @@ abstract class AnkiBackendContract {
         val turns = mutableListOf<AnkiReviewTurn>()
         f.cards.forEachIndexed { index, expected ->
             val turn = (f.backend.nextCard(session) as NextCardResult.Card).turn
-            assertEquals(expected.ref, turn.card.ref)
+            assertEquals(expected.ref, turn.cardRef)
             assertTrue(f.backend.commitRating(turn.request(if (index == 1) Rating.AGAIN else Rating.GOOD))
                 is CommitRatingResult.Committed)
             turns += turn
         }
         assertEquals(f.cards.size, turns.map { it.turnId }.distinct().size)
-        assertEquals(turns.first().card.ref, turns.last().card.ref)
+        assertEquals(turns.first().cardRef, turns.last().cardRef)
         assertNotEquals(turns.first().commitId, turns.last().commitId)
         assertEquals(NextCardResult.Finished, f.backend.nextCard(session))
         assertEquals(NextCardResult.Finished, f.backend.nextCard(session))
@@ -87,7 +87,7 @@ abstract class AnkiBackendContract {
         val conflict = f.backend.commitRating(request.copy(rating = Rating.EASY)) as CommitRatingResult.Rejected
         assertTrue(conflict.error is AnkiError.CommitConflict)
         val second = f.backend.nextCard(session) as NextCardResult.Card
-        assertEquals(f.cards[1].ref, second.turn.card.ref)
+        assertEquals(f.cards[1].ref, second.turn.cardRef)
         assertEquals(committed, f.backend.commitRating(request)) // late ACK retry, never advances twice
         assertEquals(second, f.backend.nextCard(session))
     }
@@ -99,7 +99,7 @@ abstract class AnkiBackendContract {
         val results = List(20) { async { f.backend.commitRating(turn.request()) } }.awaitAll()
         assertTrue(results.all { it is CommitRatingResult.Committed })
         val second = f.backend.nextCard(session) as NextCardResult.Card
-        assertEquals(f.cards[1].ref, second.turn.card.ref)
+        assertEquals(f.cards[1].ref, second.turn.cardRef)
     }
 
     @Test fun `forged or stale turn is rejected as domain error`() = runTest {
@@ -126,4 +126,4 @@ abstract class AnkiBackendContract {
 }
 
 internal fun AnkiReviewTurn.request(rating: Rating = Rating.GOOD) =
-    CommitRatingRequest(commitId, card.ref, rating, ratedAtEpochMs = 100, answerDurationMs = 10)
+    CommitRatingRequest(commitId, cardRef, rating, ratedAtEpochMs = 100, answerDurationMs = 10)

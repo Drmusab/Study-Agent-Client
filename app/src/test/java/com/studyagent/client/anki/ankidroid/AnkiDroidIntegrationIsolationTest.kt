@@ -131,7 +131,11 @@ class AnkiDroidIntegrationIsolationTest {
             "import kotlinx.",
             "import java.",
             "import com.studyagent.client.core.anki.",
-            "import com.studyagent.client.core.common."
+            "import com.studyagent.client.core.common.",
+            // `core.models.Rating` is already the domain vocabulary for AGAIN/HARD/GOOD/EASY —
+            // `AnkiSchedulingInfo` above the layer uses it. GATE 06 needs it too, and inventing a
+            // parallel Anki rating enum to avoid this import is exactly what GATE 03 §76 forbids.
+            "import com.studyagent.client.core.models."
         )
         val offenders = layerFiles.flatMap { file ->
             imports(file)
@@ -153,6 +157,14 @@ class AnkiDroidIntegrationIsolationTest {
             // GATE 06+ APIs that must not exist yet
             "addNote(", "addNotes(", "updateNote(", "addMediaFromUri(", "addNewDeck(",
             "selectDeckWithCheck", "getNextCard(",
+            // GATE 06 — the review path is a *read*. These are the provider's answer/bury/suspend
+            // column names and the scheduler calls behind them: naming any of them would be the
+            // first step towards GATE 11's mutation, which this gate must not begin (§35/§37).
+            "answer_ease", "time_taken", "\"buried\"", "\"suspended\"",
+            // `sched.` prefixed so the scan cannot be fooled by an unrelated name: the layer does
+            // have a `suspendCards` *capability flag*, and it must keep having one.
+            "sched.answerCard", "sched.buryCards", "sched.suspendCards",
+            "nextIvl", "getSchedulingStates",
             // AnkiDroid internals: never linked, never copied
             "FlashCardsContract", "ReviewInfo", "libanki", "Reviewer"
         )
@@ -172,6 +184,85 @@ class AnkiDroidIntegrationIsolationTest {
         for (token in forbidden) {
             val found = offenders(token, layerFiles)
             assertTrue("'$token' must not appear in the integration layer's code: $found", found.isEmpty())
+        }
+    }
+
+    // ---------------------------------------------------------------- no shadow scheduler
+
+    /**
+     * GATE 06 §177-§179 — the review path must *report* the scheduler, never imitate it.
+     *
+     * The scan is deliberately narrow (only the files that implement scheduled review) so that it
+     * fails for the right reason: a `sortedBy` in a review file means someone started ordering
+     * cards, and a `LocalDate` there means someone started deciding what "today" is. Both are
+     * Study-Agent deciding *why* a card is due, which INV-ANKI-REV-01/02 forbid.
+     */
+    @Test
+    fun `the review path never orders, parks or time computes cards itself`() {
+        val reviewFiles = layerFiles.filter {
+            it.name.contains("Review") || it.name == "AnkiDroidBackend.kt"
+        }
+        assertTrue("the scan must actually see the review implementation", reviewFiles.size >= 3)
+
+        val forbidden = listOf(
+            // ordering / selection
+            "sortedBy", "sortedWith", "sorted()", "compareBy", "minByOrNull", "maxByOrNull", "shuffled",
+            // time and day arithmetic
+            "LocalDate", "LocalDateTime", "ZonedDateTime", "Instant", "TimeZone", "java.time",
+            "currentTimeMillis", "nanoTime", "Calendar",
+            // prefetching and queue building
+            "prefetch", "ArrayDeque", "List<AnkiReviewTurn>", "MutableList<AnkiReviewTurn>",
+            "List<AnkiScheduledCard>", "MutableList<AnkiScheduledCard>"
+        )
+        for (token in forbidden) {
+            val found = offenders(token, reviewFiles)
+            assertTrue("'$token' would be Study-Agent scheduling cards locally: $found", found.isEmpty())
+        }
+    }
+
+    /**
+     * GATE 06 §177 — the endpoint's own vocabulary stops at this layer.
+     *
+     * If `button_count` or `next_review_times` appeared in a ViewModel, the UI would be reasoning
+     * about scheduler columns; if the URI path appeared there, a second, unbounded caller could
+     * bypass the gateway's validation (limit bounds, deck ownership, single-flight).
+     */
+    @Test
+    fun `the scheduled review endpoint's vocabulary never leaves the integration layer`() {
+        val tokens = listOf(
+            "\"schedule\"",
+            "\"button_count\"",
+            "\"next_review_times\"",
+            "\"media_files\"",
+            "\"deckID\"",
+            "\"note_id\""
+        )
+        for (token in tokens) {
+            val leaked = offenders(token, outsideLayer)
+            assertTrue("'$token' belongs to the integration layer only: $leaked", leaked.isEmpty())
+        }
+        assertTrue(
+            "the scan must actually see the endpoint pinned in the layer",
+            layerFiles.any { it.code().contains("\"button_count\"") }
+        )
+    }
+
+    /**
+     * GATE 06 §178 — neither Anki layer may contain date/time arithmetic.
+     *
+     * The scheduler owns the day boundary, the cutoff and the timezone (§113/§114); "how long ago"
+     * is measured with the injected `AppClock`, which is not a calendar.
+     */
+    @Test
+    fun `no anki layer computes calendars or due dates`() {
+        val ankiLayers = mainSources.filter {
+            val path = it.path.replace('\\', '/')
+            path.contains("/core/anki/") || path.contains("/data/anki/")
+        }
+        assertTrue(ankiLayers.size >= 10)
+        for (token in listOf("java.time", "TimeZone", "Calendar", "LocalDate", "epochDay", "dayOfYear")) {
+            val found = offenders(token, ankiLayers)
+            assertTrue("'$token' means Study-Agent is deciding when a card is due: $found", found.isEmpty())
         }
     }
 

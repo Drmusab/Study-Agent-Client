@@ -1306,3 +1306,103 @@ The in-memory `AnkiLibraryRepository` is the Library data hook; there is no Libr
 Count semantics: provider `[learn, review, new]` are **due today, recursive (include children)**.
 Do not sum a parent with its children. `totalDue` is never derived.
 
+---
+
+## GATE 06 — Scheduled review & the scheduler boundary
+
+Full contract and the verified ReviewInfo semantics: `docs/GATE_06_ANKI_REVIEW.md`.
+
+### 27.1 Scheduler ownership (restated because it is the whole point)
+
+**Study-Agent never computes scheduler order.** There is no due comparison, no FSRS term, no
+learning step, no interval arithmetic, no local queue and no shadow scheduler anywhere in this
+codebase. The single source of "what should be reviewed next" is the backend scheduler; the
+scheduled-review gateway asks it and maps the answer.
+
+```
+               ANKIDROID
+          Scheduler / FSRS
+                 │ selects
+                 ▼
+          Scheduled Card
+                 │
+                 ▼
+       AnkiDroidReviewGateway
+                 │
+                 ▼
+          AnkiReviewTurn
+                 │
+                 ▼
+           Study-Agent
+```
+
+Consequences that are enforced, not merely intended:
+
+- interval labels from the backend are display metadata and are never parsed into scheduling;
+- deck inclusion, burying, suspension, daily limits, day boundaries and timezones belong to Anki;
+- Study-Agent asks once per unresolved turn, so no prefetched queue can go stale.
+
+### 27.2 Turn lifecycle
+
+```
+Scheduled          ← GATE 06: scheduler identity, rating options, media refs
+    ↓
+Presented          ← GATE 06: Study-Agent mints the ReviewTurnId; the turn is current
+    ↓
+Answered           ← GATE 07+: rendered content, user answer
+    ↓
+Awaiting Rating    ← GATE 10: StudySessionMachine owns the turn lifecycle
+    ↓
+Committed          ← GATE 11: rating mutation, exactly-once ledger
+```
+
+GATE 06 implements the first two states. The later states are named so that the *order* is fixed
+now: a turn is never rated before it is presented, and the scheduler is never asked for a new card
+while the current turn is unresolved.
+
+### 27.3 Query side effects (verified, not assumed)
+
+Reading `content://<authority>/schedule`:
+
+- performs **no** rating mutation, no bury, no suspend and no revlog entry;
+- may update AnkiDroid's *in-memory* learning cutoff;
+- temporarily selects the requested deck and restores the previous one — a persisted, undoable
+  collection-config write performed by AnkiDroid, not by Study-Agent;
+- returns the same scheduled card on a repeat read (subject to the scheduler's own tie-breaking),
+  which is why a retry after a *read* failure is safe and a retry after a *commit* is not.
+
+### 27.4 Review invariants (GATE 06)
+
+| ID | Contract |
+|---|---|
+| **INV-ANKI-REV-01** | Only AnkiDroid's scheduler decides the next scheduled card. |
+| **INV-ANKI-REV-02** | Study-Agent never reconstructs Anki scheduling locally. |
+| **INV-ANKI-REV-03** | One active review session has at most one active uncommitted turn. |
+| **INV-ANKI-REV-04** | Every presented scheduled card receives a unique `ReviewTurnId`. |
+| **INV-ANKI-REV-05** | The same card may legitimately appear in multiple distinct turns. |
+| **INV-ANKI-REV-06** | A no-card result is distinct from a backend failure. |
+| **INV-ANKI-REV-07** | The review query performs no rating mutation. |
+| **INV-ANKI-REV-08** | A current scheduled card is not replaced by a second scheduler query before its turn is resolved. |
+| **INV-ANKI-REV-09** | Rating options come from scheduler/provider semantics, never from hard-coded UI assumptions. |
+| **INV-ANKI-REV-10** | Review interval labels are presentation metadata, not scheduling logic. |
+| **INV-ANKI-REV-11** | An active session never silently changes backend or deck. |
+| **INV-ANKI-REV-12** | All provider resources are closed before the gateway returns. |
+| **INV-ANKI-REV-13** | Cancellation never becomes a domain failure. |
+| **INV-ANKI-REV-14** | PC connectivity is not required for local scheduler access. |
+| **INV-ANKI-REV-15** | GATE 06 performs zero review-rating mutations. |
+
+Each of these is asserted by a test, and the ones that describe *absence* (no ordering, no
+interval arithmetic, no prefetch, no endpoint vocabulary above the layer) are asserted by source
+scans in `AnkiDroidIntegrationIsolationTest`, because a scan fails on exactly the regression a
+reviewer would otherwise miss.
+
+### 27.5 Domain additions
+
+`AnkiScheduledCard` (scheduler identity, not rendered content), `AnkiRatingOptions`
+(`Known(ratings)` / `Unmapped(buttonCount)`), `AnkiReviewTurnContent` (`Scheduled` / `Rendered`),
+`AnkiReviewSessionProgress`, `AnkiError.InvalidRequest`, `AnkiCapabilities.scheduledReview`.
+
+`AnkiReviewTurn` now holds `content: AnkiReviewTurnContent` instead of an `AnkiRenderedCard`. This
+is deliberate §122/§124 behaviour: a scheduled card has no question or answer yet, and modelling
+"not loaded" as an empty string would make it indistinguishable from a card whose answer really is
+empty.

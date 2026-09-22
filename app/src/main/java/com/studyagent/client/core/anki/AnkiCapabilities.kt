@@ -13,8 +13,21 @@ package com.studyagent.client.core.anki
  * backend that cannot do something).
  */
 data class AnkiCapabilities(
-    /** Can serve due cards and commit ratings (the minimum viable backend). */
+    /**
+     * Can serve due cards **and commit ratings** — the complete review loop (the minimum viable
+     * backend).
+     *
+     * GATE 06 split this from [scheduledReview] rather than widening it: an implementation that
+     * can ask the scheduler for the next card but cannot yet write a rating is genuinely usable
+     * and genuinely *not* able to run a review loop, and a single flag would have had to lie about
+     * one of the two (§75/§146/§147).
+     */
     val review: Boolean = false,
+    /**
+     * Can ask the backend's scheduler which card to review next and represent it
+     * (GATE 06 — scheduled review without rating mutation). Implies nothing about [review].
+     */
+    val scheduledReview: Boolean = false,
     /** Can list decks with backend-qualified identity (GATE 05 — read-only deck foundation). */
     val deckListing: Boolean = false,
     /**

@@ -5,6 +5,7 @@ import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidApiCapabilityReport
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCompatibilityPolicy
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidIntegrationState
+import com.studyagent.client.data.anki.ankidroid.CapabilityMaturity
 import com.studyagent.client.data.anki.ankidroid.CapabilitySupport
 import org.junit.Assert.*
 import org.junit.Test
@@ -52,11 +53,38 @@ class AnkiDroidIntegrationStateTest {
     }
 
     @Test
-    fun `implemented capabilities for GATE 05 include deckListing when ready`() {
+    fun `implemented capabilities after GATE 06 include deckListing and scheduled review`() {
         val caps = AnkiDroidCompatibilityPolicy.implementedCapabilitiesFor(spec = 2, isReady = true)
         assertTrue(caps.deckListing)
+        assertTrue(caps.scheduledReview)
+        assertTrue(caps.reviewIntervals)
+        // The capability matrix must not move ahead of the code (§75/§147): no rating commit,
+        // no rendered cards, no media resolution, no deck-count verification.
         assertFalse(caps.review)
+        assertFalse(caps.renderedCards)
+        assertFalse(caps.media)
         assertFalse(caps.deckCounts)
+    }
+
+    @Test
+    fun `the capability matrix reports scheduled review as implemented and commit as pending`() {
+        val caps = AnkiDroidCompatibilityPolicy.implementedCapabilitiesFor(spec = 2, isReady = true)
+        val rows = AnkiDroidCompatibilityPolicy.apiCapabilitiesForSpec(2)
+            .toCapabilityDetailList(caps)
+            .associateBy { it.name }
+
+        assertEquals(CapabilityMaturity.IMPLEMENTED, rows.getValue("scheduledReview").maturity)
+        assertEquals(CapabilityMaturity.IMPLEMENTED, rows.getValue("nextReviewIntervals").maturity)
+        assertEquals(
+            CapabilityMaturity.API_SUPPORTED_NOT_IMPLEMENTED,
+            rows.getValue("ratingCommit").maturity
+        )
+        // The row must be built from the same flags the backend publishes, not from a hopeful
+        // default: every other row reports unimplemented.
+        assertEquals(
+            CapabilityMaturity.API_SUPPORTED_NOT_IMPLEMENTED,
+            rows.getValue("renderedCards").maturity
+        )
     }
 
     @Test
