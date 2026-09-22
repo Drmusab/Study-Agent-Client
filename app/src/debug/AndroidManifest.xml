@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Debug-only AnkiDroid integration surface (GATE 02 §10).
+
+    AnkiDroid's debug builds are a *different application id* (`com.ichi2.anki.debug`), with their
+    own authority (`com.ichi2.anki.debug.flashcards`) and their own permission
+    (`com.ichi2.anki.debug.permission.READ_WRITE_DATABASE`) — verified in AnkiDroid's
+    `api/build.gradle.kts` `buildTypes { debug { … } }` block.
+
+    This manifest is merged into debug builds only, so the debug endpoint and its permission can
+    never appear in a release build: the release manifest declares the official package and
+    permission above, and release endpoint resolution (`AnkiDroidEndpoints.forBuild`) never
+    includes the debug endpoint. Together with `BuildConfig.DEBUG` that keeps "test against a
+    locally built AnkiDroid" from becoming "release code that knows about debug builds".
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="com.ichi2.anki.debug.permission.READ_WRITE_DATABASE" />
+
+    <queries>
+        <package android:name="com.ichi2.anki.debug" />
+    </queries>
+
+</manifest>

@@ -14,6 +14,42 @@ sealed interface AnkiError {
         override val message: String = "The selected Anki backend is currently unavailable."
     ) : AnkiError
 
+    /**
+     * GATE 02 amendment — the local AnkiDroid *provider* is absent/not
+     * resolvable while the app itself is installed. Distinct from
+     * [BackendUnavailable] (a healthy backend that is momentarily out of
+     * reach) because the remediation differs: the user must re-open/update
+     * AnkiDroid rather than retry a network-ish operation (GATE 02 §9/§21).
+     */
+    data class ProviderUnavailable(
+        val detail: String? = null,
+        override val message: String = "The AnkiDroid integration provider is not available."
+    ) : AnkiError
+
+    /**
+     * GATE 02 amendment — the installed AnkiDroid exposes an API/provider
+     * contract this build does not know how to use. [specVersion] is the
+     * observed provider spec (`null` when it could not be read) and
+     * [minimumSpec] the lowest spec this build supports (GATE 02 §15/§16/§53).
+     */
+    data class UnsupportedApi(
+        val specVersion: Int?,
+        val minimumSpec: Int,
+        override val message: String = "This AnkiDroid installation exposes an unsupported API."
+    ) : AnkiError
+
+    /**
+     * GATE 02 amendment — a read/probe against the backend failed in a way
+     * that is neither permission, nor provider, nor collection state.
+     * [causeCategory] is a small, stable, loggable token (for example
+     * `timeout`, `illegal-state`, `illegal-argument`, `remote`, `unexpected`);
+     * it never contains provider text, paths or content (GATE 02 §36/§68).
+     */
+    data class QueryFailure(
+        val causeCategory: String,
+        override val message: String = "The Anki backend could not answer the request."
+    ) : AnkiError
+
     data class PermissionRequired(
         override val message: String = "Anki access permission has not been granted."
     ) : AnkiError
@@ -92,14 +128,22 @@ fun AnkiError.asCommitFailureClass(): CommitFailureClass = when (this) {
     is AnkiError.DeckNotFound,
     is AnkiError.CardNotFound,
     is AnkiError.CommitConflict,
-    is AnkiError.UnsupportedAction -> CommitFailureClass.REJECTED
+    is AnkiError.UnsupportedAction,
+    // Api-shape mismatch is a deterministic refusal: the gateway refuses before
+    // it issues anything, so the turn is rejected rather than retried blindly.
+    is AnkiError.UnsupportedApi -> CommitFailureClass.REJECTED
 
     // The gateway knows the mutation was never issued (backend/collection was
     // already gone before the call). Determined-before-mutation is the only
     // failure that may be retried without reconciliation.
     is AnkiError.BackendUnavailable,
+    is AnkiError.ProviderUnavailable,
     is AnkiError.CollectionUnavailable,
     is AnkiError.MediaUnavailable -> CommitFailureClass.FAILED_SAFE_TO_RETRY
 
+    // A query/probe failure carries no proof about where it happened. During a
+    // rating commit that means "the scheduler may already have applied it"
+    // (INV-ANKI-08) — reconcile, never silently retry.
+    is AnkiError.QueryFailure,
     is AnkiError.Unknown -> CommitFailureClass.AMBIGUOUS
 }
