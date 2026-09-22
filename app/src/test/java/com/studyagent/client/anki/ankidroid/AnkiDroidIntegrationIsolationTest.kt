@@ -45,8 +45,13 @@ class AnkiDroidIntegrationIsolationTest {
 
     private val outsideLayer: List<File> = mainSources.filterNot { it.isLayerFile() }
 
-    /** Only these two files may touch the platform (INV-ANKI-DET-06). */
-    private val androidFacingFiles = setOf("AndroidAnkiDroidProbe.kt", "AnkiDroidLauncher.kt")
+    /** Only these files may touch the platform (INV-ANKI-DET-06, extended in GATE 04). */
+    private val androidFacingFiles = setOf(
+        "AndroidAnkiDroidProbe.kt",
+        "AnkiDroidLauncher.kt",
+        "AnkiDroidProviderClient.kt",
+        "AnkiDroidMapper.kt"
+    )
 
     // ---------------------------------------------------------------- helpers
 

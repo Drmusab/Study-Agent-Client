@@ -37,7 +37,7 @@ import kotlinx.coroutines.withContext
 class AndroidAnkiDroidProbe(
     context: Context,
     private val dispatchers: DispatcherProvider = DefaultDispatcherProvider()
-) : AnkiDroidProbe {
+) : AnkiDroidProbe, AnkiDroidProviderClient {
 
     private val appContext: Context = context.applicationContext
 
@@ -154,6 +154,87 @@ class AndroidAnkiDroidProbe(
                 )
             }
         }
+
+    @Suppress(\"DEPRECATION\")
+    override suspend fun getPackageVersion(packageName: String): String? = withContext(dispatchers.io) {
+        try {
+            val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(0L)
+                )
+            } else {
+                appContext.packageManager.getPackageInfo(packageName, 0)
+            }
+            info.versionName
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    override suspend fun <T> safeQuery(
+        authority: String,
+        path: String,
+        projection: Array<String>?,
+        selection: String?,
+        selectionArgs: Array<String>?,
+        sortOrder: String?,
+        mapper: (android.database.Cursor) -> T
+    ): ProviderQueryResult<T> = withContext(dispatchers.io) {
+        val uri = Uri.parse(\"content://$authority/$path\")
+        try {
+            val cursor = appContext.contentResolver.query(
+                uri,
+                projection,
+                selection,
+                selectionArgs,
+                sortOrder
+            )
+
+            if (cursor == null) {
+                return@withContext ProviderQueryResult.Failure(
+                    failure = AnkiDroidFailure(
+                        category = AnkiDroidFailureCategory.PROVIDER_ERROR,
+                        evidence = AnkiDroidFailureEvidence.UNCLASSIFIED_PROVIDER_STATE,
+                        evidenceToken = \"null_cursor\"
+                    ),
+                    operation = \"query:$path\"
+                )
+            }
+
+            cursor.use { c ->
+                if (!c.moveToFirst()) {
+                    return@withContext ProviderQueryResult.Empty()
+                }
+                val results = mutableListOf<T>()
+                do {
+                    try {
+                        results.add(mapper(c))
+                    } catch (mappingError: Throwable) {
+                        return@withContext ProviderQueryResult.Failure(
+                            failure = AnkiDroidFailure(
+                                category = AnkiDroidFailureCategory.PROVIDER_ERROR,
+                                evidence = AnkiDroidFailureEvidence.UNCLASSIFIED,
+                                exceptionClass = mappingError::class.java.simpleName,
+                                evidenceToken = \"mapping_failed\"
+                            ),
+                            operation = \"query:$path\"
+                        )
+                    }
+                } while (c.moveToNext())
+
+                if (results.isEmpty()) ProviderQueryResult.Empty()
+                else ProviderQueryResult.Success(results)
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (throwable: Throwable) {
+            val failure = AnkiDroidFailureClassifier.classify(throwable, AnkiDroidOperationStage.COLLECTION_PROBE)
+            ProviderQueryResult.Failure(failure = failure, operation = \"query:$path\")
+        }
+    }
 }
 
 /**
