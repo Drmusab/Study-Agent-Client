@@ -180,7 +180,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             healthProbe = ankiDroidHealthProbe,
             capabilityProbe = ankiDroidCapabilityProbe,
             providerClient = ankiDroidProviderClient,
-            endpoints = ankiDroidEndpoints
+            endpoints = ankiDroidEndpoints,
+            scope = ankiDroidScope
         )
     }
 

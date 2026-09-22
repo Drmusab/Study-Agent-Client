@@ -54,7 +54,10 @@ internal class DefaultAnkiDroidGateway(
     private val providerClient: AnkiDroidProviderClient,
     private val endpoints: List<AnkiDroidEndpoint>,
     private val clock: AppClock = SystemAppClock,
-    private val dispatchers: DispatcherProvider = DefaultDispatcherProvider()
+    private val dispatchers: DispatcherProvider = DefaultDispatcherProvider(),
+    private val scope: kotlinx.coroutines.CoroutineScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + DefaultDispatcherProvider().default
+    )
 ) : AnkiDroidGateway {
 
     private val mutex = Mutex()
@@ -114,7 +117,7 @@ internal class DefaultAnkiDroidGateway(
                     generation += 1
                     newGen = generation
                 }
-                val d = kotlinx.coroutines.CoroutineScope(dispatchers.io).async {
+                val d = scope.async(dispatchers.io) {
                     performRefresh(newGen)
                 }
                 inFlightRefresh = d
