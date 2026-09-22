@@ -18,8 +18,10 @@ Reference implementation for PC_AGENT_INTEGRATION_GUIDE.md
 
 import asyncio
 import json
+import math
 import uuid
 import sys
+import os
 import random
 import argparse
 import base64
@@ -33,8 +35,24 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets"])
     import websockets
 
+from tts.models import (
+    CANONICAL_CHANNELS,
+    CANONICAL_FORMAT,
+    CANONICAL_SAMPLE_RATE,
+    SynthesisRequest,
+    TtsErrorCode,
+    TtsSynthesisError,
+)
+from tts.http_server import TtsMediaHttpServer
+from tts.provider import build_providers
+from tts.stream_manager import StreamManager
+
 PORT = 8765
 HOST = "0.0.0.0"
+
+# How long the control plane waits for eager synthesis before replying (§: a
+# doomed HTTP stream is worse than a typed error).
+SYNTHESIS_WAIT_TIMEOUT_S = 30.0
 
 SAMPLE_DECK = [
     {
@@ -167,6 +185,91 @@ PERSISTENT_AGENT_ID = f"agent-{uuid.uuid4().hex[:8]}"
 SERVER_VERSION = "2.3.0"
 SERVER_NAME = "StudyPC-Agent"
 
+# ---------------------------------------------------------------------------
+# Remote TTS subsystem (control plane + authenticated HTTP media plane).
+#
+# All provider/media logic lives in the tts package; this module only wires it
+# into the agent: the module-level TTS_STATE handle (read/reset by the contract
+# tests), initialize_tts() (boot), and the tts_* WebSocket handlers below.
+# ---------------------------------------------------------------------------
+
+TTS_STATE = {
+    "enabled": False,
+    "providers": {},
+    "streams": None,
+    "media_server": None,
+    "media_port": None,
+    "auth_required": False,
+    "expected_token": None,
+    "stream_ttl_seconds": StreamManager.DEFAULT_TTL_SECONDS,
+}
+
+
+def _reset_tts_state():
+    """Stop the media plane and clear every TTS handle (idempotent)."""
+    if TTS_STATE.get("media_server") is not None:
+        try:
+            TTS_STATE["media_server"].stop()
+        except Exception:
+            pass
+    TTS_STATE.update({
+        "enabled": False,
+        "providers": {},
+        "streams": None,
+        "media_server": None,
+        "media_port": None,
+        "auth_required": False,
+        "expected_token": None,
+        "stream_ttl_seconds": StreamManager.DEFAULT_TTL_SECONDS,
+    })
+
+
+def initialize_tts(args) -> bool:
+    """Boot the TTS subsystem. Returns True when the media plane is serving.
+
+    Expected attributes on [args] (all optional in the CLI):
+        no_tts         -- disable the subsystem entirely
+        mock_tts       -- deterministic mock providers even if keys exist
+        tts_http_port  -- media plane port (0 = ephemeral)
+        tts_fail       -- inject a typed provider failure (mock mode)
+        auth           -- require the Study Agent credential on both planes
+        token          -- the credential when auth is enabled
+    """
+    _reset_tts_state()
+    if getattr(args, "no_tts", False):
+        return False
+
+    providers = build_providers(dict(os.environ), force_mock=bool(getattr(args, "mock_tts", True)))
+    fail_mode = getattr(args, "tts_fail", None)
+    if fail_mode:
+        for p in providers.values():
+            if hasattr(p, "failure"):
+                p.failure = fail_mode
+
+    streams = StreamManager(providers)
+    auth_required = bool(getattr(args, "auth", False))
+    token = getattr(args, "token", None)
+    media = TtsMediaHttpServer(
+        HOST,
+        int(getattr(args, "tts_http_port", 0) or 0),
+        streams,
+        expected_token=token if auth_required else None,
+        require_auth=auth_required,
+    )
+    port = media.start()
+    TTS_STATE.update({
+        "enabled": True,
+        "providers": providers,
+        "streams": streams,
+        "media_server": media,
+        "media_port": port,
+        "auth_required": auth_required,
+        "expected_token": token if auth_required else None,
+    })
+    print(f"[✓] TTS media plane: http://{HOST}:{port} "
+          f"(mock_tts={bool(getattr(args, 'mock_tts', True))}, auth_required={auth_required})")
+    return True
+
 async def handler(websocket, chaos_opts=None, server_opts=None):
     # Try to get token from header for Bearer auth test
     request_headers = {}
@@ -231,6 +334,21 @@ async def handler(websocket, chaos_opts=None, server_opts=None):
             await asyncio.sleep(rnd.uniform(0.05, 0.15))
             print(f"[!] Chaos duplicate: {obj.get('type')}")
             await websocket.send(json_str)
+
+    async def tts_error(msg_id, code, message, retryable=None):
+        """Typed TTS error frame (in_reply_to correlation, stable code)."""
+        frame = {
+            "protocol_version": negotiated_protocol or "2",
+            "type": "error",
+            "message_id": f"ttserr-{uuid.uuid4().hex[:6]}",
+            "in_reply_to": msg_id,
+            "timestamp": iso_now(),
+            "code": code,
+            "message": message,
+        }
+        if retryable is not None:
+            frame["retryable"] = retryable
+        await send_with_chaos(frame)
 
     try:
         async for message in websocket:
@@ -326,9 +444,13 @@ async def handler(websocket, chaos_opts=None, server_opts=None):
                 else:
                     # v2 welcome handshake
                     if capability_mode == "full":
-                        caps = FULL_CAPABILITIES
+                        caps = list(FULL_CAPABILITIES)
                     else:
-                        caps = PARTIAL_CAPABILITIES
+                        caps = list(PARTIAL_CAPABILITIES)
+                    if TTS_STATE["enabled"]:
+                        # Remote TTS capability surface (master prompt §121/§122/§123).
+                        caps.extend(["tts", "tts:streaming", "tts:voice_catalog"])
+                        caps.extend(f"tts:{pid}" for pid in TTS_STATE["providers"])
 
                     welcome = {
                         "protocol_version": "2",
@@ -674,6 +796,170 @@ async def handler(websocket, chaos_opts=None, server_opts=None):
                     ]
                 })
 
+            elif msg_type in ("tts_capabilities_request", "tts_voices_request",
+                              "tts_synthesize", "tts_cancel", "tts_test_provider"):
+                # -----------------------------------------------------------------
+                # Remote TTS control plane (see server/tts/ and docs/PROTOCOL.md).
+                # Failures are typed (TtsErrorCode) and correlated with in_reply_to;
+                # provider keys never leave this machine.
+                # -----------------------------------------------------------------
+                if not TTS_STATE["enabled"]:
+                    await tts_error(msg_id, TtsErrorCode.PROVIDER_UNAVAILABLE,
+                                    "TTS subsystem is disabled on this agent.")
+                    continue
+                if auth_required and not authenticated:
+                    await tts_error(msg_id, "AUTH_REQUIRED", "Authentication required")
+                    continue
+
+                if msg_type == "tts_capabilities_request":
+                    await send_with_chaos({
+                        "protocol_version": negotiated_protocol or "2",
+                        "type": "tts_capabilities",
+                        "message_id": f"ttsc-{uuid.uuid4().hex[:6]}",
+                        "in_reply_to": msg_id,
+                        "timestamp": iso_now(),
+                        "providers": [p.capabilities().to_wire()
+                                      for p in TTS_STATE["providers"].values()],
+                        "media": {
+                            "format": CANONICAL_FORMAT,
+                            "sample_rate": CANONICAL_SAMPLE_RATE,
+                            "channels": CANONICAL_CHANNELS,
+                            "auth": "bearer",
+                            "auth_required": TTS_STATE["auth_required"],
+                            "port": TTS_STATE["media_port"],
+                        },
+                    })
+
+                elif msg_type == "tts_voices_request":
+                    provider_id = data.get("provider")
+                    provider = TTS_STATE["providers"].get(provider_id)
+                    if provider is None:
+                        await tts_error(msg_id, TtsErrorCode.INVALID_REQUEST,
+                                        f"Unknown TTS provider '{provider_id}'.")
+                        continue
+                    try:
+                        voices = provider.list_voices(refresh=bool(data.get("refresh", False)))
+                    except TtsSynthesisError as e:
+                        await tts_error(msg_id, e.code, e.message, retryable=e.retryable)
+                        continue
+                    await send_with_chaos({
+                        "protocol_version": negotiated_protocol or "2",
+                        "type": "tts_voices",
+                        "message_id": f"ttsv-{uuid.uuid4().hex[:6]}",
+                        "in_reply_to": msg_id,
+                        "timestamp": iso_now(),
+                        "provider": provider_id,
+                        "voices": [
+                            {
+                                "id": v.voice_id,
+                                "display_name": v.display_name,
+                                "languages": v.languages,
+                                "locale": v.locale,
+                                "category": v.category,
+                                "description": v.description,
+                                "custom": v.custom,
+                                "preview_available": v.preview_available,
+                            }
+                            for v in voices
+                        ],
+                    })
+
+                elif msg_type == "tts_synthesize":
+                    request = SynthesisRequest.from_wire(data)
+                    streams = TTS_STATE["streams"]
+                    if request.provider not in TTS_STATE["providers"]:
+                        await tts_error(msg_id, TtsErrorCode.INVALID_REQUEST,
+                                        f"Unknown TTS provider '{request.provider}'.")
+                        continue
+                    if not request.text or not request.text.strip():
+                        await tts_error(msg_id, TtsErrorCode.INVALID_REQUEST,
+                                        "Synthesis requires non-empty text.")
+                        continue
+                    ttl = float(TTS_STATE.get("stream_ttl_seconds")
+                                or StreamManager.DEFAULT_TTL_SECONDS)
+                    try:
+                        record = streams.create_stream(request, ttl_seconds=ttl)
+                    except TtsSynthesisError as e:
+                        await tts_error(msg_id, e.code, e.message, retryable=e.retryable)
+                        continue
+                    streams.wait_ready(record, timeout=SYNTHESIS_WAIT_TIMEOUT_S)
+                    if record.synthesis_error:
+                        await tts_error(msg_id, record.synthesis_error,
+                                        record.synthesis_message or "Synthesis failed.",
+                                        retryable=record.synthesis_retryable)
+                        continue
+                    if record.cancelled.is_set():
+                        await tts_error(msg_id, TtsErrorCode.STREAM_FAILED,
+                                        "Stream was cancelled.")
+                        continue
+                    await send_with_chaos({
+                        "protocol_version": negotiated_protocol or "2",
+                        "type": "tts_stream",
+                        "message_id": f"ttsm-{uuid.uuid4().hex[:6]}",
+                        "in_reply_to": msg_id,
+                        "timestamp": iso_now(),
+                        "stream_id": record.stream_id,
+                        "stream_path": f"/v1/tts/stream/{record.stream_id}",
+                        "speech_request_id": record.speech_request_id,
+                        "format": record.format,
+                        "sample_rate": record.sample_rate,
+                        "channels": record.channels,
+                        "expires_in_seconds": max(1, int(math.ceil(ttl))),
+                        "estimated_duration_ms": record.estimated_duration_ms,
+                        "cache_hit": record.cache_hit,
+                    })
+
+                elif msg_type == "tts_cancel":
+                    streams = TTS_STATE["streams"]
+                    stream_id = data.get("stream_id")
+                    speech_request_id = data.get("speech_request_id")
+                    if stream_id:
+                        cancelled = 1 if streams.cancel(stream_id) else 0
+                    elif speech_request_id:
+                        cancelled = streams.cancel_for_request(speech_request_id)
+                    else:
+                        await tts_error(msg_id, TtsErrorCode.INVALID_REQUEST,
+                                        "tts_cancel requires stream_id or speech_request_id.")
+                        continue
+                    await send_with_chaos({
+                        "protocol_version": negotiated_protocol or "2",
+                        "type": "tts_cancelled",
+                        "message_id": f"ttsx-{uuid.uuid4().hex[:6]}",
+                        "in_reply_to": msg_id,
+                        "timestamp": iso_now(),
+                        "cancelled": cancelled,
+                    })
+
+                elif msg_type == "tts_test_provider":
+                    provider_id = data.get("provider")
+                    provider = TTS_STATE["providers"].get(provider_id)
+                    if provider is None:
+                        await tts_error(msg_id, TtsErrorCode.INVALID_REQUEST,
+                                        f"Unknown TTS provider '{provider_id}'.")
+                        continue
+                    probe = provider.probe()
+                    try:
+                        provider.list_voices()
+                        voice_list = True
+                    except TtsSynthesisError:
+                        voice_list = False
+                    await send_with_chaos({
+                        "protocol_version": negotiated_protocol or "2",
+                        "type": "tts_provider_test",
+                        "message_id": f"ttsd-{uuid.uuid4().hex[:6]}",
+                        "in_reply_to": msg_id,
+                        "timestamp": iso_now(),
+                        "provider": provider_id,
+                        "checks": {
+                            "configured": bool(probe.get("configured")),
+                            "authentication": probe.get("authentication"),
+                            "reachable": bool(probe.get("reachable")),
+                            "voice_list": voice_list,
+                        },
+                        "latency_ms": probe.get("latency_ms"),
+                        "detail": probe.get("detail"),
+                    })
+
             elif msg_type in ("pause_session", "resume_session", "end_session", "repeat_question", "request_hint", "request_explanation", "request_answer", "skip_card", "request_session_status"):
                 # Simplified handling for other types
                 if current_session and msg_type != "request_session_status":
@@ -732,6 +1018,13 @@ async def main():
     parser.add_argument("--token", type=str, default="test-token-123", help="Valid token when --auth enabled")
     parser.add_argument("--reject-auth", action="store_true", help="Reject invalid auth immediately")
     parser.add_argument("--wrong-service", action="store_true", help="Simulate wrong WebSocket service (no handshake)")
+    parser.add_argument("--no-tts", action="store_true", help="Disable the remote TTS subsystem")
+    parser.add_argument("--mock-tts", action=argparse.BooleanOptionalAction, default=True,
+                        help="Use deterministic mock TTS providers (default: on, even if keys exist)")
+    parser.add_argument("--tts-http-port", type=int, default=0,
+                        help="TTS media plane HTTP port (0 = ephemeral)")
+    parser.add_argument("--tts-fail", choices=["rate_limit", "quota", "auth", "synthesis"],
+                        default=None, help="Inject a typed provider failure (mock mode only)")
     args = parser.parse_args()
 
     chaos_opts = {"enable": args.chaos, "seed": args.seed, "dup_prob": 0.15, "delay_prob": 0.15, "drop_prob": 0.05, "max_delay": 0.4}
@@ -744,6 +1037,8 @@ async def main():
         "wrong_service": args.wrong_service
     }
 
+    initialize_tts(args)
+
     print("==================================================")
     print("   STUDY AGENT - MOCK PC AGENT SERVER (Enhanced v2)")
     print(f"   Listening on ws://0.0.0.0:{args.port}")
@@ -751,6 +1046,9 @@ async def main():
     print(f"   Agent ID: {PERSISTENT_AGENT_ID} | Version: {SERVER_VERSION}")
     print(f"   Protocol: Server chooses selected_protocol via welcome")
     print(f"   Features: welcome handshake, Bearer auth, in_reply_to, idempotency, review_turn_id, session_revision, recovery")
+    if TTS_STATE["enabled"]:
+        print(f"   TTS: control plane via WebSocket | media plane http://{HOST}:{TTS_STATE['media_port']} "
+              f"(canonical {CANONICAL_FORMAT} {CANONICAL_SAMPLE_RATE} Hz mono)")
     print("==================================================")
 
     async with websockets.serve(lambda ws: handler(ws, chaos_opts, server_opts), HOST, args.port):
