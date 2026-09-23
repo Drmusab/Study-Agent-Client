@@ -147,10 +147,14 @@ class AnkiDomainModelTest {
     }
 
     @Test fun `a turn without content is not representable`() {
-        val rendered = AnkiReviewTurnContent.Rendered(card())
+        val fixtureCard = card()
+        val rendered = AnkiReviewTurnContent.Rendered(fixtureCard, scheduledOf(fixtureCard))
         val turn = AnkiReviewTurn(ReviewTurnId("t1"), "s", rendered)
         assertEquals(card().ref, turn.cardRef)
         assertEquals(rendered.card, turn.renderedCard)
+        // GATE 07 — hydration must not erase the scheduled scheduler metadata (INV-ANKI-CARD-23).
+        assertEquals(rendered.scheduledCard, turn.scheduledCard)
+        assertEquals(rendered.scheduledCard.ratingOptions, turn.ratingOptions)
 
         // A scheduled turn has identity but explicitly no rendered card — never an empty one.
         val scheduled = AnkiScheduledCard(
@@ -169,7 +173,10 @@ class AnkiDomainModelTest {
         invalid { BeginReviewRequest(context(), 0) }
         invalid { BeginReviewRequest(context(), -1) }
         invalid { AnkiReviewSession(context(), " ") }
-        val turn = AnkiReviewTurn(ReviewTurnId("t"), "s", AnkiReviewTurnContent.Rendered(card()))
+        val turn = AnkiReviewTurn(
+            ReviewTurnId("t"), "s",
+            AnkiReviewTurnContent.Rendered(card(), scheduledOf(card()))
+        )
         invalid { turn.copy(studySessionId = " ") }
         invalid { turn.copy(position = 0) }
         invalid { turn.copy(remaining = -1) }

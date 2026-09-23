@@ -23,6 +23,23 @@ internal fun context(id: AnkiBackendId = fakeId, sessionId: String = "study-1") 
 internal suspend fun FakeAnkiBackend.begin(context: AnkiSessionContext = context(id)): AnkiReviewSession =
     (beginReview(BeginReviewRequest(context)) as AnkiResult.Success).value
 
+/**
+ * GATE 07 — the scheduler-side view of a fixture card: identity + rating options + the fixture's
+ * own scheduling labels/media, with content deliberately absent (the scheduled phase has none).
+ */
+internal fun scheduledOf(
+    card: AnkiRenderedCard,
+    ratingOptions: AnkiRatingOptions = AnkiRatingOptions.Known(FakeAnkiBackend.SCHEDULER_BUTTON_ORDER),
+    media: List<AnkiMediaRef> = card.media
+): AnkiScheduledCard = AnkiScheduledCard(
+    ref = card.ref,
+    noteRef = card.noteRef,
+    deckRef = requireNotNull(card.deckRef) { "fixtures must carry a deck ref" },
+    ratingOptions = ratingOptions,
+    scheduling = card.scheduling,
+    media = media
+)
+
 class FakeAnkiBackendContractTest : AnkiBackendContract() {
     override fun fixture(): Fixture {
         val cards = listOf(card("A"), card("B"), card("A"))

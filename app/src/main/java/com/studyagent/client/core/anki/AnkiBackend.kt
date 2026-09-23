@@ -59,6 +59,28 @@ interface AnkiBackend {
     suspend fun nextCard(session: AnkiReviewSession): NextCardResult
 
     /**
+     * GATE 07 — read-only hydration of one *known* card identity into backend-neutral normalized
+     * content (STEP 09/§10/§43).
+     *
+     * The input is a domain reference — never a `Cursor`, `Uri`, selection string or
+     * `ContentResolver` (INV-ANKI-CARD-11/§10). The output is an [AnkiRenderedCard] carrying the
+     * three separated content channels (visual / speech / evaluation — INV-ANKI-CARD-05) plus
+     * lenient optional metadata, or a typed failure: [AnkiError.CardNotFound] (deleted between
+     * scheduling and hydration — never a blank card, §44), [AnkiError.StaleCardReference] (the
+     * answer is not the scheduled card — §47/§54), [AnkiError.MalformedResponse] (identity or
+     * content cannot be trusted — §74/INV-ANKI-CARD-15), and the ordinary availability family
+     * ([AnkiError.PermissionRequired], [AnkiError.BackendUnavailable],
+     * [AnkiError.CollectionUnavailable], … — §48/§49).
+     *
+     * Read-only and idempotent (INV-ANKI-CARD-10/§25): it performs no rating, no edit and no
+     * scheduler mutation, and repeating it returns equivalent *current* content (§45/§50) — the
+     * latest authoritative state if the card was edited in AnkiDroid in between. It never
+     * attaches content to a turn; `AnkiCardHydration.attach` owns the identity-verified
+     * association (STEP 52/§53).
+     */
+    suspend fun hydrateCardContent(card: AnkiCardRef): AnkiResult<AnkiRenderedCard>
+
+    /**
      * Same commit ID and payload must not mutate twice; different payload is a conflict.
      * Ambiguous writes block progression and blind resubmission until reconciled.
      * This interface supplies correlation, NOT a claim of distributed exactly-once delivery.
@@ -83,19 +105,30 @@ data class AnkiReviewSession(val context: AnkiSessionContext, val backendSession
  * content ([Rendered]). Modelling the two phases instead of filling an [AnkiRenderedCard] with
  * placeholder question/answer strings is what keeps "this card's answer is genuinely empty"
  * distinguishable from "this card has not been loaded yet" (§28).
+ *
+ * GATE 07 keeps the [AnkiScheduledCard] inside **both** phases (STEP 55/§57/INV-ANKI-CARD-23):
+ * hydration must never erase the scheduler's rating options, button count or next-review labels,
+ * so [Rendered] carries the rendered content *and* the scheduling context it was scheduled with.
+ * The two surfaces stay separate objects with disjoint authoritative fields (see
+ * [AnkiSchedulingInfo]) rather than being flattened into one ambiguous blob.
  */
 sealed interface AnkiReviewTurnContent {
-    val ref: AnkiCardRef
+    /** Identity + scheduler metadata, exactly as GATE 06 received them. Survives hydration. */
+    val scheduledCard: AnkiScheduledCard
+    val ref: AnkiCardRef get() = scheduledCard.ref
+
+    /** Presentation media: scheduled references until hydration, merged references after. */
     val media: List<AnkiMediaRef>
 
     /** Scheduler identity and metadata only; GATE 07 replaces this with [Rendered] on hydration. */
-    data class Scheduled(val card: AnkiScheduledCard) : AnkiReviewTurnContent {
-        override val ref: AnkiCardRef get() = card.ref
-        override val media: List<AnkiMediaRef> get() = card.media
+    data class Scheduled(override val scheduledCard: AnkiScheduledCard) : AnkiReviewTurnContent {
+        override val media: List<AnkiMediaRef> get() = scheduledCard.media
     }
 
-    data class Rendered(val card: AnkiRenderedCard) : AnkiReviewTurnContent {
-        override val ref: AnkiCardRef get() = card.ref
+    data class Rendered(
+        val card: AnkiRenderedCard,
+        override val scheduledCard: AnkiScheduledCard
+    ) : AnkiReviewTurnContent {
         override val media: List<AnkiMediaRef> get() = card.media
     }
 }
@@ -107,6 +140,11 @@ sealed interface AnkiReviewTurnContent {
  * distinct [turnId]s (INV-ANKI-REV-04/05). AnkiDroid owns card identity; Study-Agent owns turn
  * identity, and a turn id is created only once a scheduled card has actually been accepted as
  * current — a failed provider read never leaves an orphaned turn behind (§58/§59).
+ *
+ * Hydration never changes [turnId] (INV-ANKI-CARD-22): loading content is not a new
+ * presentation. `AnkiCardHydration.attach` performs the identity-verified attach and is the
+ * only supported way to move from [AnkiReviewTurnContent.Scheduled] to
+ * [AnkiReviewTurnContent.Rendered] (INV-ANKI-CARD-02).
  */
 data class AnkiReviewTurn(
     val turnId: ReviewTurnId,
@@ -121,8 +159,12 @@ data class AnkiReviewTurn(
         require(remaining == null || remaining >= 0)
     }
     val cardRef: AnkiCardRef get() = content.ref
+    /** The scheduled identity + scheduler metadata. Always present, even after hydration. */
+    val scheduledCard: AnkiScheduledCard get() = content.scheduledCard
     /** Non-null only after GATE 07 hydration; never a placeholder. */
     val renderedCard: AnkiRenderedCard? get() = (content as? AnkiReviewTurnContent.Rendered)?.card
+    /** Scheduler rating options survive hydration (INV-ANKI-CARD-23). */
+    val ratingOptions: AnkiRatingOptions get() = content.scheduledCard.ratingOptions
     val backendId: AnkiBackendId get() = cardRef.backendId
     val commitId: ReviewCommitId get() = ReviewCommitId(backendId, studySessionId, turnId)
 }

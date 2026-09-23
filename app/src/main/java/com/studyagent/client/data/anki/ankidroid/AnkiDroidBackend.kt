@@ -47,19 +47,23 @@ import java.util.UUID
  * GATE 05 implements [getDecks] / [getSelectedDeck] through [AnkiDroidDeckGateway].
  * GATE 06 implements [beginReview] / [nextCard] through [AnkiDroidReviewGateway], and owns the
  * one piece of runtime state that cannot live in the gateway: **the active review turn of the
- * active session** (§60/§61). [commitRating] still refuses truthfully (§146) — rating mutation is
- * GATE 11 and nothing here may pretend otherwise.
+ * active session** (§60/§61). GATE 07 implements [hydrateCardContent] through
+ * [AnkiDroidCardGateway] — read-only, identity-verified, turn-agnostic (STEP 52). [commitRating]
+ * still refuses truthfully (§146) — rating mutation is GATE 11 and nothing here may pretend
+ * otherwise.
  *
  * Architecture:
  * AnkiDroidGateway (health) + AnkiDroidDeckGateway (decks) + AnkiDroidReviewGateway (scheduler)
+ *   + AnkiDroidCardGateway (card content)
  *   ↓
  * AnkiDroidBackend  (session ownership, one active turn per session)
  *   ↓
  * AnkiBackend (domain)
  *
  * No Cursor, ContentResolver, Uri or provider JSON escapes (§4/§10).
- * Deck and review operations are read-only (INV-ANKI-DECK-12, INV-ANKI-REV-07/15): the scheduler
- * selects the card, Study-Agent only reports what it selected.
+ * Deck, review and card-content operations are read-only (INV-ANKI-DECK-12, INV-ANKI-REV-07/15,
+ * INV-ANKI-CARD-10): the scheduler selects the card, Study-Agent only reports what it selected
+ * and what it contains.
  */
 class AnkiDroidBackend(
     private val gateway: AnkiDroidGateway,
@@ -68,6 +72,7 @@ class AnkiDroidBackend(
     private val dispatchers: DispatcherProvider = DefaultDispatcherProvider(),
     private val deckGateway: AnkiDroidDeckGateway,
     private val reviewGateway: AnkiDroidReviewGateway,
+    private val cardGateway: AnkiDroidCardGateway,
     private val turnIds: ReviewTurnIdSource = SequentialReviewTurnIdSource()
 ) : AnkiBackend {
 
@@ -117,6 +122,28 @@ class AnkiDroidBackend(
     private var reviewGeneration: Long = 0L
     private var reviewRecords: MutableMap<String, ReviewSessionRecord> = mutableMapOf()
     private var lastReviewDiagnostics: AnkiReviewDiagnostics = AnkiReviewDiagnostics.NONE
+
+    /**
+     * GATE 07 — the turn-scoped rendered-card memo (STEP 80-§84).
+     *
+     * One slot, keyed by the card ref's stable key. Its only job is that two consumers asking
+     * for the *same active card* share one provider read instead of stampeding it (STEP 80,
+     * test S). It is a presentation cache, never collection truth (INV-ANKI-CARD-26): it is
+     * dropped the moment a new turn is presented or a session ends (STEP 83), so a card edited
+     * in AnkiDroid is re-read as authoritative content for any future turn
+     * (INV-ANKI-CARD-27/§84). Nothing here is persisted; process death recovers by rehydrating
+     * from a logical ref (STEP 85).
+     */
+    private var hydrationMemo: Pair<String, AnkiRenderedCard>? = null
+
+    /**
+     * Serializes hydration so concurrent consumers of the same card share one provider read
+     * (STEP 80's single-flight rule: "duplicate or concurrent consumers must not cause repeated
+     * full provider card reads"). The memo is re-checked after acquiring the lock, so the second
+     * waiter observes the first one's answer instead of re-querying. Hydration is rare and
+     * turn-scoped — one active card at a time — so one lock is the right shape here.
+     */
+    private val hydrationMutex = Mutex()
 
     init {
         AppLogger.i("AnkiDroidBackend", "AnkiDroidBackend created id=${id.stableId}")
@@ -202,6 +229,52 @@ class AnkiDroidBackend(
     }
 
     private fun currentAuthority(): String? = _integrationState.value.metadata?.authority
+
+    /**
+     * GATE 07 — read-only card-content hydration (STEP 09-§13/§43-§50).
+     *
+     * The gateway owns the provider conversation and the identity verification (STEP 54); this
+     * method owns only the session-side guards and the turn-scoped memo (STEP 80-§84). It never
+     * mutates Anki, never touches the scheduler and never installs the result into a turn
+     * (STEP 51/§52) — `AnkiCardHydration.attach` does the identity-verified association, and
+     * GATE 10 decides whether the turn is still current (INV-ANKI-CARD-30).
+     */
+    override suspend fun hydrateCardContent(card: AnkiCardRef): AnkiResult<AnkiRenderedCard> {
+        try {
+            // Backend loss / permission loss / closed collection surface as the typed family —
+            // never a silent fallback to another backend (STEP 48/§49).
+            usabilityError()?.let { return AnkiResult.Failure(it) }
+            if (!_integrationState.value.capabilities.renderedCards) {
+                return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "renderedCards"))
+            }
+            if (card.backendId != id) {
+                return AnkiResult.Failure(AnkiError.InvalidRequest(detail = "card_ref_foreign_backend"))
+            }
+            return hydrationMutex.withLock {
+                hydrationMemo?.let { (key, cached) ->
+                    if (key == card.stableKey) return@withLock AnkiResult.Success(cached)
+                }
+                val authority = currentAuthority()
+                    ?: return@withLock AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+                when (val result = cardGateway.queryCard(authority, card)) {
+                    is AnkiResult.Failure -> result
+                    is AnkiResult.Success -> {
+                        hydrationMemo = card.stableKey to result.value
+                        result
+                    }
+                }
+            }
+        } catch (cancellation: CancellationException) {
+            // Cancellation is never translated into an ordinary card failure (INV-ANKI-CARD-29).
+            throw cancellation
+        } catch (throwable: Throwable) {
+            AppLogger.w(TAG, "ANKI_CARD_HYDRATION_FAILED error=${throwable::class.java.simpleName}")
+            return AnkiResult.Failure(AnkiError.Unknown(cause = throwable::class.java.simpleName))
+        }
+    }
+
+    /** Content-free card-hydration facts for settings/diagnostics (STEP 87). Never card text. */
+    fun cardGatewayDiagnostics(): AnkiDroidCardQueryDiagnostics = cardGateway.lastQueryDiagnostics()
 
     /**
      * Opens a scheduled-review session bound to exactly one backend, one collection and one deck
@@ -390,6 +463,9 @@ class AnkiDroidBackend(
         )
         record.activeTurn = turn
         record.presentedCount += 1
+        // STEP 83 — a new presentation resolves the old turn: its memoized content must not
+        // survive into the next one (INV-ANKI-CARD-26/§84).
+        hydrationMemo = null
         recordDiagnostics(status = "CARD_AVAILABLE", deckRef = record.deckRef, session = record.session, turn = turn)
         return NextCardResult.Card(turn)
     }
@@ -425,6 +501,7 @@ class AnkiDroidBackend(
     suspend fun endReview(session: AnkiReviewSession): Boolean = reviewMutex.withLock {
         val removed = reviewRecords.remove(session.backendSessionRef) != null
         if (removed) {
+            hydrationMemo = null // STEP 83 — session end invalidates the turn-scoped cache.
             AppLogger.i(TAG, "ANKI_REVIEW_SESSION_ENDED ref=${session.backendSessionRef}")
         }
         removed
@@ -475,8 +552,7 @@ class AnkiDroidBackend(
     private fun usabilityError(): AnkiError? =
         _integrationState.value.availability.unavailabilityError()
 
-    private fun buttonCountOf(turn: AnkiReviewTurn): Int? =
-        (turn.content as? AnkiReviewTurnContent.Scheduled)?.card?.let { buttonCountOf(it) }
+    private fun buttonCountOf(turn: AnkiReviewTurn): Int? = buttonCountOf(turn.scheduledCard)
 
     private fun buttonCountOf(card: AnkiScheduledCard): Int = when (val options = card.ratingOptions) {
         is AnkiRatingOptions.Known -> options.buttonCount

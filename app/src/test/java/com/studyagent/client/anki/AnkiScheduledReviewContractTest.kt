@@ -22,6 +22,7 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidMetadata
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidProviderSpecSource
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidScheduledCardQuery
 import com.studyagent.client.data.anki.ankidroid.CapabilitySupport
+import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidDeckGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidReviewGateway
@@ -132,8 +133,8 @@ abstract class AnkiScheduledReviewContract {
         assertEquals(f.backend.id, first.commitId.backendId)
         // The card's deck is the session's deck, whichever representation the backend used (§10).
         val turnDeck = when (val content = first.content) {
-            is AnkiReviewTurnContent.Scheduled -> content.card.deckRef
-            is AnkiReviewTurnContent.Rendered -> content.card.deckRef
+            is AnkiReviewTurnContent.Scheduled -> content.scheduledCard.deckRef
+            is AnkiReviewTurnContent.Rendered -> content.scheduledCard.deckRef
         }
         assertEquals(f.deck.ref, turnDeck)
     }
@@ -234,7 +235,7 @@ abstract class AnkiScheduledReviewContract {
                 simpleCardText = CapabilitySupport.SUPPORTED,
                 nextReviewIntervals = CapabilitySupport.SUPPORTED,
                 ratingCommit = CapabilitySupport.SUPPORTED,
-                flags = CapabilitySupport.SUPPORTED,
+                flags = CapabilitySupport.UNSUPPORTED,
                 bury = CapabilitySupport.SUPPORTED,
                 suspend = CapabilitySupport.SUPPORTED,
                 noteRead = CapabilitySupport.SUPPORTED,
@@ -281,6 +282,7 @@ abstract class AnkiScheduledReviewContract {
             clock = TestClock(),
             deckGateway = deckGateway,
             reviewGateway = reviewGateway,
+            cardGateway = FakeAnkiDroidCardGateway(),
             turnIds = SequentialReviewTurnIdSource(instancePrefix = "contract")
         )
         return Fixture(backend, contextOf(backend.id, deckRef), deck, scheduled)

@@ -105,7 +105,7 @@ class AnkiDroidReviewInstrumentedTest {
         when (first) {
             is NextCardResult.Card -> {
                 val turn = first.turn
-                val card = (turn.content as AnkiReviewTurnContent.Scheduled).card
+                val card = (turn.content as AnkiReviewTurnContent.Scheduled).scheduledCard
                 assertTrue("the card must carry a note identity", !card.ref.noteId.isNullOrBlank())
                 assertNotNull("the card must carry an ordinal", card.ref.cardOrd)
                 assertTrue("the deck binding must survive", card.deckRef.backendId == AnkiBackendId.AnkiDroidLocal)

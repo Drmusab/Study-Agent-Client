@@ -50,6 +50,9 @@ object AnkiDroidErrorMapper {
         AnkiDroidFailureCategory.CONTRACT_MISMATCH ->
             AnkiError.UnsupportedAction(action = "provider_contract_mismatch")
 
+        AnkiDroidFailureCategory.ENTITY_NOT_FOUND ->
+            AnkiError.CardNotFound()
+
         AnkiDroidFailureCategory.ENDPOINT_UNAVAILABLE ->
             AnkiError.ProviderUnavailable(detail = failure.evidenceToken)
 

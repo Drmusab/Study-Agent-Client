@@ -1,6 +1,7 @@
 package com.studyagent.client.anki.fake
 
 import com.studyagent.client.core.anki.*
+import com.studyagent.client.core.models.Rating
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,7 +54,7 @@ class FakeAnkiBackend(
     private val cardData = cards.map { card ->
         card.copy(media = card.media.toList(), metadata = card.metadata.copy(tags = card.metadata.tags.toSet()),
             scheduling = card.scheduling?.let { it.copy(nextReviewTimes = it.nextReviewTimes.toMap()) })
-    }
+    }.toMutableList()
     private val nextFailures = ArrayDeque(nextErrors)
     private val commits = ArrayDeque(commitSteps)
     private val ledger = linkedMapOf<ReviewCommitId, RecordedCommit>()
@@ -68,6 +69,18 @@ class FakeAnkiBackend(
     private var queue: List<AnkiRenderedCard> = emptyList()
     private var cursor = 0
     private var active: AnkiReviewTurn? = null
+
+    // ---------------------------------------------------------------- GATE 07 card hydration
+
+    /** Read-only card lookups answered since construction (STEP 40/W — bounded call assertions). */
+    var hydrateCalls: Int = 0
+        private set
+
+    /** Scripted hydration failure for every lookup (STEP 43 typed outcomes). */
+    var hydrateError: AnkiError? = null
+
+    /** Turn-scoped single-slot memo, mirroring the real backend (STEP 80-§84). */
+    private var hydrationMemo: Pair<String, AnkiRenderedCard>? = null
 
     init {
         require(latencyMs >= 0 && maxLedgerEntries > 0 && instanceId.isNotBlank())
@@ -101,6 +114,7 @@ class FakeAnkiBackend(
         queue = emptyList()
         cursor = 0
         active = null
+        hydrationMemo = null
     }
 
     override suspend fun refreshAvailability() { delay(latencyMs) }
@@ -195,11 +209,80 @@ class FakeAnkiBackend(
             cursor += 1
             val turn = AnkiReviewTurn(
                 ReviewTurnId("$instanceId:turn:${++serial}"), session.context.studySessionId,
-                AnkiReviewTurnContent.Rendered(card), position = cursor, remaining = queue.size - cursor
+                // GATE 07 — the scheduler answers with identity + metadata only; content arrives
+                // through hydrateCardContent (STEP 92's scheduled → hydrate flow).
+                AnkiReviewTurnContent.Scheduled(scheduledOf(card)),
+                position = cursor, remaining = queue.size - cursor
             )
             active = turn
+            hydrationMemo = null // a new presentation resolves the old turn's cache (STEP 83)
             NextCardResult.Card(turn)
         }
+    }
+
+    /**
+     * GATE 07 — the scheduler side of a fixture card: identity + rating options + the fixture's
+     * scheduling labels and media references. Content is NOT copied here (STEP 92 keeps the two
+     * phases apart: `nextCard` answers scheduled, `hydrateCardContent` answers rendered).
+     */
+    private fun scheduledOf(card: AnkiRenderedCard): AnkiScheduledCard = AnkiScheduledCard(
+        ref = card.ref,
+        noteRef = card.noteRef,
+        deckRef = requireNotNull(card.deckRef) { "fake fixtures must carry a deck ref" },
+        ratingOptions = AnkiRatingOptions.Known(SCHEDULER_BUTTON_ORDER),
+        scheduling = card.scheduling,
+        media = card.media,
+        degradations = emptyList()
+    )
+
+    /**
+     * GATE 07 — read-only hydration against the fixture "collection" (STEP 92). The stored
+     * fixture is the *current* authoritative content, so replacing it between scheduling and
+     * hydration reproduces STEP 45 (edited card → latest content) and removing it reproduces
+     * STEP 44 (deleted card → [AnkiError.CardNotFound], never a blank card).
+     */
+    override suspend fun hydrateCardContent(card: AnkiCardRef): AnkiResult<AnkiRenderedCard> {
+        delay(latencyMs)
+        return mutex.withLock {
+            usabilityError()?.let { return@withLock AnkiResult.Failure(it) }
+            if (!capabilities.value.renderedCards) return@withLock AnkiResult.Failure(unsupported("renderedCards"))
+            if (card.backendId != id) {
+                return@withLock AnkiResult.Failure(AnkiError.InvalidRequest(detail = "card_ref_foreign_backend"))
+            }
+            hydrateError?.let { return@withLock AnkiResult.Failure(it) }
+            // Single-flight: the lock plus this re-check collapse concurrent consumers into one
+            // lookup, mirroring the real backend's hydration mutex (STEP 80).
+            hydrationMemo?.let { (key, cached) ->
+                if (key == card.stableKey) return@withLock AnkiResult.Success(cached)
+            }
+            hydrateCalls += 1
+            // Identity-confirmed lookup: enrichment is fine, unconfirmed claims are not (STEP 54).
+            val found = cardData.firstOrNull { AnkiCardHydration.identityMatches(card, it.ref) }
+                ?: return@withLock AnkiResult.Failure(AnkiError.CardNotFound(card = card))
+            hydrationMemo = card.stableKey to found
+            AnkiResult.Success(found)
+        }
+    }
+
+    /**
+     * Test-only fixture mutation (STEP 45): replaces the stored content of the card whose ref
+     * matches [updated], modelling an edit made in AnkiDroid. Read-only towards Anki itself —
+     * this mutates the stand-in's own data, never a backend.
+     */
+    suspend fun replaceCard(updated: AnkiRenderedCard): Boolean = mutex.withLock {
+        require(updated.ref.backendId == id)
+        val index = cardData.indexOfFirst { AnkiCardHydration.identityMatches(updated.ref, it.ref) }
+        if (index < 0) return@withLock false
+        cardData[index] = updated
+        hydrationMemo = null
+        true
+    }
+
+    /** Test-only fixture mutation (STEP 44): the card is gone; hydration must fail typed. */
+    suspend fun deleteCard(card: AnkiCardRef): Boolean = mutex.withLock {
+        val removed = cardData.removeAll { AnkiCardHydration.identityMatches(card, it.ref) }
+        if (removed) hydrationMemo = null
+        removed
     }
 
     override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
@@ -243,6 +326,10 @@ class FakeAnkiBackend(
     companion object {
         val REVIEW_CAPABILITIES = AnkiCapabilities(review = true, scheduledReview = true, deckListing = true,
             renderedCards = true, reviewIntervals = true)
+
+        /** The stand-in scheduler offers the four buttons the pinned AnkiDroid provider hard-codes. */
+        val SCHEDULER_BUTTON_ORDER: List<Rating> =
+            listOf(Rating.AGAIN, Rating.HARD, Rating.GOOD, Rating.EASY)
 
         private fun coherent(state: AnkiAvailability, capabilities: AnkiCapabilities): AnkiAvailability =
             if (state is AnkiAvailability.Ready) AnkiAvailability.Ready(capabilities) else state

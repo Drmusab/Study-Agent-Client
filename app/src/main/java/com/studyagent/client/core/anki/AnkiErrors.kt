@@ -121,6 +121,21 @@ sealed interface AnkiError {
         override val message: String = "The rating does not belong to the active review turn."
     ) : AnkiError
 
+    /**
+     * GATE 07 amendment — the card content read back does not belong to the card the scheduler
+     * selected, or the collection context moved on between scheduling and hydration. Distinct
+     * from [CardNotFound] (the card is genuinely gone) and from [MalformedResponse] (the answer
+     * cannot be interpreted): here the answer is perfectly readable and it is the *wrong card*
+     * — which must never be attached to the turn (INV-ANKI-CARD-02, STEP 54). [detail] is a
+     * small stable token (for example `card_identity_mismatch`, `collection_key_mismatch`),
+     * never provider text or content.
+     */
+    data class StaleCardReference(
+        val card: AnkiCardRef? = null,
+        val detail: String? = null,
+        override val message: String = "The loaded card does not match the scheduled card."
+    ) : AnkiError
+
     data class MediaUnavailable(
         override val message: String = "Card media could not be loaded."
     ) : AnkiError

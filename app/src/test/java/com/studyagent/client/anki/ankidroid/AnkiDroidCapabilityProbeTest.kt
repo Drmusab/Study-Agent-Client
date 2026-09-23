@@ -33,8 +33,10 @@ class AnkiDroidCapabilityProbeTest {
         assertTrue(result.implemented.scheduledReview)
         assertTrue(result.implemented.reviewIntervals)
         assertFalse(result.implemented.review)
-        assertFalse(result.implemented.renderedCards)
+        // GATE 07 — rendered-card hydration is implemented (identity-verified, JVM-tested).
+        assertTrue(result.implemented.renderedCards)
         assertFalse(result.implemented.media)
+        assertFalse(result.implemented.flags)
         assertEquals(CapabilitySupport.SUPPORTED, result.apiReport.deckListing)
         assertEquals(CapabilitySupport.SUPPORTED, result.apiReport.scheduledReview)
         assertEquals(2, result.apiReport.specVersion)

@@ -485,7 +485,9 @@ the single gate for session starts.
 `AnkiError`: `BackendUnavailable`, `PermissionRequired`, `CollectionUnavailable`,
 `DeckNotFound`, `CardNotFound`, `NoteNotFound`, `SessionInvalid`, `StaleTurn`,
 `CommitConflict`, `UnsupportedAction`, `MediaUnavailable`, `Unknown`, plus GATE 02's
-`ProviderUnavailable`, `UnsupportedApi` and `QueryFailure`. UI never parses backend error text.
+`ProviderUnavailable`, `UnsupportedApi` and `QueryFailure`, GATE 05's `MalformedResponse`,
+GATE 06's `InvalidRequest` and GATE 07's `StaleCardReference` (the loaded card does not confirm
+the scheduled identity — never attachable to the wrong turn). UI never parses backend error text.
 GATE 03 removes category-only `asCommitFailureClass()` / `CommitFailureClass`:
 **an error category cannot prove that a write was not applied**. Adapters return a sealed
 commit outcome based on evidence at the mutation boundary; any uncertain post-dispatch
@@ -495,20 +497,31 @@ outcome stays `Ambiguous`, even if the accompanying error is `BackendUnavailable
 
 ## 9. Content model (§21-§23, §51-§52)
 
-### 9.1 `AnkiRenderedCard` — normalized once by the backend
+### 9.1 `AnkiRenderedCard` — normalized once by the backend (GATE 07 shape)
 
 ```kotlin
 data class AnkiRenderedCard(
     val ref: AnkiCardRef,
-    val questionHtml: String?, val answerHtml: String?,       // VISUAL
-    val questionText: String,  val answerText: String,        // SPEECH
-    val pureAnswerText: String?,                              // EVALUATION
-    val media: List<AnkiMediaRef>,
-    val scheduling: AnkiSchedulingInfo?,                      // display-hints only
-    val metadata: AnkiCardMetadata,
-    val noteRef: AnkiNoteRef?, val deckRef: AnkiDeckRef?
+    val questionHtml: String?, val answerHtml: String?,       // VISUAL (verbatim rendered HTML)
+    val questionText: String?, val answerText: String?,       // SPEECH (backend simplified text)
+    val pureAnswerText: String?,                              // EVALUATION (fallback: answerText)
+    val media: List<AnkiMediaRef>,                            // references only, unresolved
+    val scheduling: AnkiSchedulingInfo?,                      // stored facts (labels live on the scheduled card)
+    val metadata: AnkiCardMetadata,                           // templateName/queueState/originalDeckRef/tags
+    val noteRef: AnkiNoteRef?, val deckRef: AnkiDeckRef?,
+    val flag: AnkiFlag?,                                      // null = backend said nothing
+    val degradations: List<String>                            // content-free mapping tokens
 )
 ```
+
+Nullability is meaning (INV-ANKI-CARD-13): `null` = the backend could not supply the field,
+`""` = a legitimately empty rendering. A question representation is required (the mapper reports
+`MalformedResponse` instead of building a blank card); HTML without simplified text is a
+visual-only card + `card_speech_text_unavailable`, never an HTML-stripping fallback
+(INV-ANKI-CARD-16). GATE 07 delivers content only through identity-verified, read-only,
+single-flight `AnkiBackend.hydrateCardContent` with a turn-scoped memo; `AnkiCardHydration.attach`
+is the only supported way onto a turn (INV-ANKI-CARD-02/22/23/30) — see
+`docs/GATE_07_ANKI_CARD_EXTRACTION.md`.
 
 ### 9.2 Why three representations (§22)
 
@@ -516,13 +529,15 @@ The app consumes each card in three channels with different requirements:
 WebView needs Anki's rendered HTML; TTS needs fluent plain text; the AI
 evaluator needs the undecorated reference answer. Deriving them ad hoc
 throughout the app produces three subtly different "truths". The backend
-normalizes ONCE; downstream layers pick their channel. Presentation data flow
-(§60):
+normalizes ONCE; downstream layers pick their channel (INV-ANKI-CARD-05/06/07).
+Evaluation is `pureAnswerText` with `answerText` as fallback — never raw HTML
+(`evaluationAnswerText`). Presentation data flow (§60):
 
 ```
-AnkiBackend → AnkiRenderedCard ├─ questionHtml ─────► WebView (visual)
+AnkiBackend → AnkiRenderedCard ├─ questionHtml ─────► WebView (visual, GATE 08)
                                ├─ questionText ─────► TTS (speech)
                                └─ pureAnswerText ───► AI evaluator (reference)
+                                        └─ fallback: answerText (never HTML)
 ```
 
 ### 9.3 Cloze and templates (§51-§52)
@@ -537,7 +552,9 @@ delegated to AnkiDroid (§13.1).
 `AnkiMediaRef` = `ContentUri | BackendStream | RemoteUrl | Unavailable`. Media
 is owned by Anki; Study-Agent renders/plays by reference. Filesystem paths are
 NOT part of the architecture contract. Missing media degrades the render, not
-the review (§20.3).
+the review (§20.3). GATE 07 merges the scheduled and hydrated reference lists
+(first-seen order, deduplicated) and resolves nothing — resolution is GATE 09
+(INV-ANKI-CARD-20).
 
 ---
 
