@@ -31,6 +31,7 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidProviderSpecSource
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidScheduledCardQuery
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidDeckListing
 import com.studyagent.client.data.anki.ankidroid.CapabilitySupport
+import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidDeckGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidReviewGateway
@@ -93,7 +94,7 @@ class AnkiDroidReviewSessionTest {
         simpleCardText = CapabilitySupport.SUPPORTED,
         nextReviewIntervals = CapabilitySupport.SUPPORTED,
         ratingCommit = CapabilitySupport.SUPPORTED,
-        flags = CapabilitySupport.SUPPORTED,
+        flags = CapabilitySupport.UNSUPPORTED,
         bury = CapabilitySupport.SUPPORTED,
         suspend = CapabilitySupport.SUPPORTED,
         noteRead = CapabilitySupport.SUPPORTED,
@@ -167,6 +168,7 @@ class AnkiDroidReviewSessionTest {
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
             deckGateway = deckGateway,
             reviewGateway = reviewGateway,
+            cardGateway = FakeAnkiDroidCardGateway(),
             turnIds = SequentialReviewTurnIdSource(instancePrefix = "test")
         )
         return Harness(backend, reviewGateway, deckGateway, fakeGateway)
@@ -303,7 +305,7 @@ class AnkiDroidReviewSessionTest {
             )
         )
         val turn = (h.backend.nextCard(h.open()) as NextCardResult.Card).turn
-        val card = (turn.content as AnkiReviewTurnContent.Scheduled).card
+        val card = (turn.content as AnkiReviewTurnContent.Scheduled).scheduledCard
 
         assertEquals(
             listOf(Rating.AGAIN, Rating.HARD, Rating.GOOD, Rating.EASY),
@@ -327,7 +329,7 @@ class AnkiDroidReviewSessionTest {
             )
         )
         val card = ((h.backend.nextCard(h.open()) as NextCardResult.Card).turn.content
-            as AnkiReviewTurnContent.Scheduled).card
+            as AnkiReviewTurnContent.Scheduled).scheduledCard
 
         // The UI must be able to ask "what may I offer?" and get an honest "not these four" —
         // never a hard-coded four-button row (§20/§21/INV-ANKI-REV-09).

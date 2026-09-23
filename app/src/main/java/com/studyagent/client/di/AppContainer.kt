@@ -34,8 +34,10 @@ import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidPermissionManag
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidProbe
 import com.studyagent.client.data.anki.AnkiLibraryRepository
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidDeckGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidReviewGateway
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidCardGateway
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidDeckGateway
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidReviewGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCapabilityProbe
@@ -126,6 +128,9 @@ interface AppContainer {
 
     /** GATE 06 — scheduled-review endpoint. Read-only: it never answers or reschedules a card. */
     val ankiDroidReviewGateway: AnkiDroidReviewGateway
+
+    /** GATE 07 — card-content endpoint. Read-only: it never renders, resolves media or edits. */
+    val ankiDroidCardGateway: AnkiDroidCardGateway
     val ankiDroidBackend: AnkiBackend
 
     /** GATE 05 — Library-ready deck snapshot. Observes [ankiDroidBackend]; no Compose. */
@@ -205,12 +210,17 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         DefaultAnkiDroidReviewGateway(providerClient = ankiDroidProviderClient)
     }
 
+    override val ankiDroidCardGateway: AnkiDroidCardGateway by lazy {
+        DefaultAnkiDroidCardGateway(providerClient = ankiDroidProviderClient)
+    }
+
     override val ankiDroidBackend: AnkiBackend by lazy {
         AnkiDroidBackend(
             gateway = ankiDroidGateway,
             scope = ankiDroidScope,
             deckGateway = ankiDroidDeckGateway,
-            reviewGateway = ankiDroidReviewGateway
+            reviewGateway = ankiDroidReviewGateway,
+            cardGateway = ankiDroidCardGateway
         )
     }
 

@@ -256,8 +256,10 @@ class FakeAnkiBackendTest {
         tags += "late"
         times[Rating.GOOD] = "wrong"
         val turn = (backend.nextCard(backend.begin()) as NextCardResult.Card).turn
-        assertEquals(setOf("original"), turn.renderedCard?.metadata?.tags)
-        assertEquals("4d", turn.renderedCard?.scheduling?.nextReviewTimes?.get(Rating.GOOD))
+        // GATE 07 — the turn is scheduled-first; the detached facts surface on hydration.
+        val hydrated = (backend.hydrateCardContent(turn.cardRef) as AnkiResult.Success).value
+        assertEquals(setOf("original"), hydrated.metadata.tags)
+        assertEquals("4d", hydrated.scheduling?.nextReviewTimes?.get(Rating.GOOD))
     }
 
     // ---------------------------------------------------------------- GATE 06 scheduled review
@@ -278,7 +280,9 @@ class FakeAnkiBackendTest {
         repeat(5) {
             assertEquals(first, (backend.nextCard(session) as NextCardResult.Card).turn)
         }
-        assertEquals("A", first.cardRef.noteId)
+        // The fixture identifies card "A" on note "note-A" — the card id is the identity here.
+        assertEquals("A", first.cardRef.cardId)
+        assertEquals("note-A", first.cardRef.noteId)
         // The stand-in mirrors the real backend's one-active-turn rule, which is what makes GATE
         // 10's StudySession tests meaningful without AnkiDroid (§102/§167).
         assertEquals(backend.capabilities.value.scheduledReview, true)
@@ -291,9 +295,9 @@ class FakeAnkiBackendTest {
         assertTrue(backend.commitRating(first.request(Rating.GOOD)) is CommitRatingResult.Committed)
 
         val second = (backend.nextCard(session) as NextCardResult.Card).turn
-        assertEquals("B", second.cardRef.noteId)
+        assertEquals("B", second.cardRef.cardId)
         assertNotEquals("a new presentation is a new turn identity", first.turnId, second.turnId)
-        assertEquals("B", (backend.nextCard(session) as NextCardResult.Card).turn.cardRef.noteId)
+        assertEquals("B", (backend.nextCard(session) as NextCardResult.Card).turn.cardRef.cardId)
         assertTrue(backend.commitRating(second.request(Rating.GOOD)) is CommitRatingResult.Committed)
         assertEquals(NextCardResult.Finished, backend.nextCard(session))
     }

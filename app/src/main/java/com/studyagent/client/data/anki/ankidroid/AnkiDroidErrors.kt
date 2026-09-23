@@ -52,6 +52,15 @@ enum class AnkiDroidFailureCategory {
     /** The provider rejected the *shape* of the probe: the pinned contract may be stale. */
     CONTRACT_MISMATCH,
 
+    /**
+     * GATE 07 — the entity the caller addressed no longer exists (a card or note deleted
+     * between scheduling and hydration). Distinct from [PROVIDER_ERROR] (the query failed) and
+     * [CONTRACT_MISMATCH] (the request shape was rejected): the provider answered clearly that
+     * the thing is gone, and the domain maps this to `AnkiError.CardNotFound` — never a blank
+     * card and never a retry (STEP 44/§46).
+     */
+    ENTITY_NOT_FOUND,
+
     /** The provider answered with an internal error that is not attributable further. */
     PROVIDER_ERROR,
 
@@ -112,6 +121,9 @@ enum class AnkiDroidFailureEvidence {
 
     /** The provider rejected the probe's own URI/projection shape. */
     PROBE_CONTRACT_REJECTED,
+
+    /** A documented "the entity is gone" signature (GATE 07). */
+    ENTITY_NOT_FOUND_SIGNATURE,
 
     /** An `IllegalStateException` with no documented signature: type known, cause not. */
     UNCLASSIFIED_PROVIDER_STATE,
@@ -215,6 +227,26 @@ internal object AnkiDroidContractSignatures {
         "Unknown URI"
     )
 
+    /**
+     * GATE 07 — documented "the addressed entity does not exist" signatures (verified at
+     * v2.24.1, see `AnkiDroidApiContract`'s GATE 07 table):
+     *
+     * - `BackendNotFoundException` — raised by libanki `Collection.getCard` / `Collection.getNote`
+     *   ("@throws BackendNotFoundException if the card does not exist"). Crossed over Binder it
+     *   arrives as a generic `RuntimeException` whose message begins with the original
+     *   `toString()` (see the file header), which is why the class *name* is the signature.
+     * - `does not exist for note` — the provider's own
+     *   `IllegalArgumentException("Card with ord $ord does not exist for note $noteId")` from
+     *   `getCard(noteId, ord, col)`.
+     *
+     * Both are matched before the generic `IllegalArgumentException → CONTRACT_MISMATCH` rule:
+     * "the card is gone" must never be reported as "the contract is stale".
+     */
+    val ENTITY_NOT_FOUND: List<String> = listOf(
+        "BackendNotFoundException",
+        "does not exist for note"
+    )
+
     /** Binder-level transport failures. */
     val TRANSPORT: List<String> = listOf(
         "DeadObjectException",
@@ -314,6 +346,18 @@ object AnkiDroidFailureClassifier {
                 evidence = AnkiDroidFailureEvidence.UNCLASSIFIED_PROVIDER_STATE,
                 exceptionClass = exceptionClass,
                 evidenceToken = transportSignature
+            )
+        }
+
+        val entityGone = AnkiDroidContractSignatures.ENTITY_NOT_FOUND.firstOrNull {
+            exceptionClass == it || message.contains(it, ignoreCase = true)
+        }
+        if (entityGone != null) {
+            return AnkiDroidFailure(
+                category = AnkiDroidFailureCategory.ENTITY_NOT_FOUND,
+                evidence = AnkiDroidFailureEvidence.ENTITY_NOT_FOUND_SIGNATURE,
+                exceptionClass = exceptionClass,
+                evidenceToken = entityGone
             )
         }
 

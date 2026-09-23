@@ -32,11 +32,13 @@ class AnkiDroidIntegrationStateTest {
     }
 
     @Test
-    fun `api capabilities for spec 1 are all SUPPORTED`() {
+    fun `api capabilities for spec 1 are SUPPORTED except flags`() {
         val report = AnkiDroidCompatibilityPolicy.apiCapabilitiesForSpec(1)
         assertEquals(CapabilitySupport.SUPPORTED, report.deckListing)
         assertEquals(CapabilitySupport.SUPPORTED, report.scheduledReview)
         assertEquals(CapabilitySupport.SUPPORTED, report.renderedCards)
+        // GATE 07 — the pinned card contract has no flags column at all (v2.24.1, verified).
+        assertEquals(CapabilitySupport.UNSUPPORTED, report.flags)
     }
 
     @Test
@@ -53,21 +55,22 @@ class AnkiDroidIntegrationStateTest {
     }
 
     @Test
-    fun `implemented capabilities after GATE 06 include deckListing and scheduled review`() {
+    fun `implemented capabilities after GATE 07 include scheduled review and rendered cards`() {
         val caps = AnkiDroidCompatibilityPolicy.implementedCapabilitiesFor(spec = 2, isReady = true)
         assertTrue(caps.deckListing)
         assertTrue(caps.scheduledReview)
         assertTrue(caps.reviewIntervals)
+        assertTrue(caps.renderedCards)
         // The capability matrix must not move ahead of the code (§75/§147): no rating commit,
-        // no rendered cards, no media resolution, no deck-count verification.
+        // no media resolution, no flags, no deck-count verification.
         assertFalse(caps.review)
-        assertFalse(caps.renderedCards)
         assertFalse(caps.media)
+        assertFalse(caps.flags)
         assertFalse(caps.deckCounts)
     }
 
     @Test
-    fun `the capability matrix reports scheduled review as implemented and commit as pending`() {
+    fun `the capability matrix reports card content as implemented and commit as pending`() {
         val caps = AnkiDroidCompatibilityPolicy.implementedCapabilitiesFor(spec = 2, isReady = true)
         val rows = AnkiDroidCompatibilityPolicy.apiCapabilitiesForSpec(2)
             .toCapabilityDetailList(caps)
@@ -80,11 +83,10 @@ class AnkiDroidIntegrationStateTest {
             rows.getValue("ratingCommit").maturity
         )
         // The row must be built from the same flags the backend publishes, not from a hopeful
-        // default: every other row reports unimplemented.
-        assertEquals(
-            CapabilityMaturity.API_SUPPORTED_NOT_IMPLEMENTED,
-            rows.getValue("renderedCards").maturity
-        )
+        // default: implemented rows match the capability, flags stay API-unsupported.
+        assertEquals(CapabilityMaturity.IMPLEMENTED, rows.getValue("renderedCards").maturity)
+        assertEquals(CapabilityMaturity.IMPLEMENTED, rows.getValue("simpleCardText").maturity)
+        assertEquals(CapabilityMaturity.API_UNSUPPORTED, rows.getValue("flags").maturity)
     }
 
     @Test

@@ -222,6 +222,155 @@ object AnkiDroidApiContract {
         REVIEW_NEXT_REVIEW_TIMES_COLUMN,
         REVIEW_MEDIA_FILES_COLUMN
     )
+
+    // ------------------------------------------------------------------------------------------
+    // GATE 07 — card-content contract (`FlashCardsContract.Card`, verified at v2.24.1)
+    //
+    // | Fact | Value | Verified from |
+    // |---|---|---|
+    // | Card-by-id URI | `content://<authority>/cards/<cardId>` | `addUri("cards/#", CARD_ID)`; the query branch reads `uri.pathSegments[1].toLong()` as the **card id** and calls `col.getCard(cardId)` |
+    // | Card-by-note+ord URI | `content://<authority>/notes/<noteId>/cards/<ord>` | `addUri("notes/#/cards/#", NOTES_ID_CARDS_ORD)`; `getCardFromUri` reads `pathSegments[1]` as note id and `pathSegments[3]` as **ordinal** |
+    // | Missing card (by id) | `col.getCard` raises `BackendNotFoundException` | `libanki Collection.getCard`: "@throws BackendNotFoundException if the card does not exist" |
+    // | Missing card (by note+ord) | `IllegalArgumentException("Card with ord $ord does not exist for note $noteId")` | `CardContentProvider.getCard(noteId, ord, col)`; a missing *note* raises the same `BackendNotFoundException` family via `col.getNote` |
+    // | Projection honoured | `MatrixCursor(columns, 1)` is built from the caller's projection; every requested column is filled or the endpoint **throws** `UnsupportedOperationException("Queue \"<col>\" is unknown")` | `addCardToCursor` — same strictness as the review endpoint |
+    // | `_id` (`Card._ID`) | `long`, the card id (`currentCard.id`) | `addCardToCursor` |
+    // | `note_id` (`Card.NOTE_ID`) | `long`, `currentCard.nid` | same |
+    // | `ord` (`Card.CARD_ORD`) | `int`, `currentCard.ord` | same |
+    // | `card_name` (`Card.CARD_NAME`) | `String`, the card *template display name* (`card.template(col).name`) — **never identity** (STEP 27); note it is computed even when not projected, and an invalid template makes the whole row throw `IllegalArgumentException("Card is using an invalid template")` | same |
+    // | `deck_id` (`Card.DECK_ID`) | the card's **current** deck id (`currentCard.did`) | same |
+    // | `original_deck_id` (`Card.ORIGINAL_DECK_ID`) | `oDid` — the *home* deck while in a filtered deck, `0` otherwise | same + contract KDoc |
+    // | `question` (`Card.QUESTION`) | **rendered question** = `renderOutput().questionText` with `[anki:play:q:n]` AV refs restored to `[sound:…]` (`replaceWithSoundTags`) — HTML fragment, no note-type `<style>` block (that is `Card.question()`, which the provider does not use) | `addCardToCursor` + `Sound.replaceWithSoundTags` |
+    // | `answer` (`Card.ANSWER`) | **rendered answer** = `renderOutput().answerText` with sound tags restored. By template convention this *includes* the question side (`{{FrontSide}}`) followed by `<hr id=answer>` and the answer — the answer DOES contain question content | `addCardToCursor` + `TemplateManager` (`answerText`) |
+    // | `question_simple` (`Card.QUESTION_SIMPLE`) | the raw `TemplateRenderOutput.questionText` — the backend's simplified question representation (contract KDoc: "without card styling information (CSS)"). Verified nuance at v2.24.1: it is `QUESTION` *minus* the `[anki:play:…] → [sound:…]` restoration; it is the closest backend-provided speech-side text but is **not guaranteed to be plain text** | `addCardToCursor` (`renderOutput(col).questionText`) |
+    // | `answer_simple` (`Card.ANSWER_SIMPLE`) | the raw `TemplateRenderOutput.answerText` — full answer side (question duplication included when templates use `{{FrontSide}}`), no sound-tag restoration | `addCardToCursor` (`renderOutput(col, false).answerText`; `false` = no reload) |
+    // | `answer_pure` (`Card.ANSWER_PURE`) | `pureAnswer()`: `answerText` with everything **before** `<hr id=answer>` (or `<hr id="answer">`) removed and the remainder trimmed — i.e. question-side content stripped. If the template emitted no `<hr id=answer>` marker, the WHOLE `answerText` is returned unchanged. NOT identical to `ANSWER_SIMPLE` (which keeps the question duplication) | `CardContentProvider.pureAnswer` |
+    // | `reps` / `lapses` | `int`, stored counters (`currentCard.reps` / `.lapses`) | `addCardToCursor` |
+    // | `interval` | `int`, stored interval `ivl` in **days** (0 for learning cards) | `addCardToCursor` + contract KDoc |
+    // | `type` | `int` card-type code: `0` new, `1` learning, `2` review, `3` relearning — "other values should be treated as unknown" | `Card.TYPE` KDoc |
+    // | `queue` (`Card.RAW_QUEUE`) | `int` queue code: `-3` manually buried, `-2` sibling buried, `-1` suspended, `0` new, `1` learning, `2` review, `3` day-learning/relearning, `4` preview — "other values should be treated as unknown" | `Card.RAW_QUEUE` KDoc |
+    // | `fsrs_stability` / `fsrs_difficulty` / `fsrs_desired_retention` | `Float?` memory-state values; `null` when the card has no stored FSRS state. Informational only (INV-ANKI-CARD-19) | `addCardToCursor` (`memoryStateStability` / `memoryStateDifficulty` / `desiredRetention`) + KDoc |
+    // | `last_review_time_secs` | `Long?`, Unix epoch **seconds** (`null` when never reviewed) | `Card.LAST_REVIEW_TIME_SECONDS` KDoc |
+    // | **No flags column** | `FlashCardsContract.Card` at v2.24.1 exposes NO flag field (`addCardToCursor` fills no flags cell; the contract object's constants end at `last_review_time_secs`) — GATE 07 maps no flag and `AnkiRenderedCard.flag` stays null on this backend | full read of `FlashCardsContract.kt` + `addCardToCursor` |
+    // | No media column, no tags column, no deck-name column | media names live on the review-info endpoint (`media_files`, GATE 06); tags live on the note surface (a separate query — deliberately not made, STEP 39/§40); deck names live on the deck surface (GATE 05) | contract column tables |
+    // | Rendering authority | `question`/`answer`/`question_simple`/`answer_simple`/`answer_pure` are all produced by AnkiDroid's own template renderer (`TemplateManager` + rust backend), including cloze and `{{FrontSide}}` expansion. Study-Agent never expands `{{…}}` itself (INV-ANKI-CARD-08/09) | `addCardToCursor` calls `renderOutput`/`pureAnswer` |
+    // | Not consumed (present but unused) | `due`, `original_due`, `sm2_factor`, `left`, `original_position`, `custom_data`, `fsrs_decay` — raw scheduler internals GATE 07 does not need (STEP 19); deliberately left out of the projection | STEP 14 |
+    // | Read-only guarantee | the card query branches contain no writes; `update` on the card URIs only moves decks — GATE 07 never calls it, and a source scan enforces it | `CardContentProvider.update` + `AnkiDroidIntegrationIsolationTest` |
+    // ------------------------------------------------------------------------------------------
+
+    /** URI path of the card collection (`Card.CONTENT_URI`). */
+    const val CARDS_PATH: String = "cards"
+
+    /** URI path of the note collection — parent of `notes/<id>/cards[/<ord>]`. */
+    const val NOTES_PATH: String = "notes"
+
+    /** URI path segment of a note's card collection (`notes/<id>/cards`). */
+    const val NOTE_CARDS_PATH: String = "cards"
+
+    /** `Card._ID` — the backend-issued card id. */
+    const val CARD_ID_COLUMN: String = "_id"
+
+    /** `Card.NOTE_ID` — the note this card belongs to. */
+    const val CARD_NOTE_ID_COLUMN: String = "note_id"
+
+    /** `Card.CARD_ORD` — the card ordinal inside its note. */
+    const val CARD_ORD_COLUMN: String = "ord"
+
+    /** `Card.CARD_NAME` — template display name. Not identity (STEP 27). */
+    const val CARD_NAME_COLUMN: String = "card_name"
+
+    /** `Card.DECK_ID` — the card's current deck id. */
+    const val CARD_DECK_ID_COLUMN: String = "deck_id"
+
+    /** `Card.ORIGINAL_DECK_ID` — home deck while in a filtered deck, `0` otherwise. */
+    const val CARD_ORIGINAL_DECK_ID_COLUMN: String = "original_deck_id"
+
+    /** `Card.QUESTION` — rendered question with sound tags restored (visual channel). */
+    const val CARD_QUESTION_COLUMN: String = "question"
+
+    /** `Card.ANSWER` — rendered answer, question side included (visual channel). */
+    const val CARD_ANSWER_COLUMN: String = "answer"
+
+    /** `Card.QUESTION_SIMPLE` — backend's simplified question (speech channel). */
+    const val CARD_QUESTION_SIMPLE_COLUMN: String = "question_simple"
+
+    /** `Card.ANSWER_SIMPLE` — backend's simplified full answer (speech/clean channel). */
+    const val CARD_ANSWER_SIMPLE_COLUMN: String = "answer_simple"
+
+    /** `Card.ANSWER_PURE` — answer with question-side content removed (evaluation channel). */
+    const val CARD_ANSWER_PURE_COLUMN: String = "answer_pure"
+
+    /** `Card.REPS` — stored repetition counter. */
+    const val CARD_REPS_COLUMN: String = "reps"
+
+    /** `Card.LAPSES` — stored lapse counter. */
+    const val CARD_LAPSES_COLUMN: String = "lapses"
+
+    /** `Card.INTERVAL` — stored interval in days. */
+    const val CARD_INTERVAL_COLUMN: String = "interval"
+
+    /** `Card.TYPE` — stored card-type code (0..3; other values are unknown). */
+    const val CARD_TYPE_COLUMN: String = "type"
+
+    /** `Card.RAW_QUEUE` — stored queue code (−3..4; other values are unknown). */
+    const val CARD_QUEUE_COLUMN: String = "queue"
+
+    /** `Card.FSRS_STABILITY` — stored FSRS stability, `null` when absent. */
+    const val CARD_FSRS_STABILITY_COLUMN: String = "fsrs_stability"
+
+    /** `Card.FSRS_DIFFICULTY` — stored FSRS difficulty, `null` when absent. */
+    const val CARD_FSRS_DIFFICULTY_COLUMN: String = "fsrs_difficulty"
+
+    /** `Card.FSRS_DESIRED_RETENTION` — stored desired retention (fraction), `null` when absent. */
+    const val CARD_FSRS_DESIRED_RETENTION_COLUMN: String = "fsrs_desired_retention"
+
+    /** `Card.LAST_REVIEW_TIME_SECONDS` — last review as Unix epoch seconds, `null` when never. */
+    const val CARD_LAST_REVIEW_TIME_COLUMN: String = "last_review_time_secs"
+
+    /**
+     * The only columns GATE 07 asks the card endpoint for (STEP 14): identity, the five content
+     * representations, current/home deck, and the optional metadata this gate maps. Raw
+     * scheduler internals (`due`, `sm2_factor`, `left`, …) and `custom_data` are deliberately
+     * excluded (STEP 19). An unknown name would make the endpoint throw, so this list is also
+     * the contract pin.
+     */
+    val CARD_PROJECTION: Array<String> = arrayOf(
+        CARD_ID_COLUMN,
+        CARD_NOTE_ID_COLUMN,
+        CARD_ORD_COLUMN,
+        CARD_NAME_COLUMN,
+        CARD_DECK_ID_COLUMN,
+        CARD_ORIGINAL_DECK_ID_COLUMN,
+        CARD_QUESTION_COLUMN,
+        CARD_ANSWER_COLUMN,
+        CARD_QUESTION_SIMPLE_COLUMN,
+        CARD_ANSWER_SIMPLE_COLUMN,
+        CARD_ANSWER_PURE_COLUMN,
+        CARD_REPS_COLUMN,
+        CARD_LAPSES_COLUMN,
+        CARD_INTERVAL_COLUMN,
+        CARD_TYPE_COLUMN,
+        CARD_QUEUE_COLUMN,
+        CARD_FSRS_STABILITY_COLUMN,
+        CARD_FSRS_DIFFICULTY_COLUMN,
+        CARD_FSRS_DESIRED_RETENTION_COLUMN,
+        CARD_LAST_REVIEW_TIME_COLUMN
+    )
+
+    /** Documented `type` codes (`Card.TYPE` KDoc). Anything else maps to `UNKNOWN`. */
+    const val CARD_TYPE_NEW: Int = 0
+    const val CARD_TYPE_LEARNING: Int = 1
+    const val CARD_TYPE_REVIEW: Int = 2
+    const val CARD_TYPE_RELEARNING: Int = 3
+
+    /** Documented `queue` codes (`Card.RAW_QUEUE` KDoc). Anything else maps to `UNKNOWN`. */
+    const val CARD_QUEUE_MANUALLY_BURIED: Int = -3
+    const val CARD_QUEUE_SIBLING_BURIED: Int = -2
+    const val CARD_QUEUE_SUSPENDED: Int = -1
+    const val CARD_QUEUE_NEW: Int = 0
+    const val CARD_QUEUE_LEARNING: Int = 1
+    const val CARD_QUEUE_REVIEW: Int = 2
+    const val CARD_QUEUE_DAY_LEARNING: Int = 3
+    const val CARD_QUEUE_PREVIEW: Int = 4
 }
 
 /**

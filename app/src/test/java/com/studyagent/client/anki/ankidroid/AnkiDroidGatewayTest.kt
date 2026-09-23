@@ -55,7 +55,7 @@ class AnkiDroidGatewayTest {
             simpleCardText = CapabilitySupport.SUPPORTED,
             nextReviewIntervals = CapabilitySupport.SUPPORTED,
             ratingCommit = CapabilitySupport.SUPPORTED,
-            flags = CapabilitySupport.SUPPORTED,
+            flags = CapabilitySupport.UNSUPPORTED,
             bury = CapabilitySupport.SUPPORTED,
             suspend = CapabilitySupport.SUPPORTED,
             noteRead = CapabilitySupport.SUPPORTED,

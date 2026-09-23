@@ -65,6 +65,12 @@ object AnkiDroidCompatibilityPolicy {
         // and media. We conservatively mark all known capabilities as SUPPORTED
         // when spec >= 1, because the contract contains them. Study-Agent implementation
         // status is tracked separately (ImplementationStatus).
+        //
+        // GATE 07 correction — `flags` is UNSUPPORTED at v2.24.1, verified against both
+        // `FlashCardsContract.Card` and `CardContentProvider.addCardToCursor`: the public card
+        // contract exposes no flag column at all (the app-private `Card.flags` never crosses the
+        // provider). Claiming API support here would be exactly the capability lie GATE 01 §16
+        // forbids; it flips to SUPPORTED only when a verified contract version exposes flags.
         return AnkiDroidApiCapabilityReport(
             deckListing = CapabilitySupport.SUPPORTED,
             deckCounts = CapabilitySupport.SUPPORTED,
@@ -73,7 +79,7 @@ object AnkiDroidCompatibilityPolicy {
             simpleCardText = CapabilitySupport.SUPPORTED,
             nextReviewIntervals = CapabilitySupport.SUPPORTED,
             ratingCommit = CapabilitySupport.SUPPORTED,
-            flags = CapabilitySupport.SUPPORTED,
+            flags = CapabilitySupport.UNSUPPORTED,
             bury = CapabilitySupport.SUPPORTED,
             suspend = CapabilitySupport.SUPPORTED,
             noteRead = CapabilitySupport.SUPPORTED,
@@ -109,15 +115,19 @@ object AnkiDroidCompatibilityPolicy {
      *
      * GATE 06: [AnkiCapabilities.scheduledReview] becomes true — the backend can ask AnkiDroid's
      * scheduler for the next card and map the answer, and [AnkiCapabilities.reviewIntervals] with
-     * it, because the interval labels are mapped as display metadata. Everything the review path
-     * does *not* have stays false:
+     * it, because the interval labels are mapped as display metadata.
+     *
+     * GATE 07: [AnkiCapabilities.renderedCards] becomes true — the backend can hydrate a known
+     * card identity into the normalized visual/speech/evaluation channels and map the optional
+     * card metadata (verified mapping against the pinned card contract, JVM-tested). Everything
+     * the card-content read does *not* have stays false:
      *
      * - [AnkiCapabilities.review] — the full loop still needs rating commit (GATE 11), so
      *   `isReadyForReview` stays false and no production flow may start a rated session;
-     * - [AnkiCapabilities.renderedCards] — GATE 06 maps scheduler identity, not card content
-     *   (GATE 07);
      * - [AnkiCapabilities.media] — media names are kept as references, nothing is resolved or
-     *   read (GATE 09).
+     *   read (GATE 09);
+     * - [AnkiCapabilities.flags] — the pinned card contract exposes no flags column at all
+     *   (v2.24.1, verified), so nothing here can read or write a flag (GATE 11, if ever).
      *
      * Marking any of those true to make a screen look complete would be exactly the capability
      * lie GATE 01 §16 forbids.
@@ -130,7 +140,8 @@ object AnkiDroidCompatibilityPolicy {
         return AnkiCapabilities(
             deckListing = true,
             scheduledReview = true,
-            reviewIntervals = true
+            reviewIntervals = true,
+            renderedCards = true
         )
     }
 }
@@ -220,11 +231,11 @@ data class AnkiDroidApiCapabilityReport(
         AnkiDroidCapabilityDetail("deckListing", deckListing, maturityFor(deckListing, implemented.deckListing), "provider contract"),
         AnkiDroidCapabilityDetail("deckCounts", deckCounts, maturityFor(deckCounts, implemented.deckCounts), "provider contract"),
         AnkiDroidCapabilityDetail("scheduledReview", scheduledReview, maturityFor(scheduledReview, implemented.scheduledReview), "GATE 06 — schedule endpoint"),
-        AnkiDroidCapabilityDetail("renderedCards", renderedCards, maturityFor(renderedCards, implemented.renderedCards), "provider contract"),
-        AnkiDroidCapabilityDetail("simpleCardText", simpleCardText, maturityFor(simpleCardText, implemented.renderedCards), "provider contract"),
+        AnkiDroidCapabilityDetail("renderedCards", renderedCards, maturityFor(renderedCards, implemented.renderedCards), "GATE 07 — card content provider"),
+        AnkiDroidCapabilityDetail("simpleCardText", simpleCardText, maturityFor(simpleCardText, implemented.renderedCards), "GATE 07 — question_simple/answer_simple/answer_pure"),
         AnkiDroidCapabilityDetail("nextReviewIntervals", nextReviewIntervals, maturityFor(nextReviewIntervals, implemented.reviewIntervals), "GATE 06 — mapped as display labels"),
         AnkiDroidCapabilityDetail("ratingCommit", ratingCommit, maturityFor(ratingCommit, implemented.review), "GATE 11"),
-        AnkiDroidCapabilityDetail("flags", flags, maturityFor(flags, implemented.flags), "provider contract"),
+        AnkiDroidCapabilityDetail("flags", flags, maturityFor(flags, implemented.flags), "no flags column in the pinned card contract (v2.24.1)"),
         AnkiDroidCapabilityDetail("bury", bury, maturityFor(bury, implemented.bury), "provider contract"),
         AnkiDroidCapabilityDetail("suspend", suspend, maturityFor(suspend, implemented.suspendCards), "provider contract"),
         AnkiDroidCapabilityDetail("noteRead", noteRead, maturityFor(noteRead, implemented.renderedCards), "provider contract"),

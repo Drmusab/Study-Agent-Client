@@ -896,3 +896,69 @@ happens only at the moment a session would otherwise finish.
 `AnkiCapabilities.scheduledReview = true` and `reviewIntervals = true` when Ready at a supported
 spec. `review` (the complete loop, including rating commit) stays `false` until GATE 11;
 `renderedCards` until GATE 07; `media` until GATE 09. The capability matrix reports exactly that.
+
+## 27. GATE 07 — Card content: `cards/<id>` and `notes/<id>/cards/<ord>`
+
+Full contract, provenance and INV-ANKI-CARD verdicts: `docs/GATE_07_ANKI_CARD_EXTRACTION.md`.
+Pinned constants: the GATE 07 provenance table in `AnkiDroidApiContract.kt`.
+
+Pipeline: public `cards` / `notes/#/cards/#` provider URIs → `AnkiDroidCardGateway` →
+`AnkiDroidBackend.hydrateCardContent()` → `AnkiRenderedCard` (three channels) →
+`AnkiCardHydration.attach` → future GATE 08 (visual) / TTS (speech) / AI (evaluation).
+
+### 27.1 Endpoints and projection
+
+```
+content://<authority>/cards/<cardId>              Card.CONTENT_URI_ITEM   (card id)
+content://<authority>/notes/<noteId>/cards/<ord>  Note.CONTENT_URI_ITEM/# (GATE 06 identity shape)
+```
+
+Exactly one bounded **projected** query per hydration (`CARD_PROJECTION`, 20 explicit columns —
+pinned in `AnkiDroidContractTest`, never `SELECT *`). A ref addressed by `noteId + ordinal`
+uses the note path; a known card id uses the card path. Never a content search.
+
+### 27.2 Columns (summary — full table in `AnkiDroidApiContract.kt` / GATE 07 doc §2.2)
+
+| Column | As transported | Consumes to |
+|---|---|---|
+| `_id`, `note_id`, `ord` | `long`/`int`, read as **text** and parsed | card identity (strict; canonical decimal; never invented) |
+| `question`, `answer` | `String` (rendered HTML, `answer` includes `{{FrontSide}}` + `<hr id=answer>`) | `questionHtml`/`answerHtml` — visual, verbatim |
+| `question_simple`, `answer_simple` | `String` (raw-template plain view — **not** ordinary text) | `questionText`/`answerText` — speech |
+| `answer_pure` | `String` (`answerText` after the first `<hr id=answer>`) | `pureAnswerText` — evaluation |
+| `card_name` | `String` (template display name, computed even when unprojected) | `metadata.templateName` — never identity |
+| `deck_id`, `original_deck_id` | `long` | `deckRef` (current), `metadata.originalDeckRef` (filtered home; `0`→`null`) |
+| `type`, `queue` | `int` | `metadata.queueState` (queue wins; unknown → `UNKNOWN` + token) |
+| `reps`, `lapses`, `interval`, `last_review_time_secs` | numbers as text | `scheduling` stored facts |
+| `fsrs_stability`, `fsrs_difficulty`, `fsrs_desired_retention` | numbers as text | `scheduling.fsrs` (informational) |
+
+**No flags column exists** at v2.24.1 (`Card.flags` is app-private): `flag` is always `null`
+here, and the capability report says `flags = UNSUPPORTED` — the previous `SUPPORTED` claim was
+corrected in GATE 07 (STEP 100). Unused columns (`due`, `original_due`, `left`, `sm2_factor`,
+`custom_data`, `original_position`, `fsrs_decay`) are documented in the contract KDoc.
+
+### 27.3 Failure semantics (verified at v2.24.1)
+
+- Gone card: `BackendNotFoundException` (card id) /
+  `IllegalArgumentException("Card with ord … does not exist for note …")` (note path) / empty
+  cursor → **`CardNotFound`** (documented `ENTITY_NOT_FOUND` signatures matched before the
+  generic contract classifier).
+- Unknown projected column → `UnsupportedOperationException` (contract mismatch family).
+- Invalid template raises `IllegalArgumentException` even with `card_name` unprojected →
+  `MalformedResponse` family — never a crash, never a blank card.
+- Row does not confirm the scheduled identity → **`StaleCardReference`** (GATE 07 amendment);
+  the content is discarded, never attached to the wrong turn.
+
+### 27.4 Read-only, single-flight, turn-scoped (GATE 07 guarantees)
+
+Hydration performs exactly one bounded projected query and zero writes (INV-ANKI-CARD-10/17).
+A single-flight mutex plus a one-slot memo collapses duplicate and concurrent consumers of one
+card into one provider read; the memo is a presentation cache dropped when a turn is presented or
+a session ends, so an edited card re-reads as the latest content. Cancellation is never a domain
+failure. Diagnostics (`ANKI_CARD_HYDRATION_*`, `ANKI_CARD_CONTENT_DEGRADED`,
+`AnkiDroidCardQueryDiagnostics`) carry identifiers, counts and lengths only — never content.
+
+### 27.5 Capabilities (GATE 07)
+
+`AnkiCapabilities.renderedCards = true` when Ready at a supported spec. Unchanged: `review`
+false (GATE 11), `media` false (GATE 09), `deckCounts` false (unverified), `flags` false (no
+contract support at the pin).

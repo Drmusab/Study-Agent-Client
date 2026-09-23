@@ -119,4 +119,50 @@ class AnkiDroidContractTest {
         assertEquals(endpoints.size, endpoints.map { it.label }.toSet().size)
         assertTrue(endpoints.all { it.label.isNotBlank() })
     }
+
+    // ---------------------------------------------------------------- GATE 07 — card surface
+
+    @Test
+    fun `card reads use a pinned explicit projection and never a wildcard`() {
+        // STEP 13/§14 — every column is a decision with provenance (the GATE 07 table in
+        // AnkiDroidApiContract). A SELECT * would let column drift silently change behaviour.
+        assertEquals(
+            listOf(
+                "_id", "note_id", "ord", "card_name", "deck_id", "original_deck_id",
+                "question", "answer", "question_simple", "answer_simple", "answer_pure",
+                "reps", "lapses", "interval", "type", "queue",
+                "fsrs_stability", "fsrs_difficulty", "fsrs_desired_retention", "last_review_time_secs"
+            ),
+            AnkiDroidApiContract.CARD_PROJECTION.toList()
+        )
+        assertTrue(AnkiDroidApiContract.CARD_PROJECTION.none { it == "*" || it.contains("*") })
+    }
+
+    @Test
+    fun `card addressing paths follow the pinned public contract`() {
+        assertEquals("cards", AnkiDroidApiContract.CARDS_PATH)
+        assertEquals("notes", AnkiDroidApiContract.NOTES_PATH)
+        assertEquals("cards", AnkiDroidApiContract.NOTE_CARDS_PATH)
+        assertEquals("cards/{cardId}", "${AnkiDroidApiContract.CARDS_PATH}/{cardId}")
+        assertEquals(
+            "notes/{noteId}/cards/{ord}",
+            "${AnkiDroidApiContract.NOTES_PATH}/{noteId}/${AnkiDroidApiContract.NOTE_CARDS_PATH}/{ord}"
+        )
+    }
+
+    @Test
+    fun `card queue and type codes match the pinned provider values`() {
+        // STEP 33's mapping is only as truthful as these integers (Flag.kt/ReviewInfo provenance).
+        assertEquals(-3, AnkiDroidApiContract.CARD_QUEUE_MANUALLY_BURIED)
+        assertEquals(-2, AnkiDroidApiContract.CARD_QUEUE_SIBLING_BURIED)
+        assertEquals(-1, AnkiDroidApiContract.CARD_QUEUE_SUSPENDED)
+        assertEquals(0, AnkiDroidApiContract.CARD_QUEUE_NEW)
+        assertEquals(1, AnkiDroidApiContract.CARD_QUEUE_LEARNING)
+        assertEquals(2, AnkiDroidApiContract.CARD_QUEUE_REVIEW)
+        assertEquals(3, AnkiDroidApiContract.CARD_QUEUE_DAY_LEARNING)
+        assertEquals(0, AnkiDroidApiContract.CARD_TYPE_NEW)
+        assertEquals(1, AnkiDroidApiContract.CARD_TYPE_LEARNING)
+        assertEquals(2, AnkiDroidApiContract.CARD_TYPE_REVIEW)
+        assertEquals(3, AnkiDroidApiContract.CARD_TYPE_RELEARNING)
+    }
 }
