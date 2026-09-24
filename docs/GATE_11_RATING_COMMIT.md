@@ -235,7 +235,10 @@ Fixed minimally, because they block compiling files GATE 11 changes:
 Not fixed (outside scope, found while compiling):
 
 * `WebSocketAgentConnection` (missing `override`s)
-* `RemoteSpeechBackend` / `ProviderBackendRouter`
+* `RemoteSpeechBackend`: its `private val provider` conflicts with the public
+  `SpeechBackend.provider`. Confirmed with Kotlin 1.9.23 when the PR was opened.
+* `ProviderBackendRouter`: not confirmed. In the partial compile it only reports unresolved
+  references to types that live outside the compiled subset (some of them Android-dependent).
 * `IdempotencyTest`, `NetworkChaosTest`
 * `StudySessionHarness`, `FakeStudyServer`
 * `StudyReducerTest`, `SessionIdempotencyTest`, `StudySessionHappyPathTest`, `StudyAgentChaosTest`
