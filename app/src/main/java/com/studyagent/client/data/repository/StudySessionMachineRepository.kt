@@ -52,7 +52,8 @@ class StudySessionMachineRepository(
      */
     private val performance: PerformanceMetrics? = null,
     /** Bounded structured diagnostic timeline (§67). Nullable for the same reason. */
-    private val timeline: DiagnosticTimeline? = null
+    private val timeline: DiagnosticTimeline? = null,
+    ankiEffects: com.studyagent.client.core.study.AnkiStudyEffectExecutor? = null
 ) : StudySessionRepository {
 
     private val machine = StudySessionMachine(
@@ -64,12 +65,18 @@ class StudySessionMachineRepository(
         clock = clock,
         audioRouteCoordinator = audioRouteCoordinator,
         performance = performance,
-        timeline = timeline
+        timeline = timeline,
+        ankiEffects = ankiEffects
     )
 
     override val studyState: StateFlow<StudyState> = machine.studyState
     override val currentSession: StateFlow<StudySession?> = machine.currentSession
     override val lastRecognizedCommand: Flow<VoiceCommand> = machine.lastRecognizedCommand
+
+    /** Explicit backend-qualified startup; legacy name-based starts remain unchanged. */
+    fun startAnkiStudy(request: com.studyagent.client.core.study.AnkiStudyRequest) {
+        machine.dispatch(com.studyagent.client.core.study.AnkiStudyEvent.Start(request))
+    }
 
     override suspend fun startStudy(deckName: String?, mode: String, config: com.studyagent.client.core.models.SessionStartConfig?) {
         startOrBlock(deckName, mode, config)
