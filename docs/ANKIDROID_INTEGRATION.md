@@ -1025,3 +1025,13 @@ can prove — the document actually received, computed styles, RTL resolution, w
 JS execution, the absence of a native bridge read back from the platform, and renderer-process
 recovery. **The instrumented suite was NOT RUN** (no emulator or device in the gate environment),
 so no Chromium-side claim above is reported as observed. See GATE 08 doc §14.
+
+## GATE 09 media contract (verified limitation)
+
+The v2.24.1 public provider contract exposes `ReviewInfo.MEDIA_FILES` as a JSON array of media
+**filenames**. The pinned `CardContentProvider` contract does not expose a public media-file read
+endpoint or content URI. Study-Agent therefore does not infer `collection.media`, open
+`/data/data/com.ichi2.anki`, or read `collection.anki2`. `AnkiDroidMediaResolver` returns an
+observable `PROVIDER_UNAVAILABLE` degradation for valid filenames until a supported public stream
+contract exists. This is intentional and release-safe. WebView policy and compatibility status are
+in [`ANKI_WEBVIEW_SECURITY.md`](ANKI_WEBVIEW_SECURITY.md).

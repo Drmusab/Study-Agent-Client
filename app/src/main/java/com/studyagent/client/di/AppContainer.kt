@@ -34,6 +34,8 @@ import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidPermissionManag
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidProbe
 import com.studyagent.client.data.anki.AnkiLibraryRepository
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
+import com.studyagent.client.core.anki.AnkiMediaResolver
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidDeckGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidReviewGateway
@@ -133,6 +135,9 @@ interface AppContainer {
     val ankiDroidCardGateway: AnkiDroidCardGateway
     val ankiDroidBackend: AnkiBackend
 
+    /** GATE 09 — read-only public-contract resolver; never a filesystem accessor. */
+    val ankiMediaResolver: AnkiMediaResolver
+
     /** GATE 05 — Library-ready deck snapshot. Observes [ankiDroidBackend]; no Compose. */
     val ankiLibraryRepository: AnkiLibraryRepository
 
@@ -212,6 +217,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
 
     override val ankiDroidCardGateway: AnkiDroidCardGateway by lazy {
         DefaultAnkiDroidCardGateway(providerClient = ankiDroidProviderClient)
+    }
+
+    override val ankiMediaResolver: AnkiMediaResolver by lazy {
+        AnkiDroidMediaResolver()
     }
 
     override val ankiDroidBackend: AnkiBackend by lazy {

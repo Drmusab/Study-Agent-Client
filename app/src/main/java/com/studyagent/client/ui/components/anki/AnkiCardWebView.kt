@@ -80,6 +80,7 @@ import android.graphics.Color
 import android.net.Uri
 import android.net.http.SslError
 import android.os.SystemClock
+import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
@@ -93,9 +94,13 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.CookieManager
+import com.studyagent.client.core.render.AnkiCardResourcePolicy
+import com.studyagent.client.core.render.AnkiResourceDecision
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -157,6 +162,9 @@ private fun configureAnkiCardWebView(webView: WebView) {
         cacheMode = WebSettings.LOAD_DEFAULT
         defaultTextEncodingName = AnkiCardDocument.ENCODING
         mediaPlaybackRequiresUserGesture = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            safeBrowsingEnabled = true
+        }
         javaScriptCanOpenWindowsAutomatically = false
         setSupportMultipleWindows(false)
         setSupportZoom(false)
@@ -191,6 +199,10 @@ private fun configureAnkiCardWebView(webView: WebView) {
     webView.isLongClickable = true
     // STEP 63 — a wide table scrolls horizontally inside the WebView instead of breaking the layout.
     webView.isHorizontalScrollBarEnabled = true
+    // No persistent browser state or third-party cookies are needed by a card. This is deliberately
+    // applied to the card WebView only; application authentication is never copied into it.
+    CookieManager.getInstance().setAcceptThirdPartyCookies(webView, false)
+    CookieManager.getInstance().setAcceptCookie(false)
     // Transparent until the document paints: no white flash in a dark app, and the page's own
     // background (STEP 40) is what the user sees.
     webView.setBackgroundColor(Color.TRANSPARENT)
@@ -322,6 +334,23 @@ internal class AnkiCardWebViewHost(
             controller.onLoadFailure(current, error.errorCode)
         }
 
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+            // Resource requests have a stricter policy than same-document navigation. There is no
+            // generic file/content provider fallback: media adapters must explicitly provide a
+            // controlled stream in a future capability. Returning a non-success response keeps
+            // blocked resources from becoming accidental network or provider access.
+            val classification = AnkiCardResourcePolicy.classify(request.url?.toString())
+            if (classification.decision == AnkiResourceDecision.BLOCK) {
+                // The request is deliberately not forwarded to the app or provider. Resource
+                // blocking is visible through the browser's normal failed-subresource behavior.
+                return WebResourceResponse(
+                    "text/plain", "UTF-8", 403, "Blocked by card resource policy",
+                    emptyMap(), java.io.ByteArrayInputStream(ByteArray(0))
+                )
+            }
+            return super.shouldInterceptRequest(view, request)
+        }
+
         override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
             // Never proceed(): a card cannot talk Study-Agent into accepting a bad certificate.
             handler.cancel()
@@ -413,6 +442,17 @@ internal class AnkiCardWebViewHost(
             message: String?,
             result: JsResult?
         ): Boolean = suppressDialog(result, AnkiRenderEvent.JavascriptDialogSuppressed.KIND_BEFORE_UNLOAD)
+
+        override fun onCreateWindow(
+            view: WebView?,
+            isDialog: Boolean,
+            isUserGesture: Boolean,
+            resultMsg: android.os.Message?
+        ): Boolean {
+            // No child WebViews or popups. The message is intentionally not acknowledged.
+            currentRequest()?.let { controller.onWebPermissionDenied(it, 0) }
+            return false
+        }
 
         override fun onPermissionRequest(request: PermissionRequest?) {
             // STEP 57 / INV-ANKI-RENDER-31 — denied, always, and counted. Study-Agent's microphone
