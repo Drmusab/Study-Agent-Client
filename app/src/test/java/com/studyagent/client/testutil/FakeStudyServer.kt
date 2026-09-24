@@ -184,7 +184,7 @@ class FakeStudyServer(
             }
 
             is ClientMessage.SkipCard -> nextQuestion()
-            is ClientMessage.RepeatQuestion -> lastQuestion?.let { repeat(duplicateQuestions + 1) { send(it) } }
+            is ClientMessage.RepeatQuestion -> lastQuestion?.let { q -> repeat(duplicateQuestions + 1) { send(q) } }
             is ClientMessage.RequestSessionStatus -> send(sessionStatus())
             is ClientMessage.RequestSessionSnapshot -> send(sessionStatus())
             is ClientMessage.Ping -> send(ServerMessage.Pong())

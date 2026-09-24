@@ -3,9 +3,11 @@ package com.studyagent.client.core.voice.tts
 import com.studyagent.client.core.common.AppLogger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 
 /**
@@ -35,7 +37,7 @@ import kotlinx.coroutines.withTimeout
  * complete or disturb the newer one.
  */
 class RemoteSpeechBackend(
-    private val provider: TtsProvider,
+    override val provider: TtsProvider,
     private val transport: RemoteTtsTransport,
     private val androidDelegate: SpeechBackend,
     private val playerFactory: () -> StreamingSpeechPlayer,
@@ -48,7 +50,6 @@ class RemoteSpeechBackend(
 
     override val id: String = provider.storageId
     override val kind: SpeechBackendKind = SpeechBackendKind.REMOTE
-    override val provider: TtsProvider = provider
 
     private val _status = MutableStateFlow(EngineStatus.UNINITIALIZED)
     override val status: StateFlow<EngineStatus> = _status.asStateFlow()
@@ -102,10 +103,9 @@ class RemoteSpeechBackend(
         }
     }
 
-    fun onSettingsChanged(settings: TtsSettings) {
+    fun onSettingsChanged(@Suppress("UNUSED_PARAMETER") settings: TtsSettings) {
         // Voice/quality changes invalidate nothing structural; the next utterance
         // simply uses the new values. Catalog refresh is user-triggered.
-        val _ = settings
     }
 
     // ------------------------------------------------------------------ speak
@@ -347,16 +347,13 @@ class RemoteSpeechBackend(
     private fun cancelUpstreamQuietly() {
         val streamId = currentStreamId
         if (streamId == null || streamId.startsWith("cache_")) return
-        try {
-            kotlinx.coroutines.coroutineScope {
-                kotlinx.coroutines.launch {
-                    try {
-                        transport.cancel(streamId)
-                    } catch (_: Exception) {
-                    }
-                }
+        // Fire-and-forget on a process-wide scope: cancelling an upstream synthesis must survive
+        // caller cancellation (an in-flight provider call is never erased by UI/lifecycle death).
+        GlobalScope.launch {
+            try {
+                transport.cancel(streamId)
+            } catch (_: Exception) {
             }
-        } catch (_: Exception) {
         }
     }
 

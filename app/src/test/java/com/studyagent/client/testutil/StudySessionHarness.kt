@@ -32,7 +32,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.runCurrent
 
 /**
  * The full JVM study session, with no Android hardware anywhere (§14).
@@ -138,19 +137,19 @@ class StudySessionHarness internal constructor(
     /** Advances past the longest single speech + acoustic gap + recognizer start. */
     fun settle() = advance(SETTLE_MS)
 
-    fun awaitPhase(predicate: (SessionPhase) -> Boolean, maxSteps: Int = 40): Boolean =
+    fun awaitPhase(maxSteps: Int = 40, predicate: (SessionPhase) -> Boolean): Boolean =
         advanceUntil(maxSteps) { predicate(phase) }
 
-    fun awaitWaitingForAnswer(): Boolean = awaitPhase { it is SessionPhase.WaitingForAnswer }
+    fun awaitWaitingForAnswer(maxSteps: Int = 40): Boolean = awaitPhase(maxSteps) { it is SessionPhase.WaitingForAnswer }
 
-    fun awaitWaitingForRating(): Boolean = awaitPhase { it is SessionPhase.WaitingForRating }
+    fun awaitWaitingForRating(maxSteps: Int = 40): Boolean = awaitPhase(maxSteps) { it is SessionPhase.WaitingForRating }
 
-    fun awaitPhaseIs(target: SessionPhase, maxSteps: Int = 40): Boolean = awaitPhase({ it == target }, maxSteps)
+    fun awaitPhaseIs(target: SessionPhase, maxSteps: Int = 40): Boolean = awaitPhase(maxSteps) { it == target }
 
     suspend fun startSession(deck: String? = "Toronto Notes", mode: String = "review_due") {
         repository.startStudy(deck, mode, null)
-        runCurrent()
-        awaitPhase({ it is SessionPhase.SpeakingQuestion || it is SessionPhase.WaitingForAnswer }, maxSteps = 10)
+        testScheduler.runCurrent()
+        awaitPhase(maxSteps = 10) { it is SessionPhase.SpeakingQuestion || it is SessionPhase.WaitingForAnswer }
     }
 
     suspend fun answer(text: String = answerText) {
@@ -159,59 +158,59 @@ class StudySessionHarness internal constructor(
         // on the behaviour under test.
         val cardId = currentCardId ?: server.currentCardId ?: return
         repository.submitSpokenAnswer(cardId, text)
-        runCurrent()
+        testScheduler.runCurrent()
         observe()
     }
 
     suspend fun rate(rating: Rating = Rating.GOOD) {
         repository.rateCurrentCard(rating)
-        runCurrent()
+        testScheduler.runCurrent()
         observe()
     }
 
     suspend fun pause() {
         repository.pauseStudy()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     suspend fun resume() {
         repository.resumeStudy()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     suspend fun end() {
         repository.endStudy()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     suspend fun skip() {
         repository.skipCard()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     suspend fun repeatQuestion() {
         repository.requestRepeat()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     suspend fun hint() {
         repository.requestHint()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     fun stopSpeaking() {
         repository.requestStopSpeaking()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     fun pressToTalk() {
         repository.startManualPushToTalk()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     fun releasePushToTalk() {
         repository.stopManualPushToTalk()
-        runCurrent()
+        testScheduler.runCurrent()
     }
 
     /**

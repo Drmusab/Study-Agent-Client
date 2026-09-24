@@ -118,8 +118,20 @@ class DefaultStudySessionRepositoryTest {
         override val connectionState: StateFlow<ConnectionState> = connectionStateFlow.asStateFlow()
         override val activeProfile: Flow<ServerProfile?> = MutableStateFlow(null)
 
+        private val _connectionSnapshot = MutableStateFlow(com.studyagent.client.core.network.AgentConnectionSnapshot.disconnected())
+        override val connectionSnapshot: StateFlow<com.studyagent.client.core.network.AgentConnectionSnapshot> = _connectionSnapshot.asStateFlow()
+
         override suspend fun connect(profile: ServerProfile?) {}
+        override suspend fun connectWithOverride(profile: ServerProfile?) {}
         override suspend fun disconnect(reason: String) {}
+        override fun testConnection(profile: ServerProfile): Flow<com.studyagent.client.core.network.ConnectionTestResult> = kotlinx.coroutines.flow.flowOf(
+            com.studyagent.client.core.network.ConnectionTestResult(
+                stage = com.studyagent.client.core.network.ConnectionTestResult.TestStage.TRANSPORT,
+                success = true,
+                message = "ok"
+            )
+        )
+        override fun getConnectionDiagnostics(): String = "fake" 
         override suspend fun send(message: ClientMessage): Boolean {
             sent += message
             return true

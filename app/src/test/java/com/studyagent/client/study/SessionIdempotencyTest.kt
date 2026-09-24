@@ -137,7 +137,7 @@ class SessionIdempotencyTest {
         h.connection.deliver(
             com.studyagent.client.core.models.ServerMessage.RatingSaved(
                 sessionId = "s1",
-                cardId = h.currentCardId,
+                cardId = requireNotNull(h.currentCardId),
                 rating = Rating.EASY,
                 messageId = "wrong-ack-1"
             )

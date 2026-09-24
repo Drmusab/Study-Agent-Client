@@ -133,7 +133,7 @@ class StudyAgentChaosTest {
 
     // ------------------------------------------------------------------ the chaos itself
 
-    private fun applyChaos(h: StudySessionHarness, action: Chaos, random: Random) {
+    private suspend fun applyChaos(h: StudySessionHarness, action: Chaos, random: Random) {
         // Every once in a while the engine is allowed to be slow, so the *controllable* TTS states
         // are exercised as well as the fast path. An utterance that is already parked is also
         // completed now and then — a real engine always terminates eventually.

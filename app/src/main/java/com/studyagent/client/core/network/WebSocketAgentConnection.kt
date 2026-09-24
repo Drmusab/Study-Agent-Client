@@ -106,7 +106,7 @@ class WebSocketAgentConnection(
     override val incomingMessages: SharedFlow<ServerMessage> = _incomingMessages.asSharedFlow()
 
     private val _connectionSnapshot = MutableStateFlow(AgentConnectionSnapshot.disconnected())
-    val connectionSnapshot: StateFlow<AgentConnectionSnapshot> = _connectionSnapshot.asStateFlow()
+    override val connectionSnapshot: StateFlow<AgentConnectionSnapshot> = _connectionSnapshot.asStateFlow()
 
     override val currentProfile: ServerProfile?
         get() = connectionProfile
@@ -801,7 +801,7 @@ class WebSocketAgentConnection(
     }
 
     // Manual connect overrides backoff
-    suspend fun connectWithOverride(profile: ServerProfile) {
+    override suspend fun connectWithOverride(profile: ServerProfile) {
         reconnectJob?.cancel()
         reconnectController.reset()
         connect(profile)
@@ -810,7 +810,8 @@ class WebSocketAgentConnection(
     private fun updateSnapshot(
         transport: TransportStatus? = null,
         problem: ConnectionProblem? = null,
-        latencyMs: Long? = null
+        latencyMs: Long? = null,
+        retry: ReconnectInfo? = null
     ) {
         val currentState = _connectionState.value
         val newTransport = transport ?: when {
@@ -835,7 +836,7 @@ class WebSocketAgentConnection(
             authenticated = authenticated,
             latencyMs = latencyMs ?: (currentState as? ConnectionState.Ready)?.latencyMs ?: (currentState as? ConnectionState.Connected)?.latencyMs,
             lastMessageAgeMs = lastAge,
-            retry = (_connectionState.value as? ConnectionState.Reconnecting)?.let {
+            retry = retry ?: (_connectionState.value as? ConnectionState.Reconnecting)?.let {
                 ReconnectInfo(it.attempt, it.maxAttempts, it.nextRetryInMs, it.reason)
             },
             problem = problem ?: _connectionSnapshot.value.problem,

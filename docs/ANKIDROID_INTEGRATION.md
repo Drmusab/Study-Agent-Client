@@ -1091,6 +1091,54 @@ The full provenance table lives in `AnkiDroidApiContract` (GATE 11 section).
 | any | extra reviews, lost counters, identity change, filtered-deck no-change | `Ambiguous` |
 | any | verification read fails | `Ambiguous` |
 
+#### Transaction state diagram (`ReviewCommitLedger`, durable store)
+
+One entry per `ReviewCommitId(sessionId, turnId, backendId)`. The entry is persisted **before** any
+mutation is dispatched and `COMMITTED` is persisted **before** the session may advance to the next
+card. There is no edge out of `COMMITTED`; there is no automatic edge out of `AMBIGUOUS` (recovery
+is a reconciliation outcome, never a blind retry).
+
+```text
+                    ┌────────────────────────────────────────────────────┐
+                    │                                                    │
+                    │   persist BEFORE dispatch (durable write)          │
+                    ▼                                                    │
+              ┌───────────┐  claim/durable-write   ┌────────────┐        │
+ (created) ──▶│NOT_STARTED│ ─────────────────────▶ │ SUBMITTING │──┐     │
+              └───────────┘   (CAS; one claimant)  └────────────┘  │     │
+                    │                                   │          │     │
+                    │ claim lost / evidence says        │ verified │     │
+                    │ nothing was sent                  ▼          │     │
+                    │                          ┌───────────────────┴──┐  │
+                    ├─────────────────────────▶│ COMMITTED (durable)  │  │
+                    │  (Reconciler: proof of   └──────────────────────┘  │
+                    │   the committed mutation)        ▲                 │
+                    │                                  │ complete()      │
+                    │                                  │ (NonCancellable │
+                    │                                  │  durable write) │
+                    │                                  │                 │
+                    │         proof nothing was sent   │                 │
+                    │  ┌───────────────────────────────┴──┐              │
+                    └─▶│ FAILED_SAFE_TO_RETRY            │◀─────────────┘
+                       └──────────────────────────────────┘  safeToRetry
+                                ▲        complete()            ─────────▶ retry resends the
+                                │        from SUBMITTING         identical ReviewCommitId
+                       (verified no-change + safe classification)
+
+                       ┌──────────────────────────────────┐
+          (timeout /   │ AMBIGUOUS                        │
+           unknown /   │  - never auto-retried            │
+           verification│  - never counted as success      │──▶ ReconcileRatingCommit
+           failure) ──▶│  - refuses further mutations     │    (explicit, evidence-based;
+                       └──────────────────────────────────┘     may conclude COMMITTED /
+                                                                FAILED_SAFE_TO_RETRY /
+                                                                remain AMBIGUOUS)
+```
+
+`SUBMITTING` is converted to `AMBIGUOUS` on ledger load after process death
+(`PROCESS_RESTART_WHILE_SUBMITTING`) — the app cannot know whether the mutation landed while it was
+gone. An unreadable ledger makes the store `Health.Unavailable` and every commit is refused.
+
 ### 29.4 Reconciliation and its limits
 
 `reconcileCommit` re-reads the card and compares it with the ledger's baseline over the commit's

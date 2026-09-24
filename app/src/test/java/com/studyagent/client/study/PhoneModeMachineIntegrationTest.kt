@@ -117,6 +117,9 @@ class PhoneModeMachineIntegrationTest {
         private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Connected("localhost", 8000))
         override val connectionState: StateFlow<ConnectionState> = _connectionState
 
+        private val _connectionSnapshot = MutableStateFlow(com.studyagent.client.core.network.AgentConnectionSnapshot.disconnected())
+        override val connectionSnapshot: StateFlow<com.studyagent.client.core.network.AgentConnectionSnapshot> = _connectionSnapshot
+
         private val _incoming = MutableSharedFlow<ServerMessage>(extraBufferCapacity = 64)
         override val incomingMessages: Flow<ServerMessage> = _incoming
 
@@ -125,7 +128,16 @@ class PhoneModeMachineIntegrationTest {
         val sent = mutableListOf<ClientMessage>()
 
         override suspend fun connect(profile: ServerProfile?) {}
+        override suspend fun connectWithOverride(profile: ServerProfile?) {}
         override suspend fun disconnect(reason: String) {}
+        override fun testConnection(profile: ServerProfile): Flow<com.studyagent.client.core.network.ConnectionTestResult> = kotlinx.coroutines.flow.flowOf(
+            com.studyagent.client.core.network.ConnectionTestResult(
+                stage = com.studyagent.client.core.network.ConnectionTestResult.TestStage.TRANSPORT,
+                success = true,
+                message = "ok"
+            )
+        )
+        override fun getConnectionDiagnostics(): String = "fake"
         override suspend fun send(message: ClientMessage): Boolean {
             sent += message
             return true

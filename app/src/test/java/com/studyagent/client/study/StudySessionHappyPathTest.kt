@@ -117,7 +117,7 @@ class StudySessionHappyPathTest {
         )
         var cursor = 0
         for (expected in order) {
-            cursor = names.indexOf(expected, cursor)
+            cursor = (cursor until names.size).firstOrNull { names[it] == expected } ?: -1
             assertTrue(
                 "event '$expected' is missing or out of order.\nactual=${names.joinToString()}",
                 cursor >= 0

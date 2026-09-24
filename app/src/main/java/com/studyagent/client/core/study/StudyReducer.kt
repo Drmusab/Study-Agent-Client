@@ -892,7 +892,11 @@ object StudyReducer {
         val newState = state.copy(
             phase = SessionPhase.WaitingForFirstCard, // waiting for next card; next question will bring SpeakingQuestion
             ledger = ledger2,
-            pendingAction = null
+            pendingAction = null,
+            // The evaluation belongs to the answered turn; the turn is complete and must retire it
+            // (StudySessionMachine.checkInvariants: evaluation is legal only while feedback/rating
+            // is live for that turn).
+            cardTurn = turn.copy(evaluation = null)
         ).recordTransition(event, state.phase, SessionPhase.WaitingForFirstCard)
             .rememberServerMessageId(event.messageId)
 
@@ -1189,7 +1193,8 @@ object StudyReducer {
             pendingAction = null,
             pauseContext = null,
             activeSpeechEffectId = null,
-            activeRecognitionEffectId = null
+            activeRecognitionEffectId = null,
+            cardTurn = state.cardTurn?.copy(evaluation = null)
         ).recordTransition(event, state.phase, SessionPhase.Finished)
             .rememberServerMessageId(event.messageId)
         return Transition(newState, listOf(StudyEffect.Voice.CancelSpeech("session-finished"), StudyEffect.Voice.CancelRecognition("session-finished"), StudyEffect.CancelTimeout(state.pendingAction?.messageId ?: ""), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Finished, state.currentCardId, state.epoch)))
@@ -1202,7 +1207,8 @@ object StudyReducer {
         // Freeze voice §35
         val newState = state.copy(
             phase = SessionPhase.Recovering,
-            connection = SessionConnectionStatus.DISCONNECTED
+            connection = SessionConnectionStatus.DISCONNECTED,
+            cardTurn = state.cardTurn?.copy(evaluation = null)
         ).recordTransition(event, state.phase, SessionPhase.Recovering)
         return Transition(newState, listOf(StudyEffect.Voice.CancelSpeech("connection-lost"), StudyEffect.Voice.CancelRecognition("connection-lost"), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Recovering, state.currentCardId, state.epoch)))
     }
@@ -1217,7 +1223,8 @@ object StudyReducer {
         val send = StudyEffect.Network.Send(msgId, ClientMessage.RequestSessionStatus(sessionId = state.session?.sessionId, messageId = msgId))
         val newState = state.copy(
             connection = SessionConnectionStatus.RECOVERING,
-            phase = SessionPhase.Recovering
+            phase = SessionPhase.Recovering,
+            cardTurn = state.cardTurn?.copy(evaluation = null)
         ).recordTransition(event, state.phase, SessionPhase.Recovering)
         return Transition(newState, listOf(send, StudyEffect.ScheduleTimeout(msgId, PendingAction.timeoutFor(PendingAction.ActionType.REQUEST_SESSION_STATUS), PendingAction.ActionType.REQUEST_SESSION_STATUS), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Recovering, state.currentCardId, state.epoch)))
     }
