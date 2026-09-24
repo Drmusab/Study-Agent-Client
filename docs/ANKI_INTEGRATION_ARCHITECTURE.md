@@ -1574,3 +1574,13 @@ HTML; `media = false` until GATE 09.
 executable specifications, but no emulator or device was available in the gate environment, so the
 Chromium-side rows above are asserted, not observed. See the GATE 08 doc §14 for the exact
 environment block.
+
+## GATE 09 — rich card and controlled WebView boundary
+
+Rich card presentation extends the existing GATE 08 renderer; it does not create a second WebView
+or a second scheduler. `AnkiMediaRef` remains a logical backend reference. Resolution is through
+the read-only `AnkiMediaResolver`; Android provider details stay in the data layer. The verified
+AnkiDroid v2.24.1 `ReviewInfo.MEDIA_FILES` contract supplies filenames only and no public readable
+media URI/stream. Consequently the current adapter reports media as `PROVIDER_UNAVAILABLE` rather
+than deriving a private AnkiDroid path. See [`ANKI_WEBVIEW_SECURITY.md`](ANKI_WEBVIEW_SECURITY.md)
+for the actual policy matrix and residual risks.
