@@ -1,6 +1,7 @@
 package com.studyagent.client.anki
 
 import android.content.Context
+import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -522,6 +523,7 @@ class AnkiCardRenderInstrumentedTest {
                     overviewMode = it.loadWithOverviewMode,
                     supportZoom = it.supportZoom(),
                     builtInZoom = it.builtInZoomControls,
+                    actionModeMenuItems = it.disabledActionModeMenuItems,
                     encoding = it.defaultTextEncodingName
                 )
             }
@@ -540,6 +542,22 @@ class AnkiCardRenderInstrumentedTest {
         assertFalse(settings.supportZoom)
         assertFalse(settings.builtInZoom)
         assertEquals("UTF-8", settings.encoding)
+
+        // STEP 141/§142 — selection stays available (a reviewer must be able to copy a dose, a gene name
+        // or an Arabic term out of a card) but its menu is bounded: "Web search" is switched off so
+        // selected card text cannot be handed to a third-party search engine. Long press is routed to
+        // that selection, and `registerForContextMenu` is never called, so the generic browser menu
+        // (open in new tab, download image, save link as) does not exist and the link policy stays the
+        // card's only navigation path (INV-ANKI-RENDER-16).
+        assertEquals(
+            "web search must be the disabled action-mode item (STEP 141)",
+            WebSettings.MENU_ITEM_WEB_SEARCH,
+            settings.actionModeMenuItems
+        )
+        assertTrue(
+            "long press must reach text selection (STEP 142)",
+            onMainValue { currentWebView().isLongClickable }
+        )
     }
 
     private data class Settings(
@@ -554,6 +572,7 @@ class AnkiCardRenderInstrumentedTest {
         val overviewMode: Boolean,
         val supportZoom: Boolean,
         val builtInZoom: Boolean,
+        val actionModeMenuItems: Int,
         val encoding: String
     )
 

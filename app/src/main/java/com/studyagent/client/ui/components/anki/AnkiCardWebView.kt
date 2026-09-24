@@ -51,6 +51,11 @@ package com.studyagent.client.ui.components.anki
  * useWideViewPort/loadWithOverviewMode false — the layout viewport equals the view width, i.e.
  *                                    `width=device-width` behaviour (STEP 23)
  * defaultTextEncodingName            UTF-8 — Arabic, diacritics, emoji, math symbols (STEP 79, INV-27)
+ * textSelection / action mode        selection stays ON (long press selects — STEP 141): a reviewer must
+ *                                    be able to copy a dose, a gene name or an Arabic term. The selection
+ *                                    *menu* is bounded by `disabledActionModeMenuItems = MENU_ITEM_WEB_SEARCH`
+ *                                    so selected card text cannot be handed to a search engine; Copy /
+ *                                    Select all / Share / process-text remain. No item can navigate.
  * javaScriptCanOpenWindowsAutomatically / setSupportMultipleWindows  false — not a browser (STEP 48/§56)
  * userAgentString                    untouched — no AnkiDroid/desktop-Anki spoofing without evidence
  *                                    (STEP 136)
@@ -58,6 +63,12 @@ package com.studyagent.client.ui.components.anki
  * force-dark / algorithmic darkening NOT USED — blanket inversion destroys images and dark-authored
  *                                    cards (STEP 42, INV-ANKI-RENDER-15); night mode is `color-scheme`
  * setWebContentsDebuggingEnabled     BuildConfig.DEBUG only (STEP 135)
+ * context menu                       NEVER REGISTERED (STEP 142) — `registerForContextMenu` is not called
+ *                                    on this WebView, so the generic browser menu (open in new tab,
+ *                                    download image, save link) does not exist. Long press belongs to
+ *                                    text selection; a link under a long press still resolves through
+ *                                    `shouldOverrideUrlLoading`, so the link policy stays the only
+ *                                    navigation path (STEP 44-§47).
  * addJavascriptInterface             NEVER CALLED — no native bridge for arbitrary card HTML
  *                                    (STEP 09, INV-ANKI-RENDER-08)
  */
@@ -153,6 +164,14 @@ private fun configureAnkiCardWebView(webView: WebView) {
         displayZoomControls = false
         useWideViewPort = false
         loadWithOverviewMode = false
+        // STEP 141/§142 — text selection stays ENABLED (long press selects, the Chromium default), so a
+        // reviewer can copy a dose, a gene name or an Arabic term out of a card instead of transcribing
+        // it by hand. What IS bounded is the selection menu: "Web search" would send the selected card
+        // text to a third-party search engine, which is card content leaving the app under a gesture the
+        // user reads as local. It is switched off here. Copy, Select all and process-text remain, and
+        // Share is kept because it is an explicit user action through a visible chooser. None of these
+        // items can navigate the reviewer.
+        disabledActionModeMenuItems = WebSettings.MENU_ITEM_WEB_SEARCH
         // Deliberately untouched: mixedContentMode (strict default), allowUniversalAccessFromFileURLs
         // and allowFileAccessFromFileURLs (false by default — STEP 133), userAgentString (STEP 136),
         // and every force-dark / algorithmic-darkening API (INV-ANKI-RENDER-15).
@@ -164,6 +183,12 @@ private fun configureAnkiCardWebView(webView: WebView) {
     webView.isFocusableInTouchMode = false
     // STEP 140 — the WebView keeps its own touch handling; nothing here intercepts gestures.
     webView.overScrollMode = View.OVER_SCROLL_NEVER
+    // STEP 142 — long press belongs to text selection (above), and `registerForContextMenu` is
+    // deliberately never called on this WebView, so the generic browser menu (open in new tab,
+    // download image, save link as) simply does not exist here. A link under a long press still
+    // resolves through `shouldOverrideUrlLoading`, which keeps the link policy the only navigation
+    // path a card has (STEP 44-§47, INV-ANKI-RENDER-16).
+    webView.isLongClickable = true
     // STEP 63 — a wide table scrolls horizontally inside the WebView instead of breaking the layout.
     webView.isHorizontalScrollBarEnabled = true
     // Transparent until the document paints: no white flash in a dark app, and the page's own
