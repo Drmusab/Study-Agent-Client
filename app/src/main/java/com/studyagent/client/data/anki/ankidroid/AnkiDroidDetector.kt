@@ -295,6 +295,13 @@ class DefaultAnkiDroidDetector(
         AnkiDroidFailureCategory.UNEXPECTED -> AnkiAvailability.Fault(
             AnkiError.Unknown(cause = failure.exceptionClass)
         )
+
+        // GATE 07 added this category without updating this exhaustive mapping (pre-existing
+        // compile error found in GATE 11). A missing entity during a health probe is a classified
+        // fault, never "not installed" and never "ready".
+        AnkiDroidFailureCategory.ENTITY_NOT_FOUND -> AnkiAvailability.Fault(
+            AnkiError.QueryFailure(causeCategory = "entity-not-found")
+        )
     }
 
     /**

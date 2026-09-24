@@ -117,6 +117,18 @@ interface StudySessionRepository {
 
     /** User chose *Wait for headphones*: dismiss the prompt, stay paused. */
     fun dismissAudioRouteAttention() {}
+
+    /**
+     * GATE 11 — status of the current local rating transaction (saving / not saved / unconfirmed),
+     * backend-neutral. `null` = this repository has no local rating commits.
+     */
+    val ratingCommitRecovery: StateFlow<com.studyagent.client.core.study.RatingCommitRecoveryUi?>? get() = null
+
+    /** GATE 11 — explicit retry of a proven-not-applied rating: same commit id, same rating. */
+    suspend fun retryRatingCommit() {}
+
+    /** GATE 11 — read-only reconciliation of an unconfirmed rating. Never re-sends it. */
+    suspend fun reconcileRatingCommit() {}
 }
 
 /**

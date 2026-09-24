@@ -99,7 +99,7 @@ object StudyReducer {
             is StudyEvent.UserPauseRequested -> handlePauseRequested(state, event, clockMs)
             is StudyEvent.ServerSessionPaused -> handleServerPaused(state, event)
             is StudyEvent.UserResumeRequested -> handleResumeRequested(state, event, clockMs)
-            is StudyEvent.ServerSessionResumed -> handleServerResumed(state, event, clockMs)
+            is StudyEvent.ServerSessionResumed -> handleServerResumed(state, event)
             is StudyEvent.UserEndRequested -> handleEndRequested(state, event, clockMs)
             is StudyEvent.ServerSessionFinished -> handleSessionFinished(state, event)
             is StudyEvent.ConnectionLost -> handleConnectionLost(state, event, clockMs)
@@ -188,7 +188,8 @@ object StudyReducer {
                         moved(state.copy(
                             phase = SessionPhase.WaitingForFirstCard,
                             session = StudySessionSnapshot(context.studySessionId, "Anki review", startedAtEpochMs = now),
-                            anki = local.copy(reviewSession = result.value)
+                            anki = local.copy(reviewSession = result.value,
+                                priorUnresolvedCommits = event.priorUnresolvedCommits)
                         ), listOf(AnkiStudyEffect.Next(state.epoch, result.value)))
                     }
                 }
@@ -207,7 +208,10 @@ object StudyReducer {
                         if (turn.studySessionId != context.studySessionId || turn.backendId != context.backendId ||
                             turn.scheduledCard.deckRef != context.deckRef ||
                             turn.cardRef.collectionKey != context.deckRef?.collectionKey) return failed(AnkiError.SessionInvalid())
-                        moved(state.copy(anki = local.copy(turn = turn)),
+                        // A new presentation starts a new transaction: the previous (COMMITTED)
+                        // commit is gone, so a late duplicate result for it is stale by identity.
+                        moved(state.copy(anki = local.copy(turn = turn, commit = null, transcript = null,
+                            turnPresentedAtMs = null, failure = null)),
                             listOf(AnkiStudyEffect.Hydrate(state.epoch, turn)))
                     }
                 }
@@ -233,7 +237,7 @@ object StudyReducer {
                             turn.remaining, speak, null, turn.turnId.value
                         ), now)
                         ready.copy(newState = ready.newState.copy(
-                            anki = local.copy(turn = attached.value),
+                            anki = local.copy(turn = attached.value, turnPresentedAtMs = now),
                             activeSpeechEffectId = if (speak) ready.newState.activeSpeechEffectId else null
                         ), effects = ready.effects.filterNot {
                             // Voice-disabled/manual path never opens a microphone automatically.
@@ -273,14 +277,57 @@ object StudyReducer {
             is StudyEvent.UserRequestAnswer -> {
                 if (event.cardId != state.currentCardId) reject("stale-card") else reveal()
             }
-            is AnkiStudyEvent.SelectRating -> {
-                if (event.epoch != state.epoch || event.turnId != local.turn?.turnId ||
-                    state.phase != SessionPhase.WaitingForRating || local.selectedRating != null) {
-                    reject("stale-or-duplicate-anki-rating")
-                } else if ((local.turn?.ratingOptions as? AnkiRatingOptions.Known)?.supports(event.rating) != true) {
-                    reject("unsupported-anki-rating")
-                } else moved(state.copy(anki = local.copy(selectedRating = event.rating)))
-                // Intentionally NO effect, ledger claim, counter increment or next-card query.
+            is AnkiStudyEvent.SelectRating -> selectRating(state, local, event, now, cancelVoice)
+            is AnkiStudyEvent.RatingCommitStarted -> {
+                val commit = local.commit
+                if (event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ||
+                    state.phase != SessionPhase.SubmittingRating || commit.state != ReviewCommitState.NOT_STARTED
+                ) reject("stale-anki-commit-start")
+                else moved(state.copy(anki = local.copy(commit = commit.copy(state = ReviewCommitState.SUBMITTING))))
+            }
+            is AnkiStudyEvent.RatingCommitResolved ->
+                resolveAnkiCommit(state, local, event, event.epoch, event.commitId, event.outcome, reconciliation = false, now = now)
+            is AnkiStudyEvent.RatingCommitReconciled ->
+                resolveAnkiCommit(state, local, event, event.epoch, event.commitId, event.outcome, reconciliation = true, now = now)
+            is AnkiStudyEvent.RetryRatingCommit -> {
+                val commit = local.commit
+                when {
+                    event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ->
+                        reject("stale-anki-retry")
+                    state.phase != SessionPhase.RatingCommitFailed || commit.state != ReviewCommitState.FAILED ->
+                        reject("illegal-phase-for-anki-retry")
+                    // Explicit and only when proven safe: never after AMBIGUOUS, never automatic.
+                    !commit.safeToRetry -> reject("anki-retry-not-safe")
+                    else -> moved(state.copy(
+                        phase = SessionPhase.SubmittingRating,
+                        anki = local.copy(commit = commit.copy(state = ReviewCommitState.NOT_STARTED,
+                            attempt = commit.attempt + 1, safeToRetry = false, failureCategory = null)),
+                        error = null
+                    ), listOf(AnkiStudyEffect.CommitRating(state.epoch, commit.request, retry = true)))
+                }
+            }
+            is AnkiStudyEvent.ReconcileRatingCommit -> {
+                val commit = local.commit
+                when {
+                    event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ->
+                        reject("stale-anki-reconcile")
+                    state.phase != SessionPhase.ReconciliationRequired || commit.state != ReviewCommitState.AMBIGUOUS ->
+                        reject("illegal-phase-for-anki-reconcile")
+                    commit.reconciling -> reject("anki-reconcile-in-flight")
+                    else -> moved(state.copy(anki = local.copy(commit = commit.copy(reconciling = true))),
+                        listOf(AnkiStudyEffect.ReconcileCommit(state.epoch, commit.commitId)))
+                }
+            }
+            is AnkiStudyEvent.RetryNextCard -> {
+                val session = local.reviewSession
+                val commit = local.commit
+                // Read-only retry: allowed only when no turn is open and nothing is unresolved, so
+                // it can never replay a rating (a COMMITTED commit is never re-sent).
+                if (event.epoch != state.epoch || session == null || state.phase !is SessionPhase.Error ||
+                    local.turn != null || (commit != null && commit.state != ReviewCommitState.COMMITTED)
+                ) reject("illegal-anki-next-retry")
+                else moved(state.copy(phase = SessionPhase.WaitingForFirstCard, error = null,
+                    anki = local.copy(failure = null)), listOf(AnkiStudyEffect.Next(state.epoch, session)))
             }
             is StudyEvent.UserRateCard -> {
                 val turn = local.turn ?: return reject("no-turn")
@@ -305,11 +352,14 @@ object StudyReducer {
                     pauseContext = null
                 )) // Safe manual restart; explicit Repeat can restart audio without querying Anki.
             }
+            // Ending never cancels an in-flight commit (it runs in its own job, is persisted, and its
+            // late result is rejected as terminal/stale) and never sends another mutation.
             is StudyEvent.UserEndRequested -> moved(state.copy(
                 phase = SessionPhase.Finished,
                 anki = local.copy(completion = AnkiStudyCompletion.USER_ENDED),
                 activeSpeechEffectId = null, activeRecognitionEffectId = null
-            ), cancelVoice + AnkiStudyEffect.CancelReads)
+            ), cancelVoice + AnkiStudyEffect.CancelReads +
+                listOfNotNull(local.reviewSession?.let { AnkiStudyEffect.EndReview(it) }))
             is StudyEvent.UserStopSpeaking -> {
                 if (state.phase != SessionPhase.SpeakingQuestion) reject("not-speaking") else moved(state.copy(
                     phase = SessionPhase.WaitingForAnswer, activeSpeechEffectId = null,
@@ -320,6 +370,125 @@ object StudyReducer {
             // Fail closed: no server reconciliation, remote ratings, skip or uncorrelated callbacks.
             else -> reject("unsupported-anki-interaction")
         }
+    }
+
+    /**
+     * GATE 11 — RatingSelected → CommitPrepared in one pure step: the first accepted rating becomes
+     * the turn's immutable commit request and the machine enters SubmittingRating. Touch, voice,
+     * headset and keyboard all arrive here as the same event, so any later rating — identical or
+     * different — is rejected ("first accepted rating wins"). The reducer never calls a backend and
+     * never advances: the next card is requested only from a COMMITTED outcome.
+     */
+    private fun selectRating(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: AnkiStudyEvent.SelectRating,
+        now: Long,
+        cancelVoice: List<StudyEffect>
+    ): Transition {
+        val turn = local.turn
+        val session = local.reviewSession
+        val existing = local.commit
+        if (event.epoch != state.epoch || turn == null || event.turnId != turn.turnId) {
+            return Transition.reject(state, event, "stale-anki-rating")
+        }
+        if (existing != null) {
+            return Transition.reject(state, event,
+                if (existing.rating == event.rating) "duplicate-anki-rating" else "anki-rating-locked-first-wins")
+        }
+        if (state.phase != SessionPhase.WaitingForRating) return Transition.reject(state, event, "illegal-phase-for-anki-rating")
+        if (session == null) return Transition.reject(state, event, "no-anki-review-session")
+        val options = turn.ratingOptions
+        if (options !is AnkiRatingOptions.Known) return Transition.reject(state, event, "anki-rating-options-unmapped")
+        if (!options.supports(event.rating)) return Transition.reject(state, event, "unsupported-anki-rating")
+        val request = CommitRatingRequest(
+            commitId = turn.commitId,
+            card = turn.cardRef,
+            rating = event.rating,
+            ratedAtEpochMs = now.coerceAtLeast(0L),
+            // Question presentation → rating selection, on the machine clock (never fabricated).
+            answerDurationMs = local.turnPresentedAtMs?.let { (now - it).coerceAtLeast(0L) }
+        )
+        val next = state.copy(
+            phase = SessionPhase.SubmittingRating,
+            anki = local.copy(commit = AnkiRatingCommit(request, ReviewCommitState.NOT_STARTED)),
+            error = null,
+            activeSpeechEffectId = null,
+            activeRecognitionEffectId = null
+        ).recordTransition(event, state.phase, SessionPhase.SubmittingRating)
+        return Transition(next, cancelVoice + AnkiStudyEffect.CommitRating(state.epoch, request))
+    }
+
+    /**
+     * GATE 11 — consumes a persisted commit outcome. Correlation first (epoch, commit id, study
+     * session, turn): a result for anything else is rejected — the executor has already written it
+     * to the ledger, so a stale result updates the ledger but never the current turn. COMMITTED is
+     * the only path to the next card, taken exactly once; a duplicate COMMITTED is rejected.
+     */
+    private fun resolveAnkiCommit(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: StudyEvent,
+        epoch: Long,
+        commitId: ReviewCommitId,
+        outcome: AnkiCommitOutcome,
+        reconciliation: Boolean,
+        now: Long
+    ): Transition {
+        val commit = local.commit
+        val turn = local.turn
+        val session = local.reviewSession
+        if (epoch != state.epoch || commit == null || commit.commitId != commitId || session == null ||
+            commitId.studySessionId != session.context.studySessionId
+        ) return Transition.reject(state, event, "stale-anki-commit-result")
+        if (commit.state == ReviewCommitState.COMMITTED) return Transition.reject(state, event, "duplicate-anki-commit-result")
+        if (turn == null || turn.turnId != commitId.turnId) return Transition.reject(state, event, "stale-anki-commit-result")
+        val expected = if (reconciliation) SessionPhase.ReconciliationRequired else SessionPhase.SubmittingRating
+        if (state.phase != expected) return Transition.reject(state, event, "illegal-phase-for-anki-commit-result")
+        if (reconciliation && !commit.reconciling) return Transition.reject(state, event, "unrequested-anki-reconciliation")
+
+        val next = when (outcome) {
+            is AnkiCommitOutcome.Committed -> state.copy(
+                phase = SessionPhase.WaitingForFirstCard,
+                anki = local.copy(turn = null, transcript = null, turnPresentedAtMs = null,
+                    commit = commit.copy(state = ReviewCommitState.COMMITTED, reconciling = false,
+                        safeToRetry = false, failureCategory = null)),
+                cardTurn = null,
+                // Counters move only after COMMITTED (never on selection, failure or ambiguity).
+                session = state.session?.copy(totalReviewedInSession = state.session.totalReviewedInSession + 1),
+                error = null,
+                activeSpeechEffectId = null,
+                activeRecognitionEffectId = null
+            )
+            is AnkiCommitOutcome.Failed -> state.copy(
+                phase = SessionPhase.RatingCommitFailed,
+                anki = local.copy(commit = commit.copy(state = ReviewCommitState.FAILED, reconciling = false,
+                    safeToRetry = outcome.safeToRetry, failureCategory = outcome.category)),
+                error = SessionProblemHolder(
+                    SessionProblem.ANKI_RATING_NOT_SAVED,
+                    if (outcome.safeToRetry) "Anki did not save this rating. Retry the same rating or end the session."
+                    else "Anki did not accept this rating. End the session; Anki will show the card again when it is due.",
+                    true, now
+                )
+            )
+            is AnkiCommitOutcome.Ambiguous -> state.copy(
+                phase = SessionPhase.ReconciliationRequired,
+                anki = local.copy(commit = commit.copy(state = ReviewCommitState.AMBIGUOUS, reconciling = false,
+                    safeToRetry = false, failureCategory = outcome.category)),
+                error = SessionProblemHolder(
+                    SessionProblem.ANKI_RATING_UNCONFIRMED,
+                    "Study-Agent cannot confirm whether Anki saved this rating, so it will not send it again. " +
+                        "Check again, or end the session — a new session asks Anki's scheduler what is next.",
+                    true, now
+                )
+            )
+        }.recordTransition(event, state.phase, when (outcome) {
+            is AnkiCommitOutcome.Committed -> SessionPhase.WaitingForFirstCard
+            is AnkiCommitOutcome.Failed -> SessionPhase.RatingCommitFailed
+            is AnkiCommitOutcome.Ambiguous -> SessionPhase.ReconciliationRequired
+        })
+        val effects = if (outcome is AnkiCommitOutcome.Committed) listOf(AnkiStudyEffect.Next(state.epoch, session)) else emptyList()
+        return Transition(next, effects)
     }
 
     // ------------------------------------------------------------------ helpers
@@ -1270,14 +1439,13 @@ object StudyReducer {
         }
     }
 
-    companion object {
-        /**
-         * How many accepted card-turn ids are retained (§21).
-         *
-         * Sized for identity/race diagnosis — a stale callback is at most a few turns behind — and
-         * deliberately far smaller than a session's card count, so a 1000-card endurance run holds
-         * the same 64 strings as a 10-card one.
-         */
-        const val CARD_TURN_HISTORY_LIMIT = 64
-    }
+    /**
+     * How many accepted card-turn ids are retained (§21).
+     *
+     * Sized for identity/race diagnosis — a stale callback is at most a few turns behind — and
+     * deliberately far smaller than a session's card count, so a 1000-card endurance run holds
+     * the same 64 strings as a 10-card one.
+     */
+    const val CARD_TURN_HISTORY_LIMIT = 64
+
 }

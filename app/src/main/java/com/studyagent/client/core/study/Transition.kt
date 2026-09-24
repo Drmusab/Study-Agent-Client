@@ -10,20 +10,6 @@ data class Transition(
     val rejectionReason: String? = null
 ) {
     companion object {
-        fun stay(state: SessionMachineState, reason: String, effect: StudyEffect? = null): Transition =
-            Transition(
-                newState = state.recordRejected(
-                    // synthetic rejected event will be replaced by caller
-                    object : StudyEvent {
-                        override val debugName: String get() = "Rejected"
-                    },
-                    reason
-                ),
-                effects = listOfNotNull(effect),
-                accepted = false,
-                rejectionReason = reason
-            )
-
         fun reject(state: SessionMachineState, event: StudyEvent, reason: String): Transition {
             val withLog = state.recordRejected(event, reason)
             return Transition(

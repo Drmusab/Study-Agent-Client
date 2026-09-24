@@ -176,6 +176,13 @@ class AndroidAnkiDroidProbe(
         mapper: (AnkiDroidProviderRow) -> T
     ): ProviderQueryResult<T> =
         providerClient.safeQuery(authority, path, projection, selection, selectionArgs, sortOrder, mapper)
+
+    /** GATE 11 — the single write primitive has one owner too; the probe only delegates. */
+    override suspend fun safeUpdate(
+        authority: String,
+        path: String,
+        values: List<ProviderValue>
+    ): ProviderUpdateResult = providerClient.safeUpdate(authority, path, values)
 }
 
 /**

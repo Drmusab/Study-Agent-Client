@@ -272,3 +272,62 @@ The machine stays the single authority of **user-flow** state when Anki backends
 * **Rating transaction joins the ledger model.** `ReviewCommitId` (backend + study session + review turn) extends the existing exactly-once discipline to the *scheduler*: one turn ⇒ at most one mutation; `AMBIGUOUS` commit outcomes block progression until reconciled (INV-ANKI-02/08/11). The existing `CardTurn.turnId` IS the review-turn identity the commit id builds on.
 * **Connection loss becomes backend-scoped (future change, hotspot H4).** Today `observeConnection` forces `Recovering` for any active session. With an `ANKIDROID_LOCAL` session, PC connection loss must not pause local study — the reaction is scoped by the session's resolved Anki backend (GATE 06). Until then the machine's PC behavior is unchanged.
 * **Reconciliation gains a second form.** `SessionReconciler` (protocol snapshots) remains the PC form; the Anki form reconciles the session context, commit ledger and current card against the backend before advancing after restart or ambiguous commits (contract §11, implemented GATE 06).
+
+## 17. GATE 11 — The local Anki rating transaction
+
+The rating is the one place where the local Anki path mutates the user's collection. It is a
+transaction with a durable ledger, and the machine never advances on selection alone.
+
+```text
+WaitingForRating ──SelectRating / UserRateCard (touch, voice, headset, keyboard)──▶ SubmittingRating
+   commit = AnkiRatingCommit(request, NOT_STARTED)      effect: CommitRating(epoch, request)
+        executor: ledger NOT_STARTED (durable) → baseline evidence → ledger SUBMITTING (durable)
+        ──RatingCommitStarted──▶ commit.state = SUBMITTING         (backend call in flight)
+        ──RatingCommitResolved(Committed)──▶ WaitingForFirstCard   effect: Next — exactly once
+        ──RatingCommitResolved(Failed)─────▶ RatingCommitFailed    (Retry if safe · End)
+        ──RatingCommitResolved(Ambiguous)──▶ ReconciliationRequired (Check again · End)
+ReconciliationRequired ──ReconcileRatingCommit──▶ (read-only) ──RatingCommitReconciled──▶
+        Committed → WaitingForFirstCard + Next · Failed → RatingCommitFailed · Ambiguous → stays
+RatingCommitFailed ──RetryRatingCommit (safeToRetry only)──▶ SubmittingRating (same request)
+```
+
+* **Phases.** Two phases were added — `RatingCommitFailed` (known NOT applied) and
+  `ReconciliationRequired` (may have been applied). `SubmittingRating` is reused; the rating is
+  data (`anki.commit.request.rating`, `StudyState.Loading.pendingRating`), never a per-rating state.
+  "RatingSelected" and "CommitPrepared" are one pure reducer step; "LoadingNextCard" is the existing
+  `WaitingForFirstCard` reached only from COMMITTED.
+* **Correlation.** Every commit event carries the `ReviewCommitId` (backend + study session +
+  review turn) and the epoch. A result for another epoch, session, turn or commit id is rejected
+  (`stale-anki-commit-result`); a second COMMITTED for the same commit is rejected
+  (`duplicate-anki-commit-result`). The executor has already written the ledger, so a stale result
+  updates the ledger but never the current turn.
+* **Conflicting ratings.** *First accepted rating wins.* Selection immediately prepares the commit,
+  so any later rating for the turn — same or different, from any input — is rejected
+  (`duplicate-anki-rating`, `anki-rating-locked-first-wins`). There is no "change my rating"
+  window once the commit is prepared; a retry re-sends the recorded request verbatim.
+* **Answer time.** `answerDurationMs` = question presentation (hydrated turn shown) → rating
+  selection, on the machine clock, including question speech. Anki caps it with the deck's maximum
+  answer time. When unknown it is omitted (Anki then records its cap) — never fabricated.
+* **Counters.** `totalReviewedInSession` increments only in the COMMITTED branch.
+* **Next-card failure.** A failed `Next` after COMMITTED goes to `Error(ANKI_UNAVAILABLE)` with the
+  commit still COMMITTED. `RetryNextCard` re-issues the *read* only when no turn is open and the
+  commit is COMMITTED or absent — the rating is never re-sent.
+* **Write lane.** `CommitRating`, `ReconcileCommit` and `EndReview` run on one ordered lane that is
+  independent of the cancellable read job. Ending the session, stopping, backgrounding or recreating
+  the UI never cancels an in-flight commit, and `EndReview` cannot release the backend session
+  ahead of a commit that was emitted before it.
+* **Process death** (ledger survives, the machine does not):
+
+  | Ledger state at death | After restart |
+  |---|---|
+  | NOT_STARTED | restorable: provably never dispatched; re-executing the same commit claims and dispatches once |
+  | SUBMITTING | AMBIGUOUS (persisted on first load); never re-sent; recovery = reconcile or end |
+  | COMMITTED | answered from the ledger (`ledger_replay`); backend never called again |
+  | FAILED | kept with its `safeToRetry` decision |
+  | AMBIGUOUS | kept; surfaced as "earlier rating not confirmed" when the next session begins |
+
+* **Exactly-once wording.** The guarantee is *at most one intentional scheduler mutation per review
+  turn issued by Study-Agent*, with every uncertain outcome surfaced as AMBIGUOUS. It is not a claim
+  of distributed exactly-once delivery: other actors (AnkiDroid itself, sync) can change a card at
+  any time, and a provider transaction that outlives a killed client process is a documented
+  residual risk.

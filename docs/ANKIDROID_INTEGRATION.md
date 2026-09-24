@@ -1035,3 +1035,82 @@ endpoint or content URI. Study-Agent therefore does not infer `collection.media`
 observable `PROVIDER_UNAVAILABLE` degradation for valid filenames until a supported public stream
 contract exists. This is intentional and release-safe. WebView policy and compatibility status are
 in [`ANKI_WEBVIEW_SECURITY.md`](ANKI_WEBVIEW_SECURITY.md).
+
+## 29. GATE 11 — Rating commit through the provider (v2.24.1 pin)
+
+### 29.1 Verified contract (source read, not memory)
+
+Read for this gate from `ankidroid/Anki-Android` tag `v2.24.1` (`CardContentProvider.update`
+`SCHEDULE` branch, private `answerCard`/`getCard`, `FlashCardsContract.ReviewInfo`,
+`libanki/sched/Ease`, `Scheduler.answerCard`) and from `ankitects/anki` tag `25.09.2` (the backend
+v2.24.1 pins: `ankiBackend = 0.1.64-anki25.09.2`), `rslib/src/scheduler/answering/{mod,preview}.rs`.
+The full provenance table lives in `AnkiDroidApiContract` (GATE 11 section).
+
+| Fact | Value |
+|---|---|
+| Call | `update(content://<authority>/schedule, {note_id, ord, answer_ease, time_taken}, null, null)` |
+| Ease | `answer_ease` 1/2/3/4 → `Ease.fromValue` → `CardAnswer.Rating.forNumber(v - 1)` = AGAIN/HARD/GOOD/EASY |
+| Answer time | `time_taken` in **milliseconds**; omitted ⇒ Anki records its cap |
+| Pre-mutation refusals | `SecurityException` (permission check is the first statement); `IllegalArgumentException` (provider unresolvable, unknown note/ord) |
+| Provider death mid-call | `ContentResolver.update` returns `-1` |
+| Atomicity | rslib `transact(Op::AnswerCard)`: card + revlog + deck stats commit together or not at all |
+
+### 29.2 Two provider behaviours that shape the design
+
+1. **`1` is not proof.** The provider's `answerCard` catches `RuntimeException` from
+   `col.sched.answerCard`, logs it, and `update` still answers `1`. AnkiDroid issue #20763 is this
+   exact path (`NoSuchElementException` swallowed). "No exception, one row" is therefore never
+   treated as success; every dispatched outcome is decided by before/after evidence.
+2. **Queue-front precondition.** At v2.24.1 the legacy `Scheduler.answerCard(card, rating)` builds
+   the answer from `queuedCards.first().states` of AnkiDroid's *currently selected* deck. If that is
+   another card, rslib rejects it (`card was modified`) and the provider swallows it. v2.25.0alpha1+
+   use `getSchedulingStates(card.id)` (commit `3e0bc30c7b`), but the precondition is kept for every
+   version.
+
+### 29.3 The protocol (`AnkiDroidRatingCommitter`, single writer `AnkiDroidRatingGateway`)
+
+1. Fresh card-state read (`notes/<id>/cards/<ord>`, identity + counters only) must equal the durable
+   baseline captured before SUBMITTING, else `Rejected(CommitConflict)` — nothing sent.
+2. If AnkiDroid's selected deck is not the session deck, select it (`selected_deck` update).
+3. Read the queue front (`schedule`, `limit=1`, **no** `deckID`); if it is not this card,
+   `Rejected` — nothing sent (a learning card became due first).
+4. **One** answer `update` (bounded wait; the call itself is never abandoned mid-flight).
+5. Restore the user's selected deck (always, `NonCancellable`).
+6. Read the card again and classify with `AnkiDroidCommitVerifier`.
+
+| Dispatch | Evidence | Result |
+|---|---|---|
+| not dispatched | — | `RetryableFailure` (nothing sent) |
+| any | `reps + 1`, `last_review_time` inside the window | `Committed` |
+| returned `1` | no change (normal card) | `RetryableFailure("answer_not_applied")` — swallowed exception |
+| returned `-1` | no change | `RetryableFailure("provider_died_before_applying")` |
+| returned `-1` | applied | `Committed` |
+| `SecurityException` / `IllegalArgumentException` | no change | `RetryableFailure` (permission) / `Rejected` |
+| timeout (call may still be running) | no change | `Ambiguous` — the call may still land |
+| any | one answer outside the window | `Rejected(CommitConflict)` — reviewed elsewhere |
+| any | extra reviews, lost counters, identity change, filtered-deck no-change | `Ambiguous` |
+| any | verification read fails | `Ambiguous` |
+
+### 29.4 Reconciliation and its limits
+
+`reconcileCommit` re-reads the card and compares it with the ledger's baseline over the commit's
+window; it never writes and works without the original session (after process death). It refuses
+to decide while an earlier provider write is still in flight. Filtered-deck *preview* answers do not
+move `reps` or `last_review_time` (rslib `preview.rs`), so after the fact they are never attributed:
+such commits stay AMBIGUOUS. Other actors may change a card at any time; a change that cannot be
+attributed to the commit window is never claimed.
+
+### 29.5 Side effects, capability, verification status
+
+* **Selected deck.** Steps 2/5 write AnkiDroid's selected deck for milliseconds, the same thing the
+  provider's own `schedule` query does internally. If the process dies between the two writes, or
+  the restore times out behind a stuck write, AnkiDroid keeps the session deck selected; no review
+  data is affected. Logged as `ANKI_DECK_SELECTION_RESTORE_FAILED`.
+* **Capability.** `review = true` at a supported spec when Ready. Maturity is **IMPLEMENTED, not
+  VERIFIED**. `AnkiDroidBackend` withholds it when no rating gateway is wired.
+* **Isolation.** `.update(` exists only in the provider client; `answer_ease`/`time_taken` only in the
+  contract; `safeUpdate(`/`submitAnswer(` only in the gateway/committer. All are enforced by
+  `AnkiDroidIntegrationIsolationTest`. Bury/suspend columns remain forbidden.
+* **Real AnkiDroid validation: NOT RUN — no configured AnkiDroid mutation test environment.** All
+  behaviour above is JVM-tested against a scripted provider that reproduces the pinned source's
+  behaviour; nothing has been run against a real device or an isolated test collection.

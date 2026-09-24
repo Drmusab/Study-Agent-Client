@@ -96,6 +96,23 @@ class StudySessionMachine(
     private val tag = "StudySessionMachine"
     private var ankiReadJob: Job? = null
 
+    /**
+     * GATE 11 — the Anki write lane (commit, reconcile, end-review), one consumer, in emission order.
+     *
+     * Deliberately separate from [ankiReadJob]: a new read, CancelReads, session end, stop or UI
+     * recreation never cancels an in-flight commit — the attempt runs to its persisted outcome and
+     * a late result is correlated by the reducer (rejected as stale if its turn is gone). Ordering
+     * matters too: an EndReview emitted after a CommitRating must not release the backend session
+     * while that commit is still on its way to the backend, and two rating mutations never run
+     * concurrently. Only the death of [scope] stops the lane (the executor then records AMBIGUOUS).
+     */
+    private val ankiWriteLane = Channel<AnkiStudyEffect>(capacity = Channel.UNLIMITED)
+
+    private val _ratingCommitRecovery = MutableStateFlow<RatingCommitRecoveryUi?>(null)
+
+    /** Backend-neutral recovery/progress model for the current rating transaction (GATE 11). */
+    val ratingCommitRecovery: StateFlow<RatingCommitRecoveryUi?> = _ratingCommitRecovery.asStateFlow()
+
     private val eventChannel = Channel<StudyEvent>(capacity = Channel.UNLIMITED)
 
     private val _machineState = MutableStateFlow(SessionMachineState.initial(initialEpoch))
@@ -179,6 +196,20 @@ class StudySessionMachine(
                 processEvent(event)
             }
         }
+        scope.launch {
+            for (effect in ankiWriteLane) {
+                val executor = ankiEffects ?: AnkiStudyEffectExecutor(
+                    com.studyagent.client.core.anki.AnkiBackendRegistry(emptyList()))
+                try {
+                    executor.execute(effect) { progress -> dispatch(progress) }?.let(::dispatch)
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    // The executor classifies every outcome itself; this only keeps the lane alive.
+                    AppLogger.w(tag, "ANKI_WRITE_LANE_ERROR ${error::class.java.simpleName}")
+                }
+            }
+        }
         // Observe external async sources and map them to events (never mutate directly).
         scope.launch {
             settingsFlow.distinctUntilChanged().collect { settings ->
@@ -221,7 +252,10 @@ class StudySessionMachine(
         val derivedState: StudyState = when (val phase = machine.phase) {
             SessionPhase.Idle -> StudyState.Idle
             SessionPhase.Starting -> StudyState.Loading("Starting session...")
-            SessionPhase.WaitingForFirstCard -> StudyState.Loading("Waiting for first card...")
+            SessionPhase.WaitingForFirstCard -> StudyState.Loading(
+                if (machine.anki?.commit?.state == com.studyagent.client.core.anki.ReviewCommitState.COMMITTED)
+                    "Rating saved. Loading the next card..." else "Waiting for first card..."
+            )
             SessionPhase.SpeakingQuestion -> {
                 val card = machine.cardTurn?.card ?: machine.session?.currentCard
                 if (card != null) StudyState.SpeakingQuestion(card) else StudyState.Loading("Preparing question...")
@@ -252,7 +286,19 @@ class StudySessionMachine(
                 val eval = machine.cardTurn?.evaluation ?: machine.session?.lastEvaluation ?: Evaluation()
                 StudyState.WaitingForRating(card, eval, eval.suggestedRating)
             }
-            SessionPhase.SubmittingRating -> StudyState.Loading("Submitting rating...")
+            SessionPhase.SubmittingRating -> {
+                // The pending rating travels as data so the UI can say what is being saved.
+                val pending = machine.anki?.commit?.rating ?: machine.pendingAction?.expectedRating
+                StudyState.Loading(
+                    if (pending != null) "Saving rating: ${pending.displayName}..." else "Submitting rating...",
+                    pendingRating = pending
+                )
+            }
+            SessionPhase.RatingCommitFailed,
+            SessionPhase.ReconciliationRequired -> StudyState.Error(
+                machine.error?.message ?: "The rating could not be confirmed.",
+                recoverable = true
+            )
             SessionPhase.SpeakingHint -> {
                 val card = machine.cardTurn?.card ?: machine.session?.currentCard ?: StudyCard("pending", "Question")
                 StudyState.HintShowing(card, machine.cardTurn?.hintCount.toString(), isSpeaking = true)
@@ -282,6 +328,7 @@ class StudySessionMachine(
             is SessionPhase.Error -> StudyState.Error(machine.error?.message ?: "Error", recoverable = machine.error?.recoverable ?: true)
         }
         _studyState.value = derivedState
+        _ratingCommitRecovery.value = RatingCommitRecoveryUi.from(machine)
         _currentSession.value = machine.session?.let { snap ->
             StudySession(
                 sessionId = snap.sessionId,
@@ -363,6 +410,22 @@ class StudySessionMachine(
         if (machine.phase is SessionPhase.Finished && machine.cardTurn != null && machine.pendingAction != null) {
             recordInvariantViolation("finished-with-pending-action", "finished session still holds ${machine.pendingAction.type}")
         }
+
+        // GATE 11 — the rating transaction boundary. A turn may only be left behind (turn == null)
+        // by a COMMITTED commit, and a commit always belongs to the live turn.
+        machine.anki?.let { local ->
+            val commit = local.commit
+            if (commit != null && commit.state != com.studyagent.client.core.anki.ReviewCommitState.COMMITTED) {
+                if (local.turn == null) {
+                    recordInvariantViolation("anki-advanced-without-commit", "turn released while commit is ${commit.state}")
+                } else if (commit.commitId.turnId != local.turn.turnId) {
+                    recordInvariantViolation("anki-commit-turn-mismatch", "commit turn ${commit.commitId.turnId} != ${local.turn.turnId}")
+                }
+            }
+            if (machine.phase is SessionPhase.SubmittingRating && commit?.isPending != true) {
+                recordInvariantViolation("anki-submitting-without-pending-commit", "SubmittingRating without a pending commit")
+            }
+        }
     }
 
     /** Logs (and counts) one invariant violation. Never throws: production must not die here. */
@@ -425,7 +488,9 @@ class StudySessionMachine(
             is SessionPhase.Finished,
             is SessionPhase.Error,
             is SessionPhase.Paused,
-            is SessionPhase.Pausing -> false
+            is SessionPhase.Pausing,
+            is SessionPhase.RatingCommitFailed,
+            is SessionPhase.ReconciliationRequired -> false
 
             is SessionPhase.WaitingForAnswer,
             is SessionPhase.PendingAnswerReview,
@@ -629,13 +694,23 @@ class StudySessionMachine(
         for (effect in effects) {
             when (effect) {
                 is AnkiStudyEffect -> {
-                    ankiReadJob?.cancel()
-                    ankiReadJob = null
-                    if (effect !is AnkiStudyEffect.CancelReads) {
-                        ankiReadJob = scope.launch {
-                            val executor = ankiEffects ?: AnkiStudyEffectExecutor(
-                                com.studyagent.client.core.anki.AnkiBackendRegistry(emptyList()))
-                            executor.execute(effect)?.let(::dispatch)
+                    val executor = ankiEffects ?: AnkiStudyEffectExecutor(
+                        com.studyagent.client.core.anki.AnkiBackendRegistry(emptyList()))
+                    when (effect) {
+                        is AnkiStudyEffect.CommitRating,
+                        is AnkiStudyEffect.ReconcileCommit,
+                        is AnkiStudyEffect.EndReview -> {
+                            // Never touches the read job; ordered behind earlier write effects.
+                            if (ankiWriteLane.trySend(effect).isFailure) {
+                                AppLogger.w(tag, "ANKI_WRITE_LANE_CLOSED effect=${effect::class.simpleName}")
+                            }
+                        }
+                        else -> {
+                            ankiReadJob?.cancel()
+                            ankiReadJob = null
+                            if (effect !is AnkiStudyEffect.CancelReads) {
+                                ankiReadJob = scope.launch { executor.execute(effect)?.let(::dispatch) }
+                            }
                         }
                     }
                 }
@@ -938,7 +1013,8 @@ class StudySessionMachine(
                                 (audioRouteCoordinator?.metrics ?: localMetrics).recordNoSpeech()
                             RecognitionErrorCode.NO_MATCH ->
                                 (audioRouteCoordinator?.metrics ?: localMetrics).recordNoMatch()
-                            RecognitionErrorCode.TIMEOUT ->
+                            RecognitionErrorCode.NETWORK_TIMEOUT,
+                            RecognitionErrorCode.WATCHDOG_TIMEOUT ->
                                 (audioRouteCoordinator?.metrics ?: localMetrics).recordTimeout()
                             else -> Unit
                         }
@@ -993,6 +1069,14 @@ class StudySessionMachine(
                 )
             )
             return
+        }
+        // GATE 11 — touch, voice, headset and keyboard all reach the commit through different
+        // events (UserRateCard / SelectRating), so "prepared" is detected from the state change.
+        val preparedCommit = transition.newState.anki?.commit
+        if (preparedCommit != null && preparedCommit.commitId != before.anki?.commit?.commitId) {
+            performance?.onRatingSubmitted()
+            tl?.record(DiagnosticCategory.SESSION, "ANKI_COMMIT_PREPARED", sessionEpoch = epoch,
+                turnId = preparedCommit.commitId.turnId.value, metadata = commitMetadata(preparedCommit))
         }
         when (event) {
             is StudyEvent.UserStartRequested -> {
@@ -1075,6 +1159,26 @@ class StudySessionMachine(
                 turnId = turnId
             )
 
+            is AnkiStudyEvent.RatingCommitStarted -> transition.newState.anki?.commit?.let { commit ->
+                tl?.record(DiagnosticCategory.SESSION, "ANKI_COMMIT_STARTED", sessionEpoch = epoch,
+                    turnId = commit.commitId.turnId.value,
+                    metadata = commitMetadata(commit) + ("attempt" to event.attempt.toString()))
+            }
+
+            is AnkiStudyEvent.RatingCommitResolved -> recordCommitOutcome(event.outcome, before, transition, reconciliation = false)
+
+            is AnkiStudyEvent.RatingCommitReconciled -> recordCommitOutcome(event.outcome, before, transition, reconciliation = true)
+
+            is AnkiStudyEvent.RetryRatingCommit -> transition.newState.anki?.commit?.let { commit ->
+                tl?.record(DiagnosticCategory.SESSION, "ANKI_COMMIT_RETRY_STARTED", sessionEpoch = epoch,
+                    turnId = commit.commitId.turnId.value, metadata = commitMetadata(commit))
+            }
+
+            is AnkiStudyEvent.ReconcileRatingCommit -> transition.newState.anki?.commit?.let { commit ->
+                tl?.record(DiagnosticCategory.SESSION, "ANKI_RECONCILIATION_STARTED", sessionEpoch = epoch,
+                    turnId = commit.commitId.turnId.value, metadata = commitMetadata(commit))
+            }
+
             is StudyEvent.ServerSessionFinished -> {
                 performance?.onSessionFinished()
                 tl?.record(
@@ -1086,6 +1190,53 @@ class StudySessionMachine(
             }
 
             else -> Unit
+        }
+    }
+
+    /**
+     * GATE 11 — metadata only: a short hash of the commit identity, the rating name, the attempt
+     * and the persisted state. Never card content, transcripts, HTML or file paths.
+     */
+    private fun commitMetadata(commit: AnkiRatingCommit): Map<String, String> = buildMap {
+        put("commit", commitHash(commit.commitId))
+        put("rating", commit.rating.name.lowercase())
+        put("attempt", commit.attempt.toString())
+        put("state", commit.state.name)
+        commit.failureCategory?.let { put("category", it) }
+    }
+
+    private fun commitHash(id: com.studyagent.client.core.anki.ReviewCommitId): String =
+        Integer.toHexString(id.stableKey.hashCode())
+
+    private fun recordCommitOutcome(
+        outcome: AnkiCommitOutcome,
+        before: SessionMachineState,
+        transition: Transition,
+        reconciliation: Boolean
+    ) {
+        val tl = timeline ?: return
+        val commit = transition.newState.anki?.commit ?: return
+        val epoch = transition.newState.epoch
+        val turn = commit.commitId.turnId.value
+        val elapsed = (clock() - commit.request.ratedAtEpochMs).coerceAtLeast(0L).toString()
+        val base = commitMetadata(commit) + ("elapsedMs" to elapsed)
+        if (reconciliation) {
+            tl.record(DiagnosticCategory.SESSION, "ANKI_RECONCILIATION_RESULT", sessionEpoch = epoch, turnId = turn,
+                metadata = base + ("result" to outcome.state.name))
+        }
+        val name = when (outcome) {
+            is AnkiCommitOutcome.Committed -> "ANKI_COMMIT_COMMITTED"
+            is AnkiCommitOutcome.Failed -> "ANKI_COMMIT_FAILED"
+            is AnkiCommitOutcome.Ambiguous -> "ANKI_COMMIT_AMBIGUOUS"
+        }
+        tl.record(DiagnosticCategory.SESSION, name, sessionEpoch = epoch, turnId = turn, metadata = base)
+        if (transition.effects.any { it is AnkiStudyEffect.Next }) {
+            tl.record(DiagnosticCategory.SESSION, "ANKI_NEXT_CARD_AFTER_COMMIT_STARTED", sessionEpoch = epoch,
+                turnId = turn, metadata = mapOf("commit" to commitHash(commit.commitId),
+                    "reviewed" to (transition.newState.session?.totalReviewedInSession ?: 0).toString()))
+        }
+        if (before.phase != transition.newState.phase) {
+            AppLogger.i(tag, "ANKI_COMMIT_OUTCOME state=${outcome.state} commit=${commitHash(commit.commitId)} attempt=${commit.attempt}")
         }
     }
 
@@ -1246,7 +1397,13 @@ class StudySessionMachine(
         const val PTT_SETTLE_BUDGET_MS = 600L
     }
 
-    /** Stops the machine and releases every timer it owns (§98/§121). */
+    /**
+     * Stops the machine and releases every timer it owns (§98/§121).
+     *
+     * GATE 11: in-flight Anki write jobs are *not* cancelled here — an attempt that already passed
+     * SUBMITTING must reach a persisted outcome. They stop only if [scope] itself dies, in which
+     * case the executor records AMBIGUOUS (never "failed", never "committed").
+     */
     fun close() {
         ankiReadJob?.cancel()
         ankiReadJob = null

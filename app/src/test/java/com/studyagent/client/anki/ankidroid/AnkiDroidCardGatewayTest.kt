@@ -5,6 +5,8 @@ import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiResult
 import com.studyagent.client.core.models.Rating
+// Pre-existing compile error fixed in GATE 11: the classes under test live in data.anki.ankidroid.
+import com.studyagent.client.data.anki.ankidroid.*
 import com.studyagent.client.testutil.TestClock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async

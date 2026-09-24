@@ -1,5 +1,7 @@
 package com.studyagent.client.anki.ankidroid
 
+// Pre-existing compile error fixed in GATE 11: the classes under test live in data.anki.ankidroid.
+import com.studyagent.client.data.anki.ankidroid.*
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCardQueueState
 import com.studyagent.client.core.anki.AnkiCardRef

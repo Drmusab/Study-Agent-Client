@@ -1584,3 +1584,74 @@ AnkiDroid v2.24.1 `ReviewInfo.MEDIA_FILES` contract supplies filenames only and 
 media URI/stream. Consequently the current adapter reports media as `PROVIDER_UNAVAILABLE` rather
 than deriving a private AnkiDroid path. See [`ANKI_WEBVIEW_SECURITY.md`](ANKI_WEBVIEW_SECURITY.md)
 for the actual policy matrix and residual risks.
+
+## GATE 11 — Rating commit, durable ledger and exactly-once reliability
+
+### Layering (who may do what)
+
+```text
+UI (StudyScreen / RatingCommitRecoveryUi)      renders state, dispatches intents; never sees a backend
+  └─ StudySessionMachine ── StudyReducer        pure: SelectRating → CommitRating effect; COMMITTED → Next
+        └─ AnkiStudyEffectExecutor               ledger prepare → prepareCommit → ledger claim → commitRating
+              ├─ ReviewCommitLedger (core/anki)  durable, backend-neutral, Mutex CAS (DataStore adapter)
+              └─ AnkiBackend.commitRating        typed result only
+                    └─ AnkiDroidBackend → AnkiDroidRatingCommitter → AnkiDroidRatingGateway → provider client
+```
+
+The reducer is pure and never calls a backend; the executor only emits events; numeric ease values
+exist only in `AnkiDroidRatingContract` (below the gateway).
+
+### Identity
+
+`ReviewCommitId` = (backend id, study session id, review turn id) — the GATE 03 type, unchanged.
+It is never derived from the card id or a timestamp, so the same card reviewed twice produces two
+commits, and a retry or restore reuses the same id. `CommitRatingRequest` carries the id, card,
+rating, answer time and the backend's pre-mutation evidence; a retry re-sends the recorded request.
+
+### Ledger (`ReviewCommitLedger`, `ReviewCommitRecord`)
+
+* States NOT_STARTED / SUBMITTING / COMMITTED / FAILED(safeToRetry) / AMBIGUOUS; FAILED and
+  AMBIGUOUS are distinct.
+* Every transition is a compare-and-set under one `Mutex`; NOT_STARTED and SUBMITTING are durable
+  before they are reported. Writes run `NonCancellable` once started.
+* The first load in a process turns SUBMITTING into AMBIGUOUS (persisted).
+* Bounded: 200 records by default. Only resolved records are pruned, oldest first, and never
+  SUBMITTING or unacknowledged AMBIGUOUS. A full ledger refuses new commits instead of evicting.
+* Persistence port `ReviewCommitStore` (one durable string cell, typed read/write). Production uses
+  `DataStoreReviewCommitStore`: a dedicated DataStore file with no replace-on-corruption handler.
+  An unreadable snapshot makes the ledger unavailable (fail closed) and is never overwritten.
+
+### Result classification and retry policy
+
+| Outcome | Ledger | Machine | Next card | Retry |
+|---|---|---|---|---|
+| Committed | COMMITTED | WaitingForFirstCard | exactly once | never (replay answers from the ledger) |
+| RetryableFailure | FAILED, safe | RatingCommitFailed | no | explicit user retry, same id + rating |
+| Rejected | FAILED, not safe | RatingCommitFailed | no | no — end the session |
+| Ambiguous / timeout / cancellation after dispatch / unexpected exception | AMBIGUOUS | ReconciliationRequired | blocked | never blind; reconcile first |
+| Prepare refused / ledger write failed before SUBMITTING | FAILED | RatingCommitFailed | no | if transient |
+| Ledger unavailable or full | nothing written | RatingCommitFailed | no | no |
+
+### Reconciliation
+
+`AnkiBackend.reconcileCommit` defaults to `Unsupported`, which keeps the commit AMBIGUOUS.
+AnkiDroid implements it from public card counters (`reps`, `last_review_time_secs`, queue/due/deck)
+against the durable baseline and the commit window; anything unattributable stays AMBIGUOUS. Users
+get "Check again", and "End session" is always available. A fresh session asks the scheduler, and
+unresolved AMBIGUOUS commits are surfaced (never dropped) when it begins.
+
+### Diagnostics (metadata only)
+
+`ANKI_COMMIT_PREPARED`, `ANKI_COMMIT_STARTED`, `ANKI_COMMIT_COMMITTED`, `ANKI_COMMIT_FAILED`,
+`ANKI_COMMIT_AMBIGUOUS`, `ANKI_COMMIT_RETRY_STARTED`, `ANKI_RECONCILIATION_STARTED`,
+`ANKI_RECONCILIATION_RESULT`, `ANKI_NEXT_CARD_AFTER_COMMIT_STARTED`. Metadata: commit-id hash, rating
+name, attempt, state, failure category and elapsed ms. Rejected stale results appear as
+`EVENT_REJECTED` with the reducer's reason. Never card text, HTML, transcripts or paths.
+
+### PC backend
+
+Unchanged: `handleRateCard`, `handleRatingSaved` and `handleTimeout` are byte-identical to GATE 10,
+and `SubmissionLedger`, `PendingAction` and the protocol are untouched. The PC path keeps its remote
+idempotency (`message_id` + `review_turn_id`) and its retry-on-timeout semantics. Its UI gains only
+the shared rule that rating buttons are disabled outside WaitingForRating/ShowingFeedback, and the
+pending rating is shown as data while submitting.

@@ -1,5 +1,8 @@
 package com.studyagent.client.testutil
 
+import com.studyagent.client.core.network.AgentConnectionSnapshot
+import com.studyagent.client.core.network.ConnectionTestResult
+import kotlinx.coroutines.flow.emptyFlow
 import com.studyagent.client.core.models.ClientMessage
 import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.ServerMessage
@@ -96,6 +99,17 @@ class FakeConnectionRepository(
     }
 
     override fun toggleFakeAgent(useFake: Boolean) = Unit
+
+    // Members the ConnectionRepository interface gained in an earlier gate without this fake being
+    // updated (pre-existing compile error in every harness-based study test, fixed in GATE 11).
+    override val connectionSnapshot: StateFlow<AgentConnectionSnapshot> =
+        MutableStateFlow(AgentConnectionSnapshot.disconnected())
+
+    override suspend fun connectWithOverride(profile: ServerProfile?) = connect(profile)
+
+    override fun testConnection(profile: ServerProfile): Flow<ConnectionTestResult> = emptyFlow()
+
+    override fun getConnectionDiagnostics(): String = "fake-connection"
 
     // ------------------------------------------------------------------ scripted inbound
 

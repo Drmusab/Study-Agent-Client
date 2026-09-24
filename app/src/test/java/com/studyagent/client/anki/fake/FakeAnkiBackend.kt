@@ -2,12 +2,14 @@ package com.studyagent.client.anki.fake
 
 import com.studyagent.client.core.anki.*
 import com.studyagent.client.core.models.Rating
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Test-only scheduler stand-in: deterministic supplied queue, no scheduling calculations.
@@ -103,6 +105,39 @@ class FakeAnkiBackend(
     }
 
     suspend fun recordedCommits(): List<RecordedCommit> = mutex.withLock { ledger.values.toList() }
+
+    // ---------------------------------------------------------------- GATE 11 commit controls
+
+    private val invocations = AtomicInteger(0)
+    private val physicalCalls = AtomicInteger(0)
+
+    /** Every `commitRating` call, including ones answered from the fake's own dedup ledger. */
+    val commitInvocations: Int get() = invocations.get()
+
+    /**
+     * Calls that reached the stand-in's *mutation step* (consumed a scripted outcome). This is the
+     * physical-dispatch counter: dedup hits, validation refusals and pre-dispatch unavailability
+     * never increment it.
+     */
+    val physicalCommitCalls: Int get() = physicalCalls.get()
+
+    /** When set, every commit suspends here (after the call started) until the test completes it. */
+    @Volatile var commitGate: CompletableDeferred<Unit>? = null
+
+    /** When set, the mutation step throws this *after* counting the physical call. */
+    @Volatile var commitThrowable: Throwable? = null
+
+    /** When set, `prepareCommit` refuses with this (pre-mutation). */
+    @Volatile var prepareRefusal: CommitPreparation.Refused? = null
+    var prepareCalls: Int = 0
+        private set
+
+    /** Scripted reconciliation answers, consumed in order; otherwise the truthful answer is used. */
+    val reconcileResults: ArrayDeque<ReconcileCommitResult> = ArrayDeque()
+    var reconcileCalls: Int = 0
+        private set
+    var endReviewCalls: Int = 0
+        private set
 
     /** Invalidates all handles and drops scenario state without reusing presentation identifiers. */
     suspend fun reset() = mutex.withLock {
@@ -285,8 +320,62 @@ class FakeAnkiBackend(
         removed
     }
 
-    override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
+    /** Evidence = the fixture card's applied-review count, so reconciliation is checkable. */
+    override suspend fun prepareCommit(request: CommitRatingRequest): CommitPreparation {
         delay(latencyMs)
+        return mutex.withLock {
+            prepareCalls += 1
+            prepareRefusal?.let { return@withLock it }
+            val applied = ledger.values.filter { it.request.card == request.card }.sumOf { it.mutationCount }
+            CommitPreparation.Ready(ReviewCommitEvidence("fake-reviews-v1", "applied=$applied"))
+        }
+    }
+
+    /**
+     * Truthful by default: the stand-in knows whether an AMBIGUOUS write really applied
+     * ([CommitStep.appliedWhenAmbiguous]). Scripted [reconcileResults] override it. A decision is
+     * mirrored into the fake's own ledger, exactly like the real backend's session record.
+     */
+    override suspend fun reconcileCommit(request: ReconcileCommitRequest): ReconcileCommitResult {
+        delay(latencyMs)
+        return mutex.withLock {
+            reconcileCalls += 1
+            val recorded = ledger[request.commitId]
+            val answer = reconcileResults.removeFirstOrNull() ?: when {
+                recorded == null -> ReconcileCommitResult.StillAmbiguous("fake_unknown_commit")
+                recorded.mutationCount > 0 -> ReconcileCommitResult.Applied("fake_applied")
+                else -> ReconcileCommitResult.NotApplied("fake_not_applied", safeToRetry = true)
+            }
+            if (recorded != null) {
+                when (answer) {
+                    is ReconcileCommitResult.Applied ->
+                        ledger[request.commitId] = recorded.copy(result = CommitRatingResult.Committed())
+                    is ReconcileCommitResult.NotApplied -> if (answer.safeToRetry) {
+                        ledger[request.commitId] = recorded.copy(
+                            result = CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("fake_reconciled_not_applied")))
+                    }
+                    else -> Unit
+                }
+            }
+            answer
+        }
+    }
+
+    /** Explicit user abort: releases the handle and any unresolved turn. Never a mutation. */
+    override suspend fun endReview(session: AnkiReviewSession): Boolean = mutex.withLock {
+        endReviewCalls += 1
+        if (this.session != session) return@withLock false
+        this.session = null
+        beginRequest = null
+        active = null
+        hydrationMemo = null
+        true
+    }
+
+    override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
+        invocations.incrementAndGet()
+        delay(latencyMs)
+        commitGate?.await()
         return mutex.withLock {
             if (request.commitId.backendId != id || request.card.backendId != id) {
                 return@withLock CommitRatingResult.Rejected(AnkiError.SessionInvalid())
@@ -311,7 +400,16 @@ class FakeAnkiBackend(
             val step = when {
                 unavailable != null -> CommitStep(CommitRatingResult.RetryableFailure(unavailable))
                 !capabilities.value.review -> CommitStep(CommitRatingResult.Rejected(unsupported("review")))
-                else -> commits.removeFirstOrNull() ?: CommitStep(CommitRatingResult.Committed())
+                else -> {
+                    physicalCalls.incrementAndGet()
+                    commitThrowable?.let { thrown ->
+                        // Dispatched, then the transport failed: the stand-in records "unknown".
+                        ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
+                            (previous?.attempts ?: 0) + 1, 0)
+                        throw thrown
+                    }
+                    commits.removeFirstOrNull() ?: CommitStep(CommitRatingResult.Committed())
+                }
             }
             val applied = step.result is CommitRatingResult.Committed || step.appliedWhenAmbiguous
             ledger[request.commitId] = RecordedCommit(request, step.result, (previous?.attempts ?: 0) + 1,

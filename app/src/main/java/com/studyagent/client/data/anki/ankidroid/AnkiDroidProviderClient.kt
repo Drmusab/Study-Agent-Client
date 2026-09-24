@@ -1,5 +1,6 @@
 package com.studyagent.client.data.anki.ankidroid
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.database.Cursor
@@ -8,7 +9,10 @@ import android.os.Build
 import com.studyagent.client.core.common.DispatcherProvider
 import com.studyagent.client.core.common.DefaultDispatcherProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /**
@@ -55,6 +59,38 @@ interface AnkiDroidProviderClient {
         sortOrder: String?,
         mapper: (AnkiDroidProviderRow) -> T
     ): ProviderQueryResult<T>
+
+    /**
+     * GATE 11 — the one provider *write* primitive (`ContentResolver.update`), used only by the
+     * rating gateway for the schedule answer and the temporary deck selection.
+     *
+     * It never interprets the outcome: it reports exactly what the platform said — a row count
+     * (including `-1`, the platform's swallowed-`RemoteException` answer) or the class of the
+     * throwable — so the gateway can classify the mutation boundary against the pinned contract.
+     * Values are typed ([ProviderValue]); upper layers never build `ContentValues` or URIs.
+     *
+     * The default refuses without any platform call (provably not dispatched), so a client that
+     * does not implement writes can never be mistaken for one that wrote.
+     */
+    suspend fun safeUpdate(authority: String, path: String, values: List<ProviderValue>): ProviderUpdateResult =
+        ProviderUpdateResult.NotDispatched("update_unsupported")
+}
+
+/** One typed column value for [AnkiDroidProviderClient.safeUpdate]. */
+sealed interface ProviderValue {
+    val column: String
+    data class LongValue(override val column: String, val value: Long) : ProviderValue
+    data class IntValue(override val column: String, val value: Int) : ProviderValue
+}
+
+/**
+ * What one provider `update` call produced. [Returned] and [Threw] both mean the call was issued;
+ * only [NotDispatched] proves no IPC happened.
+ */
+sealed interface ProviderUpdateResult {
+    data class Returned(val rowCount: Int) : ProviderUpdateResult
+    data class Threw(val exceptionClass: String, val failure: AnkiDroidFailure) : ProviderUpdateResult
+    data class NotDispatched(val reason: String) : ProviderUpdateResult
 }
 
 /**
@@ -276,6 +312,40 @@ internal class AndroidAnkiDroidProviderClient(
             ProviderQueryResult.Failure(failure = failure, operation = "query:$path")
         }
     }
+
+    /**
+     * GATE 11 — `ContentResolver.update`, off the main thread. Runs [NonCancellable] once started:
+     * a binder call cannot be interrupted, so cancelling the caller must not also discard the
+     * answer of a call that did happen — the caller decides what an abandoned wait means.
+     */
+    override suspend fun safeUpdate(
+        authority: String,
+        path: String,
+        values: List<ProviderValue>
+    ): ProviderUpdateResult {
+        if (values.isEmpty()) return ProviderUpdateResult.NotDispatched("no_values")
+        // A caller cancelled *before* dispatch must not dispatch; after this line the call is issued.
+        currentCoroutineContext().ensureActive()
+        return withContext(dispatchers.io + NonCancellable) {
+            val uri = Uri.parse("content://$authority/$path")
+            val contentValues = ContentValues(values.size).apply {
+                values.forEach { value ->
+                    when (value) {
+                        is ProviderValue.LongValue -> put(value.column, value.value)
+                        is ProviderValue.IntValue -> put(value.column, value.value)
+                    }
+                }
+            }
+            try {
+                ProviderUpdateResult.Returned(appContext.contentResolver.update(uri, contentValues, null, null))
+            } catch (throwable: Throwable) {
+                ProviderUpdateResult.Threw(
+                    exceptionClass = throwable::class.java.simpleName,
+                    failure = AnkiDroidFailureClassifier.classify(throwable, AnkiDroidOperationStage.PROVIDER_UPDATE)
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -315,6 +385,19 @@ internal class FakeAnkiDroidProviderClient(
     /** Projections observed per query, in call order — lets tests pin the requested columns. */
     val projectionLog: MutableList<List<String>?> = mutableListOf()
 
+    /** Selections observed per query, in call order. */
+    val selectionLog: MutableList<String?> = mutableListOf()
+
+    /** GATE 11 — every physical update call, in order: `path` + the typed values. */
+    val updateLog: MutableList<Pair<String, List<ProviderValue>>> = mutableListOf()
+
+    /**
+     * GATE 11 — scripted update behaviour keyed by path. The handler runs *as* the provider: it may
+     * mutate [queryResponses] (the observable collection) before returning, which is how a test
+     * models "applied", "swallowed and not applied" or "died after applying".
+     */
+    val updateHandlers: MutableMap<String, suspend (List<ProviderValue>) -> ProviderUpdateResult> = mutableMapOf()
+
     fun scriptRows(path: String, rows: List<Map<String, Any?>>) {
         queryResponses[path] = FakeProviderQueryResponse.Rows(rows)
     }
@@ -351,6 +434,7 @@ internal class FakeAnkiDroidProviderClient(
     ): ProviderQueryResult<T> {
         queryLog.add("$authority/$path")
         projectionLog.add(projection?.toList())
+        selectionLog.add(selection)
         if (queryDelayMs > 0L) delay(queryDelayMs)
         return when (val response = queryResponses[path]) {
             null -> ProviderQueryResult.Empty("fake_empty")
@@ -379,5 +463,15 @@ internal class FakeAnkiDroidProviderClient(
                 ProviderQueryResult.Success(results)
             }
         }
+    }
+
+    override suspend fun safeUpdate(
+        authority: String,
+        path: String,
+        values: List<ProviderValue>
+    ): ProviderUpdateResult {
+        updateLog.add(path to values)
+        val handler = updateHandlers[path] ?: return ProviderUpdateResult.Returned(0)
+        return handler(values)
     }
 }

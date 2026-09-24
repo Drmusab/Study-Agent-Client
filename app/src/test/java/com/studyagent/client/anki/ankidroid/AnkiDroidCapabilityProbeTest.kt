@@ -28,11 +28,11 @@ class AnkiDroidCapabilityProbeTest {
 
         assertTrue(result.implemented.deckListing)
         assertFalse(result.implemented.deckCounts)
-        // GATE 06 — scheduled review is implemented; the full review loop still is not, because
-        // rating commit belongs to GATE 11 (§75/§147).
+        // GATE 06 — scheduled review is implemented; GATE 11 adds rating commit, so the full
+        // review loop is claimed too (the backend masks it when no rating writer is wired).
         assertTrue(result.implemented.scheduledReview)
         assertTrue(result.implemented.reviewIntervals)
-        assertFalse(result.implemented.review)
+        assertTrue(result.implemented.review)
         // GATE 07 — rendered-card hydration is implemented (identity-verified, JVM-tested).
         assertTrue(result.implemented.renderedCards)
         assertFalse(result.implemented.media)

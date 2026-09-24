@@ -3,6 +3,9 @@ package com.studyagent.client.di
 import android.content.Context
 import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiBackendSelector
+import com.studyagent.client.core.anki.ReviewCommitLedger
+import com.studyagent.client.data.anki.DataStoreReviewCommitStore
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidRatingGateway
 import com.studyagent.client.core.audio.AndroidAudioRouteManager
 import com.studyagent.client.core.audio.AudioRouteManager
 import com.studyagent.client.core.audio.DefaultStudyAudioModeResolver
@@ -229,7 +232,24 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             scope = ankiDroidScope,
             deckGateway = ankiDroidDeckGateway,
             reviewGateway = ankiDroidReviewGateway,
-            cardGateway = ankiDroidCardGateway
+            cardGateway = ankiDroidCardGateway,
+            // GATE 11 — the single AnkiDroid writer. Its scope outlives callers so an issued
+            // provider call is never abandoned mid-flight by a cancelled screen or session.
+            ratingGateway = DefaultAnkiDroidRatingGateway(
+                providerClient = ankiDroidProviderClient,
+                scope = ankiDroidScope
+            )
+        )
+    }
+
+    /**
+     * GATE 11 — the durable, backend-neutral review-commit ledger. One instance per process: its
+     * first load converts SUBMITTING records left by a dead process into AMBIGUOUS.
+     */
+    val reviewCommitLedger: ReviewCommitLedger by lazy {
+        ReviewCommitLedger(
+            store = DataStoreReviewCommitStore.create(context, ankiDroidScope),
+            clock = System::currentTimeMillis
         )
     }
 
@@ -379,7 +399,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             // Bounded technical metrics + structured timeline (§51/§57/§67).
             performance = AppPerformanceMetrics.metrics,
             timeline = AppDiagnostics.timeline,
-            ankiEffects = com.studyagent.client.core.study.AnkiStudyEffectExecutor(ankiBackendRegistry)
+            ankiEffects = com.studyagent.client.core.study.AnkiStudyEffectExecutor(
+                registry = ankiBackendRegistry,
+                ledger = reviewCommitLedger
+            )
         )
     }
     /** Legacy repository kept for direct testing and gradual migration. */
