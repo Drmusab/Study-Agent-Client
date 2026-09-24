@@ -10,6 +10,8 @@ import com.studyagent.client.core.models.StudyCard
 data class SessionMachineState(
     /** Local generation; bumped on each new session (§14). */
     val epoch: Long = 1L,
+    /** Gate 10 read-only Anki binding; absent for the legacy PC protocol. */
+    val anki: AnkiStudyInteraction? = null,
     val phase: SessionPhase = SessionPhase.Idle,
     val session: StudySessionSnapshot? = null,
     val cardTurn: CardTurn? = null,

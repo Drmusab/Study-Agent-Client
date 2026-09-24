@@ -90,9 +90,11 @@ class StudySessionMachine(
      * Structured diagnostic timeline (§67). Bounded ring buffer; recording an event is a few
      * field writes, so instrumenting the voice path does not create the latency it measures (§55).
      */
-    private val timeline: DiagnosticTimeline? = null
+    private val timeline: DiagnosticTimeline? = null,
+    private val ankiEffects: AnkiStudyEffectExecutor? = null
 ) {
     private val tag = "StudySessionMachine"
+    private var ankiReadJob: Job? = null
 
     private val eventChannel = Channel<StudyEvent>(capacity = Channel.UNLIMITED)
 
@@ -403,7 +405,9 @@ class StudySessionMachine(
         } catch (e: Exception) {
             AppLogger.w(tag, "STT start failed: ${e.message}")
         }
-        _machineState.value = _machineState.value.copy(activeRecognitionEffectId = effect.effectId)
+        if (_machineState.value.anki == null) {
+            _machineState.value = _machineState.value.copy(activeRecognitionEffectId = effect.effectId)
+        }
     }
 
     /**
@@ -624,6 +628,17 @@ class StudySessionMachine(
     private fun executeEffects(effects: List<StudyEffect>, triggerEvent: StudyEvent) {
         for (effect in effects) {
             when (effect) {
+                is AnkiStudyEffect -> {
+                    ankiReadJob?.cancel()
+                    ankiReadJob = null
+                    if (effect !is AnkiStudyEffect.CancelReads) {
+                        ankiReadJob = scope.launch {
+                            val executor = ankiEffects ?: AnkiStudyEffectExecutor(
+                                com.studyagent.client.core.anki.AnkiBackendRegistry(emptyList()))
+                            executor.execute(effect)?.let(::dispatch)
+                        }
+                    }
+                }
                 is StudyEffect.Network.Send -> {
                     recordOutboundEffect(effect.message)
                     scope.launch {
@@ -658,7 +673,9 @@ class StudySessionMachine(
                             }
                         }
                     }
-                    _machineState.value = _machineState.value.copy(activeSpeechEffectId = effect.effectId)
+                    if (_machineState.value.anki == null) {
+                        _machineState.value = _machineState.value.copy(activeSpeechEffectId = effect.effectId)
+                    }
                 }
                 is StudyEffect.Voice.CancelSpeech -> {
                     val reason = when (effect.reason) {
@@ -667,7 +684,9 @@ class StudySessionMachine(
                         else -> StopReason.USER
                     }
                     speechOrchestrator.stopSpeech(reason)
-                    _machineState.value = _machineState.value.copy(activeSpeechEffectId = null)
+                    if (_machineState.value.anki == null) {
+                        _machineState.value = _machineState.value.copy(activeSpeechEffectId = null)
+                    }
                 }
                 is StudyEffect.Voice.StartRecognition -> {
                     // The microphone never opens from here directly. It opens through the turn
@@ -728,7 +747,9 @@ class StudySessionMachine(
                     sttGeneration.incrementAndGet()
                     recognitionOrchestrator.cancelCurrentTurn(effect.reason)
                     performance?.onSttActiveRequests(0)
-                    _machineState.value = _machineState.value.copy(activeRecognitionEffectId = null)
+                    if (_machineState.value.anki == null) {
+                        _machineState.value = _machineState.value.copy(activeRecognitionEffectId = null)
+                    }
                 }
                 is StudyEffect.ScheduleTimeout -> {
                     val job = scope.launch {
@@ -843,6 +864,9 @@ class StudySessionMachine(
                 when (result) {
                     is RecognitionTurnResult.Completed -> {
                         val outcome: RecognitionOutcome = result.outcome
+                        val localSnapshot = _machineState.value
+                        if (localSnapshot.anki != null &&
+                            outcome.requestId != localSnapshot.activeRecognitionEffectId) return@collect
                         performance?.let { perf ->
                             perf.onSttCompleted()
                             perf.onSttActiveRequests(0)
@@ -901,7 +925,8 @@ class StudySessionMachine(
                                     outcome.cardId,
                                     turnId,
                                     outcome.selectedText,
-                                    isCommand = false
+                                    isCommand = false,
+                                    requestId = outcome.requestId
                                 )
                             )
                         }
@@ -936,7 +961,7 @@ class StudySessionMachine(
                             requestId = result.error.requestId,
                             metadata = mapOf("code" to result.error.code.name)
                         )
-                        dispatch(StudyEvent.RecognitionFailed(null, result.error.code.name))
+                        dispatch(StudyEvent.RecognitionFailed(null, result.error.code.name, result.error.requestId))
                     }
                 }
             }
@@ -1223,6 +1248,8 @@ class StudySessionMachine(
 
     /** Stops the machine and releases every timer it owns (§98/§121). */
     fun close() {
+        ankiReadJob?.cancel()
+        ankiReadJob = null
         machineJob.cancel()
         eventChannel.close()
         timeoutJobs.values.forEach { it.cancel() }

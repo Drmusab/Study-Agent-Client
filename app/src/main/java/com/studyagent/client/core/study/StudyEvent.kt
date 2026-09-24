@@ -81,8 +81,8 @@ sealed interface StudyEvent {
     data class HintSpeechCompleted(val cardId: String, val effectId: String, val success: Boolean) : StudyEvent
     data class ExplanationSpeechCompleted(val cardId: String, val effectId: String, val success: Boolean) : StudyEvent
     data class SpeechCancelled(val reason: String, val effectId: String?) : StudyEvent
-    data class RecognitionCompleted(val cardId: String?, val turnId: String?, val transcript: String, val isCommand: Boolean) : StudyEvent
-    data class RecognitionFailed(val cardId: String?, val reason: String) : StudyEvent
+    data class RecognitionCompleted(val cardId: String?, val turnId: String?, val transcript: String, val isCommand: Boolean, val requestId: String? = null) : StudyEvent
+    data class RecognitionFailed(val cardId: String?, val reason: String, val requestId: String? = null) : StudyEvent
     data class VoiceFailure(val reason: String) : StudyEvent
 
     // -- Connection

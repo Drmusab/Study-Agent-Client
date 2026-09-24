@@ -378,7 +378,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             startRequestProvider = { studyControlRepository.currentStartRequest() },
             // Bounded technical metrics + structured timeline (§51/§57/§67).
             performance = AppPerformanceMetrics.metrics,
-            timeline = AppDiagnostics.timeline
+            timeline = AppDiagnostics.timeline,
+            ankiEffects = com.studyagent.client.core.study.AnkiStudyEffectExecutor(ankiBackendRegistry)
         )
     }
     /** Legacy repository kept for direct testing and gradual migration. */
