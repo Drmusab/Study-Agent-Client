@@ -156,7 +156,8 @@ class AnkiCardHydrationTest {
                 questionHtml = null,
                 answerHtml = null,
                 questionText = null,
-                answerText = null
+                answerText = null,
+                pureAnswerText = null // required parameter (pre-existing compile error fixed in GATE 11)
             )
         } catch (expected: IllegalArgumentException) {
             threw = true

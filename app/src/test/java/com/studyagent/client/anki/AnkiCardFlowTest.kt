@@ -1,14 +1,7 @@
 package com.studyagent.client.anki
 
-import com.studyagent.client.anki.ankidroid.AnkiDroidApiCapabilityReport
-import com.studyagent.client.anki.ankidroid.AnkiDroidBackend
-import com.studyagent.client.anki.ankidroid.AnkiDroidCardQueryDiagnostics
-import com.studyagent.client.anki.ankidroid.AnkiDroidHealthSnapshot
-import com.studyagent.client.anki.ankidroid.AnkiDroidIntegrationState
-import com.studyagent.client.anki.ankidroid.AnkiDroidMetadata
-import com.studyagent.client.anki.ankidroid.AnkiDroidProviderSpecSource
-import com.studyagent.client.anki.ankidroid.AnkiDroidScheduledCardQuery
-import com.studyagent.client.anki.ankidroid.CapabilitySupport
+// Pre-existing compile error fixed in GATE 11: these main classes live in data.anki.ankidroid.
+import com.studyagent.client.data.anki.ankidroid.*
 import com.studyagent.client.anki.fake.FakeAnkiBackend
 import com.studyagent.client.core.anki.*
 import com.studyagent.client.core.models.Rating
@@ -290,19 +283,21 @@ class AnkiCardFlowTest {
         scheduled: List<AnkiScheduledCard> = emptyList()
     ): AnkiDroidBackend {
         val deckRef = AnkiDeckRef(AnkiBackendId.AnkiDroidLocal, "1700000000000")
-        val reviewResults = scheduled.map {
+        // Explicit element type: the gateway takes MutableList<AnkiResult<…>> (invariant) — a
+        // pre-existing compile error fixed in GATE 11.
+        val reviewResults: MutableList<AnkiResult<AnkiDroidScheduledCardQuery>> = scheduled.mapTo(mutableListOf()) {
             AnkiResult.Success<AnkiDroidScheduledCardQuery>(
                 AnkiDroidScheduledCardQuery.Scheduled(it, 1L, 1L)
             )
-        }.toMutableList()
+        }
         return AnkiDroidBackend(
-            gateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidGateway(stateToReturn = ankiDroidState(capabilities)),
+            gateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidGateway(stateToReturn = ankiDroidState(capabilities)),
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
             clock = TestClock(),
-            deckGateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidDeckGateway(),
-            reviewGateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidReviewGateway(results = reviewResults),
+            deckGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidDeckGateway(),
+            reviewGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidReviewGateway(results = reviewResults),
             cardGateway = cardGateway,
-            turnIds = com.studyagent.client.anki.ankidroid.SequentialReviewTurnIdSource(instancePrefix = "flow")
+            turnIds = com.studyagent.client.data.anki.ankidroid.SequentialReviewTurnIdSource(instancePrefix = "flow")
         )
     }
 
@@ -323,7 +318,7 @@ class AnkiCardFlowTest {
     )
 
     @Test fun `the real backend coalesces concurrent hydration into one provider read`() = runTest {
-        val cardGateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidCardGateway(
+        val cardGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway(
             results = mutableListOf(AnkiResult.Success(realCard()))
         )
         val backend = realBackend(cardGateway)
@@ -333,7 +328,7 @@ class AnkiCardFlowTest {
     }
 
     @Test fun `the real backend's memo is turn scoped and cleared at session end`() = runTest {
-        val cardGateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidCardGateway(
+        val cardGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway(
             results = mutableListOf(AnkiResult.Success(realCard()))
         )
         val backend = realBackend(cardGateway, scheduled = listOf(realScheduled()))
@@ -361,7 +356,7 @@ class AnkiCardFlowTest {
     }
 
     @Test fun `the real backend surfaces gateway failures as typed results`() = runTest {
-        val cardGateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidCardGateway(
+        val cardGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway(
             results = mutableListOf(
                 AnkiResult.Failure(AnkiError.StaleCardReference(card = null, detail = "card_identity_mismatch"))
             )
@@ -373,7 +368,7 @@ class AnkiCardFlowTest {
     }
 
     @Test fun `the real backend refuses to fabricate content when the capability is missing`() = runTest {
-        val cardGateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidCardGateway()
+        val cardGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway()
         val backend = realBackend(cardGateway, capabilities = AnkiCapabilities.NONE)
         val failure = backend.hydrateCardContent(realCard().ref) as AnkiResult.Failure
         assertTrue(failure.error is AnkiError.UnsupportedAction)
@@ -382,7 +377,7 @@ class AnkiCardFlowTest {
     }
 
     @Test fun `the real backend refuses foreign card references before any lookup`() = runTest {
-        val cardGateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidCardGateway()
+        val cardGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway()
         val backend = realBackend(cardGateway)
         val foreign = realCard().ref.copy(backendId = AnkiBackendId.PcAgent("desktop"))
         val failure = backend.hydrateCardContent(foreign) as AnkiResult.Failure
@@ -391,7 +386,7 @@ class AnkiCardFlowTest {
     }
 
     @Test fun `cancellation of a real hydration is never an ordinary failure`() = runTest {
-        val cardGateway = com.studyagent.client.anki.ankidroid.FakeAnkiDroidCardGateway(
+        val cardGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway(
             throwable = kotlinx.coroutines.CancellationException("abandoned")
         )
         val backend = realBackend(cardGateway)

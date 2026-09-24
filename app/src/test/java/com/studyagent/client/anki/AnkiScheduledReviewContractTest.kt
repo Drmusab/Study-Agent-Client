@@ -212,7 +212,7 @@ abstract class AnkiScheduledReviewContract {
 
     // ---------------------------------------------------------------- fixtures
 
-    private fun fakeFixture(scheduled: List<Pair<String, Int>>): Fixture {
+    protected fun fakeFixture(scheduled: List<Pair<String, Int>>): Fixture {
         val deckRef = AnkiDeckRef(AnkiBackendId.Fake("contract"), "deck-1")
         val deck = AnkiDeck(deckRef, "Contract")
         val cards = scheduled.map { (noteId, ord) -> testCard(deckRef, noteId, ord) }
@@ -220,7 +220,7 @@ abstract class AnkiScheduledReviewContract {
         return Fixture(backend, contextOf(backend.id, deckRef), deck, scheduled)
     }
 
-    private fun realFixture(scheduled: List<Pair<String, Int>>): Fixture {
+    protected fun realFixture(scheduled: List<Pair<String, Int>>): Fixture {
         val deckRef = AnkiDeckRef(AnkiBackendId.AnkiDroidLocal, "1700000000000")
         val deck = AnkiDeck(deckRef, "Contract")
         val capabilities = AnkiCapabilities(deckListing = true, scheduledReview = true)
@@ -268,13 +268,14 @@ abstract class AnkiScheduledReviewContract {
             capabilityDetails = emptyList()
         )
         val deckGateway = FakeAnkiDroidDeckGateway().also { it.succeed(listOf(deck)) }
-        val results = scheduled.map { (noteId, ord) ->
+        // Explicit element types (invariant MutableList) — pre-existing compile error fixed in GATE 11.
+        val results: MutableList<AnkiResult<AnkiDroidScheduledCardQuery>> = scheduled.mapTo(mutableListOf()) { (noteId, ord) ->
             AnkiResult.Success<AnkiDroidScheduledCardQuery>(
                 AnkiDroidScheduledCardQuery.Scheduled(testScheduledCard(deckRef, noteId, ord), 1L, 1L)
             )
-        }.toMutableList()
+        }
         val reviewGateway = FakeAnkiDroidReviewGateway(results = results.ifEmpty {
-            mutableListOf(AnkiResult.Success(AnkiDroidScheduledCardQuery.NoCardDue(0L)))
+            mutableListOf<AnkiResult<AnkiDroidScheduledCardQuery>>(AnkiResult.Success(AnkiDroidScheduledCardQuery.NoCardDue(0L)))
         })
         val backend = AnkiDroidBackend(
             gateway = FakeAnkiDroidGateway(stateToReturn = state),

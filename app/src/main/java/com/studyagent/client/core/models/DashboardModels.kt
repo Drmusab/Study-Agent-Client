@@ -331,7 +331,9 @@ data class DashboardSnapshotPayload(
             recommendation = newer.recommendation ?: if (replaceNulls) null else recommendation,
             insight = newer.insight ?: if (replaceNulls) null else insight,
             aiUsage = newer.aiUsage ?: if (replaceNulls) null else aiUsage,
-            componentHealth = componentHealth.mergedWith(newer.componentHealth)
+            // Pre-existing compile error fixed in GATE 11 (member call on a nullable receiver):
+            // merge when a previous snapshot exists, otherwise take the newer one as-is.
+            componentHealth = componentHealth?.mergedWith(newer.componentHealth) ?: newer.componentHealth
         )
 }
 
