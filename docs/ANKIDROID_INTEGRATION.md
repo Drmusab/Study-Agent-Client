@@ -962,3 +962,66 @@ failure. Diagnostics (`ANKI_CARD_HYDRATION_*`, `ANKI_CARD_CONTENT_DEGRADED`,
 `AnkiCapabilities.renderedCards = true` when Ready at a supported spec. Unchanged: `review`
 false (GATE 11), `media` false (GATE 09), `deckCounts` false (unverified), `flags` false (no
 contract support at the pin).
+
+---
+
+## 28. GATE 08 — Rendering the provider's card output
+
+Full contract: `docs/GATE_08_ANKI_CARD_RENDERING.md`. Architecture record and the nine required
+sections: `docs/ANKI_INTEGRATION_ARCHITECTURE.md` §28.
+
+GATE 08 adds **no** provider surface. It is recorded here because it is the consumer of §27's
+output and because the boundary it draws is a provider boundary.
+
+### 28.1 What the renderer does with §27's columns
+
+| §27 column | Consumed as | Renderer rule |
+|---|---|---|
+| `question` | `questionHtml` | loaded **verbatim** — never escaped, never re-decoded, never rewritten |
+| `answer` | `answerHtml` | loaded verbatim; it already carries `{{FrontSide}}` + `<hr id=answer>`, so the renderer never prepends the question |
+| `question_simple` / `answer_simple` | `questionText` / `answerText` | the **fallback** channel when HTML is unusable — never the primary channel |
+| `answer_pure` | `pureAnswerText` | **not read by the renderer at all** (it belongs to evaluation) |
+
+The renderer performs **zero** provider queries. No `ContentResolver`, no
+`AnkiDroidCardGateway`, no `AnkiDroidBackend` reference exists in `core/render` or
+`ui/components/anki`; `AnkiRendererIsolationTest` asserts that as a source scan, not as a
+convention (INV-ANKI-RENDER-01).
+
+### 28.2 No AnkiDroid assets, no AnkiDroid JS API
+
+Neither is used, copied or reimplemented (INV-ANKI-RENDER-10/21):
+
+- **No internal reviewer assets.** Study-Agent builds its own minimal document shell around the
+  provider's rendered HTML. No AnkiDroid `reviewer.js`, no private CSS, no internal WebView helper
+  is loaded. The isolation test asserts the absence of AnkiDroid asset paths, MathJax and jQuery.
+- **No `AnkiDroidJsAPI`.** `addJavascriptInterface` is never called, so `window.AnkiDroidJSAPI`
+  is `undefined`. A card written against it degrades predictably instead of crashing, and Study-Agent
+  inherits none of that API's native surface (rating, deck switching, note editing) — which is the
+  point: a card cannot reach the provider, the scheduler or the microphone through Study-Agent.
+- **Base URL is the renderer's own reserved origin**, never a public domain and never
+  `file:///android_asset` (STEP 77/§78).
+
+### 28.3 Capability report (STEP 149)
+
+`AnkiCapabilities` describes what a *backend* can supply, not what the client can draw, so it is
+**unchanged** by this gate: `renderedCards = true` (GATE 07) is the flag that says the provider
+supplies renderable HTML, and `media = false` stays until GATE 09 resolves media.
+
+Client-side rendering capability, which has no backend flag:
+
+```
+Original card rendering ............ IMPLEMENTED — VERIFIED on the JVM; device verification pending
+Rich media / audio / video ......... PENDING — GATE 09
+Full WebView security hardening .... PENDING — GATE 09
+MathJax compatibility .............. PENDING — GATE 09
+Custom font resolution ............. PENDING — GATE 09
+```
+
+### 28.4 Verification status (honest)
+
+195 JVM tests cover the document builder, planner, controller, link policy, state, performance,
+events, the 28-fixture deck and the boundary scans. 32 instrumented tests cover what only Chromium
+can prove — the document actually received, computed styles, RTL resolution, wide-table scrolling,
+JS execution, the absence of a native bridge read back from the platform, and renderer-process
+recovery. **The instrumented suite was NOT RUN** (no emulator or device in the gate environment),
+so no Chromium-side claim above is reported as observed. See GATE 08 doc §14.

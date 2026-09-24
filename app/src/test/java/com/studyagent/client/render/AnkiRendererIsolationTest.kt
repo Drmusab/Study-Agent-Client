@@ -287,6 +287,7 @@ class AnkiRendererIsolationTest {
             "setSupportZoom",
             "builtInZoomControls",
             "displayZoomControls = false",
+            "disabledActionModeMenuItems = WebSettings.MENU_ITEM_WEB_SEARCH",
             "clearHistory()",
             "destroy()",
             "setWebContentsDebuggingEnabled"
@@ -294,6 +295,29 @@ class AnkiRendererIsolationTest {
         required.forEach { token ->
             assertTrue("the WebView host must pin '$token'", host.contains(token))
         }
+    }
+
+    @Test
+    fun `text selection is bounded and no browser context menu exists`() {
+        val host = webViewHost.code()
+        // STEP 141 — selection stays available (a reviewer copies a dose, a gene name or an Arabic term)
+        // but the selection menu is bounded so selected card text cannot be handed to a search engine.
+        assertTrue(
+            "the selection menu must disable web search (STEP 141)",
+            host.contains("disabledActionModeMenuItems = WebSettings.MENU_ITEM_WEB_SEARCH")
+        )
+        // STEP 142 — the generic browser menu ("open in new tab", "download image", "save link as") is
+        // never offered: no context menu is registered on the card WebView at all.
+        assertFalse(
+            "registerForContextMenu must never be called on the card WebView (STEP 142)",
+            host.contains("registerForContextMenu")
+        )
+        // Long press is routed to text selection instead, and the link policy stays the only
+        // navigation path a card has (INV-ANKI-RENDER-16).
+        assertTrue(
+            "long press must be left to text selection (STEP 142)",
+            host.contains("isLongClickable = true")
+        )
     }
 
     @Test

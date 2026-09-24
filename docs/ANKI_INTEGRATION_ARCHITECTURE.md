@@ -1423,3 +1423,154 @@ reviewer would otherwise miss.
 is deliberate §122/§124 behaviour: a scheduled card has no question or answer yet, and modelling
 "not loaded" as an empty string would make it indistinguishable from a card whose answer really is
 empty.
+
+---
+
+## GATE 08 — Original card rendering
+
+Full contract, WebView settings table, compatibility matrix and per-invariant verdicts:
+`docs/GATE_08_ANKI_CARD_RENDERING.md`.
+
+This section is the architecture record: it fixes *where* the renderer sits, what it may and may
+not touch, and what GATE 09 inherits.
+
+### 28.1 Original Card Renderer
+
+The renderer consumes `AnkiRenderedCard` — the normalized GATE 07 model — and nothing else. It
+never queries AnkiDroid, never calls a gateway, never reads a `ContentResolver` (INV-ANKI-RENDER-01).
+
+```
+             AnkiRenderedCard (GATE 07)
+                        │
+                        ▼
+              AnkiCardRenderer (Compose)
+                        │
+        ┌───────────────┴────────────────┐
+        ▼                                ▼
+ AnkiCardRenderController        CleanAnkiCardView
+   (decisions, core/render)        (Compose text)
+        │
+        ▼
+ AnkiCardRenderSurface ──► AnkiCardWebViewHost ──► Android WebView
+   (the seam)              (ui/components/anki)    (HTML / CSS / JS)
+```
+
+Two packages, one rule: `core/render` is Android-free and JVM-testable; `ui/components/anki` is
+the only place `android.webkit` appears. `AnkiCardRenderSurface` — the seam between them — has no
+imports at all, so the decision core (stale-callback rejection, fallback order, recovery) is proven
+on a JVM and the platform layer stays thin.
+
+Render modes: `ORIGINAL` is production-ready. `CLEAN` renders normalized text in Compose.
+`VOICE_FOCUS` and `ADAPTIVE` exist in the type system and resolve predictably, but are **not**
+final designs — see the GATE 08 doc §16.
+
+### 28.2 WebView Lifecycle
+
+Exactly **one** live WebView; no pool (`MAX_LIVE_WEBVIEWS = 1`, INV-ANKI-RENDER-22).
+
+| Event | Behaviour |
+|---|---|
+| creation | one `WebView` per card surface, inside `remember`, on a `MutableContextWrapper` |
+| recomposition | **no** reload: `submit()` returns `false` for an identical request (INV-ANKI-RENDER-23) |
+| new card / new side | same instance, a **full new document** — so the JS global scope is recreated (INV-ANKI-RENDER-25) |
+| renderer-process death | `surfaceToken++` → old instance released, new one created, same turn/card/side re-presented |
+| session end | `DisposableEffect.onDispose` → `release()`: `stopLoading`, `clearHistory`, context swapped to application, `destroy()` |
+| rotation | no recreation — the Activity declares `configChanges="orientation|screenSize|screenLayout|keyboardHidden"` |
+
+Ownership is explicit: the composition that created the WebView releases it. The controller never
+destroys a WebView it did not create, which makes a double-destroy impossible.
+
+### 28.3 Question/Answer Rendering
+
+The side is **always an explicit input** (`AnkiCardSide`), never inferred from `answerHtml != null`
+(INV-ANKI-RENDER-04). Question and answer are two documents of the **same** `ReviewTurnId`
+(INV-ANKI-RENDER-05).
+
+Per the pinned AnkiDroid contract the answer side already contains the question when the template
+uses `{{FrontSide}}`, followed by `<hr id=answer>`. The renderer therefore **never** prepends
+question HTML to answer HTML and never composes `questionHtml + "<hr>" + answerHtml`
+(INV-ANKI-RENDER-12). Transition strategy: **full answer document render**, chosen over an in-place
+DOM update because it needs no JS bridge and resets the page's JS scope for free.
+
+### 28.4 JavaScript Policy
+
+`AnkiJavascriptPolicy` has exactly two members: `DISABLED` and `CARD_TEMPLATE_ONLY`
+(default for ORIGINAL). There is deliberately **no** `FULL_TRUSTED_NATIVE_ACCESS`.
+
+`addJavascriptInterface` is **never called**. Card JS therefore has **zero** native capabilities:
+no rating, no session mutation, no microphone, no filesystem, no AI, no `Context`, no `AnkiDroidJsAPI`
+(INV-ANKI-RENDER-08/09, STEP 51-§53). A card written against `AnkiDroidJSAPI` finds `undefined`;
+its exception is counted as a renderer diagnostic, not a crash.
+
+### 28.5 Link Handling
+
+`AnkiCardLinkPolicy` classifies every navigation; the card never navigates the reviewer away from
+itself (INV-ANKI-RENDER-16/17).
+
+| Input | Decision |
+|---|---|
+| `#fragment` | `ALLOW_IN_PAGE` — the page may honour it |
+| `http(s)://` | `OPEN_EXTERNALLY` — mediated upward via `AnkiExternalLinkHandler`; the card stays put |
+| the renderer's own reserved origin | `BLOCKED` |
+| `file:` `content:` `intent:` `market:` `mailto:` `tel:` `anki:` `ankidroid:` `studyagent:` `javascript:` `data:` `blob:` | `BLOCKED` |
+| unparseable / scheme-less / unknown | `BLOCKED` |
+
+### 28.6 Fallback Rendering
+
+```
+ORIGINAL HTML  →  WebView
+     ↓ HTML unavailable / load failure / renderer death / no WebView provider
+CLEAN text     →  questionText | answerText from GATE 07
+     ↓ no text channel either
+typed failure  →  explicit message; never a blank surface
+```
+
+Fallback uses **only** existing normalized data — content is never invented (INV-ANKI-RENDER-20),
+and the degradation is recorded as `ORIGINAL_FAILED → CLEAN_FALLBACK` (STEP 69).
+
+### 28.7 Render State
+
+`AnkiRenderState`: `Idle` / `Loading` / `Ready` / `Failed`, each carrying the
+`AnkiRenderRequestId` (turn, card, side, monotonic generation) it belongs to.
+
+**Card-domain readiness and page readiness are distinct** (STEP 17): the card is bound when the
+document is submitted; `Ready(pageFinished = true)` additionally means Chromium finished the page.
+Every WebView callback is stamped with the request it was loaded with, so a late
+`onPageFinished` from Turn A cannot mark Turn B ready (INV-ANKI-RENDER-06).
+
+### 28.8 Renderer Failure
+
+Typed, presentation-only failures: `HtmlUnavailable`, `WebViewLoadFailure(errorCode, category)`,
+`RendererProcessGone(didCrash)`, `SslErrorBlocked`, `WebViewUnavailable(category)`, `JavascriptFailure`.
+
+A render failure is **never** mapped to `AnkiBackendUnavailable` / `CardNotFound`
+(INV-ANKI-RENDER-18), and **never** mutates Anki: no auto-rate, no bury, no suspend, no skip
+(INV-ANKI-RENDER-19). The card stays due and unrated; the failure surface says so in words.
+
+### 28.9 Card Compatibility Matrix
+
+Capability status after this gate (STEP 149). Full 28-fixture matrix with JVM/device columns:
+GATE 08 doc §11.
+
+| Capability | Status |
+|---|---|
+| **Original card rendering (HTML/CSS fidelity)** | **IMPLEMENTED — VERIFIED (JVM); device verification pending** |
+| Question / answer sides, same turn | IMPLEMENTED — VERIFIED (JVM) |
+| Cloze rendered output (no local cloze logic) | IMPLEMENTED — VERIFIED (JVM) |
+| Arabic / RTL / bidi mixing | IMPLEMENTED — VERIFIED (JVM) |
+| Card JavaScript in page context, no native bridge | IMPLEMENTED — VERIFIED (JVM) |
+| Link mediation, unknown schemes blocked | IMPLEMENTED — VERIFIED (JVM) |
+| Render failure + text fallback | IMPLEMENTED — VERIFIED (JVM) |
+| Rich media (image/audio/video resolution) | **PENDING — GATE 09** |
+| Full WebView security hardening | **PENDING — GATE 09** |
+| MathJax compatibility | **PENDING — GATE 09** |
+| Custom font resolution | **PENDING — GATE 09** |
+
+`AnkiCapabilities` is unchanged: it describes what a *backend* can do, not what the renderer can
+draw. `renderedCards = true` (GATE 07) remains the flag that says a backend supplies renderable
+HTML; `media = false` until GATE 09.
+
+**Device verification is the open item.** 32 instrumented tests exist and are committed as
+executable specifications, but no emulator or device was available in the gate environment, so the
+Chromium-side rows above are asserted, not observed. See the GATE 08 doc §14 for the exact
+environment block.
