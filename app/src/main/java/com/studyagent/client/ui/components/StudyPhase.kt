@@ -72,6 +72,16 @@ enum class StudyPhase {
     ERROR
 }
 
+/**
+ * GATE 11 — rating buttons are enabled only where the session machine can accept a rating
+ * (waiting for a rating, or feedback that permits an early rating). While a rating is being
+ * saved (`Loading` with a pending rating), or a rating transaction failed/is unconfirmed, they are
+ * disabled so a double tap cannot even produce a second intent. The reducer remains the authority;
+ * this only stops the UI from offering an action that would be rejected.
+ */
+fun ratingControlsEnabled(state: StudyState): Boolean =
+    state is StudyState.WaitingForRating || state is StudyState.ShowingFeedback
+
 /** Pure mapping: protocol state → presentation phase (unit-testable, §23). */
 fun studyPhaseOf(state: StudyState): StudyPhase = when (state) {
     is StudyState.Idle -> StudyPhase.IDLE

@@ -4,18 +4,23 @@ import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCapabilities
+import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiRatingOptions
+import com.studyagent.client.core.anki.AnkiRenderedCard
 import com.studyagent.client.core.anki.AnkiResult
 import com.studyagent.client.core.anki.AnkiReviewTurn
 import com.studyagent.client.core.anki.AnkiReviewTurnContent
 import com.studyagent.client.core.anki.AnkiScheduledCard
 import com.studyagent.client.core.anki.unavailabilityError
 import com.studyagent.client.core.anki.BeginReviewRequest
+import com.studyagent.client.core.anki.CommitPreparation
 import com.studyagent.client.core.anki.CommitRatingRequest
 import com.studyagent.client.core.anki.CommitRatingResult
+import com.studyagent.client.core.anki.ReconcileCommitRequest
+import com.studyagent.client.core.anki.ReconcileCommitResult
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.AnkiReviewSession
 import com.studyagent.client.core.common.AppClock
@@ -48,9 +53,10 @@ import java.util.UUID
  * GATE 06 implements [beginReview] / [nextCard] through [AnkiDroidReviewGateway], and owns the
  * one piece of runtime state that cannot live in the gateway: **the active review turn of the
  * active session** (§60/§61). GATE 07 implements [hydrateCardContent] through
- * [AnkiDroidCardGateway] — read-only, identity-verified, turn-agnostic (STEP 52). [commitRating]
- * still refuses truthfully (§146) — rating mutation is GATE 11 and nothing here may pretend
- * otherwise.
+ * [AnkiDroidCardGateway] — read-only, identity-verified, turn-agnostic (STEP 52). GATE 11
+ * implements [prepareCommit] / [commitRating] / [reconcileCommit] through the single writer
+ * [AnkiDroidRatingGateway] and [AnkiDroidRatingCommitter]; without a rating gateway they refuse
+ * truthfully and `review` is not advertised.
  *
  * Architecture:
  * AnkiDroidGateway (health) + AnkiDroidDeckGateway (decks) + AnkiDroidReviewGateway (scheduler)
@@ -73,7 +79,12 @@ class AnkiDroidBackend(
     private val deckGateway: AnkiDroidDeckGateway,
     private val reviewGateway: AnkiDroidReviewGateway,
     private val cardGateway: AnkiDroidCardGateway,
-    private val turnIds: ReviewTurnIdSource = SequentialReviewTurnIdSource()
+    private val turnIds: ReviewTurnIdSource = SequentialReviewTurnIdSource(),
+    /**
+     * GATE 11 — the only writer. Absent (tests, older composition) = rating commits are refused
+     * truthfully and the `review` capability is not advertised.
+     */
+    private val ratingGateway: AnkiDroidRatingGateway? = null
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
@@ -90,8 +101,14 @@ class AnkiDroidBackend(
         .stateIn(scope, SharingStarted.Eagerly, _integrationState.value.availability)
 
     override val capabilities: StateFlow<AnkiCapabilities> = _integrationState
-        .map { it.capabilities }
-        .stateIn(scope, SharingStarted.Eagerly, _integrationState.value.capabilities)
+        .map { withRatingSupport(it.capabilities) }
+        .stateIn(scope, SharingStarted.Eagerly, withRatingSupport(_integrationState.value.capabilities))
+
+    /** GATE 11 — the full review loop (`review`) is only claimed when a rating writer is wired. */
+    private fun withRatingSupport(capabilities: AnkiCapabilities): AnkiCapabilities =
+        if (ratingGateway == null) capabilities.copy(review = false) else capabilities
+
+    private val committer: AnkiDroidRatingCommitter? = ratingGateway?.let { AnkiDroidRatingCommitter(it, clock) }
 
     /** Full integration state for diagnostics and settings (internal but observable). */
     val integrationState: StateFlow<AnkiDroidIntegrationState> = _integrationState.asStateFlow()
@@ -403,7 +420,15 @@ class AnkiDroidBackend(
             return NextCardResult.Failure(AnkiError.UnsupportedAction(action = "scheduledReview"))
         }
 
-        record.activeTurn?.let { return NextCardResult.Card(it) }
+        record.activeTurn?.let { turn ->
+            // GATE 11 — an unresolved turn whose commit is AMBIGUOUS or rejected blocks progression
+            // with a typed failure; it is never silently replaced by the next card.
+            return when (record.commits[turn.commitId]?.result) {
+                is CommitRatingResult.Ambiguous, is CommitRatingResult.Rejected ->
+                    NextCardResult.Failure(AnkiError.CommitConflict(turn.cardRef))
+                else -> NextCardResult.Card(turn)
+            }
+        }
         if (record.schedulerExhausted) return NextCardResult.Finished
 
         val authority = currentAuthority()
@@ -498,7 +523,7 @@ class AnkiDroidBackend(
      * refused like any other unknown one — which is also the observable proof that recovery after
      * process/backend recreation cannot resurrect a stale turn (§97/§99/§161).
      */
-    suspend fun endReview(session: AnkiReviewSession): Boolean = reviewMutex.withLock {
+    override suspend fun endReview(session: AnkiReviewSession): Boolean = reviewMutex.withLock {
         val removed = reviewRecords.remove(session.backendSessionRef) != null
         if (removed) {
             hydrationMemo = null // STEP 83 — session end invalidates the turn-scoped cache.
@@ -531,23 +556,136 @@ class AnkiDroidBackend(
     }
 
     /**
-     * GATE 06 deliberately does not implement this (§35/§36/§146).
+     * GATE 11 — read-only preparation: validates the commit against the live session and captures
+     * the card's stored review counters as the durable baseline (STEP 58).
+     */
+    override suspend fun prepareCommit(request: CommitRatingRequest): CommitPreparation {
+        try {
+            return reviewMutex.withLock {
+                validateCommit(request)?.let { return@withLock CommitPreparation.Refused(it, retryable = false) }
+                val committer = this.committer
+                    ?: return@withLock CommitPreparation.Refused(AnkiError.UnsupportedAction("ratingCommit"), retryable = false)
+                usabilityError()?.let { return@withLock CommitPreparation.Refused(it, retryable = true) }
+                val authority = currentAuthority()
+                    ?: return@withLock CommitPreparation.Refused(AnkiError.QueryFailure("authority-unknown"), retryable = true)
+                committer.prepare(authority, request.card)
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (throwable: Throwable) {
+            return CommitPreparation.Refused(AnkiError.Unknown(cause = throwable::class.java.simpleName), retryable = true)
+        }
+    }
+
+    /**
+     * GATE 11 — the rating mutation (STEP 18-§28).
      *
-     * Rating mutation needs card extraction, rendering, StudySession wiring and an exactly-once
-     * ledger before it can be safe; until GATE 11 owns all of those, the honest answer is a typed
-     * refusal — never a fabricated success. `Rejected` (not `Ambiguous`) is correct and provable:
-     * nothing was dispatched, so no write can have happened.
+     * One lock spans validation, the provider protocol and the turn update, so a duplicate call
+     * waits and then answers from [ReviewSessionRecord.commits] instead of reaching the provider
+     * again, and `nextCard` can never interleave with a commit of the active turn. The protocol
+     * itself — preconditions, the single provider update, evidence-based classification — lives in
+     * [AnkiDroidRatingCommitter]. Only `Committed` releases the turn, so the next `nextCard` asks
+     * the scheduler; anything escaping after the lock is AMBIGUOUS, never a failure.
      */
     override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
         try {
-            AppLogger.i(TAG, "ANKI_RATING_COMMIT_REFUSED (GATE 11 owns rating mutation)")
-            return CommitRatingResult.Rejected(
-                AnkiError.UnsupportedAction(action = "ratingCommitIntegrationPending")
-            )
+            return reviewMutex.withLock { commitLocked(request) }
         } catch (cancellation: CancellationException) {
             throw cancellation
+        } catch (throwable: Throwable) {
+            AppLogger.w(TAG, "ANKI_COMMIT_UNEXPECTED error=${throwable::class.java.simpleName}")
+            return CommitRatingResult.Ambiguous(AnkiError.Unknown(cause = throwable::class.java.simpleName))
         }
     }
+
+    private suspend fun commitLocked(request: CommitRatingRequest): CommitRatingResult {
+        if (request.commitId.backendId != id || request.card.backendId != id) {
+            return CommitRatingResult.Rejected(AnkiError.SessionInvalid())
+        }
+        val record = sessionRecordFor(request.commitId.studySessionId)
+            ?: return CommitRatingResult.Rejected(AnkiError.SessionInvalid())
+        record.commits[request.commitId]?.let { previous ->
+            if (!previous.samePayload(request)) return CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card))
+            // Known outcomes are final here; only a proven-not-applied attempt may be sent again.
+            if (previous.result !is CommitRatingResult.RetryableFailure) return previous.result
+        }
+        validateCommit(request)?.let { return CommitRatingResult.Rejected(it) }
+        val committer = this.committer
+            ?: return CommitRatingResult.Rejected(AnkiError.UnsupportedAction("ratingCommit"))
+        usabilityError()?.let { return CommitRatingResult.RetryableFailure(it) }
+        val authority = currentAuthority()
+            ?: return CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("authority-unknown"))
+        val deckId = record.deckRef.deckId.toLongOrNull()
+            ?: return CommitRatingResult.Rejected(AnkiError.InvalidRequest("deck_id_unmappable"))
+
+        val result = committer.commit(authority, deckId, request)
+        record.rememberCommit(request.commitId, BackendCommitRecord(request.card, request.rating, result))
+        if (result is CommitRatingResult.Committed) {
+            record.activeTurn = null // resolved: the next nextCard() asks the scheduler again
+            hydrationMemo = null
+        }
+        AppLogger.i(TAG, "ANKI_COMMIT_RESULT result=${result::class.simpleName}")
+        return result
+    }
+
+    /**
+     * GATE 11 — reconciliation from the durable baseline. Works without the original session (after
+     * process death); when the session is still open its turn follows the decision.
+     */
+    override suspend fun reconcileCommit(request: ReconcileCommitRequest): ReconcileCommitResult {
+        try {
+            return reviewMutex.withLock {
+                if (request.commitId.backendId != id) return@withLock ReconcileCommitResult.Unsupported("foreign_backend")
+                val committer = this.committer ?: return@withLock ReconcileCommitResult.Unsupported()
+                usabilityError()?.let { return@withLock ReconcileCommitResult.Unavailable(it) }
+                val authority = currentAuthority()
+                    ?: return@withLock ReconcileCommitResult.Unavailable(AnkiError.QueryFailure("authority-unknown"))
+                val result = committer.reconcile(authority, request)
+                sessionRecordFor(request.commitId.studySessionId)?.let { record ->
+                    val turn = record.activeTurn
+                    if (turn != null && turn.commitId == request.commitId) {
+                        val decided: CommitRatingResult? = when (result) {
+                            is ReconcileCommitResult.Applied -> CommitRatingResult.Committed()
+                            is ReconcileCommitResult.NotApplied ->
+                                if (result.safeToRetry) CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("reconciled_not_applied"))
+                                else CommitRatingResult.Rejected(AnkiError.CommitConflict(turn.cardRef))
+                            else -> null
+                        }
+                        if (decided != null) {
+                            record.rememberCommit(request.commitId, BackendCommitRecord(request.card, request.rating, decided))
+                            if (decided is CommitRatingResult.Committed) {
+                                record.activeTurn = null
+                                hydrationMemo = null
+                            }
+                        }
+                    }
+                }
+                result
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (throwable: Throwable) {
+            return ReconcileCommitResult.StillAmbiguous("reconcile_failed_${throwable::class.java.simpleName}")
+        }
+    }
+
+    /** Session + turn + scheduler-offered rating. `null` = valid. Never touches the provider. */
+    private fun validateCommit(request: CommitRatingRequest): AnkiError? {
+        if (request.commitId.backendId != id || request.card.backendId != id) return AnkiError.SessionInvalid()
+        val record = sessionRecordFor(request.commitId.studySessionId) ?: return AnkiError.SessionInvalid()
+        val turn = record.activeTurn
+        if (turn == null || turn.turnId != request.commitId.turnId || turn.cardRef != request.card) {
+            return AnkiError.StaleTurn()
+        }
+        val options = turn.ratingOptions
+        if (options !is AnkiRatingOptions.Known || !options.supports(request.rating)) {
+            return AnkiError.InvalidRequest("rating_not_offered_by_scheduler")
+        }
+        return null
+    }
+
+    private fun sessionRecordFor(studySessionId: String): ReviewSessionRecord? =
+        reviewRecords.values.firstOrNull { it.session.context.studySessionId == studySessionId }
 
     private fun usabilityError(): AnkiError? =
         _integrationState.value.availability.unavailabilityError()

@@ -122,8 +122,8 @@ object AnkiDroidCompatibilityPolicy {
      * card metadata (verified mapping against the pinned card contract, JVM-tested). Everything
      * the card-content read does *not* have stays false:
      *
-     * - [AnkiCapabilities.review] — the full loop still needs rating commit (GATE 11), so
-     *   `isReadyForReview` stays false and no production flow may start a rated session;
+     * - [AnkiCapabilities.review] — GATE 11 adds rating commit, so the full loop is now claimed
+     *   (implemented, not yet verified on a device);
      * - [AnkiCapabilities.media] — media names are kept as references, nothing is resolved or
      *   read (GATE 09);
      * - [AnkiCapabilities.flags] — the pinned card contract exposes no flags column at all
@@ -138,6 +138,10 @@ object AnkiDroidCompatibilityPolicy {
     ): AnkiCapabilities {
         if (!isReady || spec == null || !isSpecSupported(spec)) return AnkiCapabilities.NONE
         return AnkiCapabilities(
+            // GATE 11 — rating commit is implemented (single writer, durable ledger, evidence-based
+            // verification). Maturity stays IMPLEMENTED, not VERIFIED: no real-device mutation run
+            // has happened. The backend drops this flag again when no rating gateway is wired.
+            review = true,
             deckListing = true,
             scheduledReview = true,
             reviewIntervals = true,

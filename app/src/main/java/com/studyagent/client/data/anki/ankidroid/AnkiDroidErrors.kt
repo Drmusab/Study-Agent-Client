@@ -139,7 +139,10 @@ enum class AnkiDroidOperationStage {
     COLLECTION_PROBE,
 
     /** GATE 05 — a projected data query (deck list, selected deck) rather than the health probe. */
-    PROVIDER_QUERY
+    PROVIDER_QUERY,
+
+    /** GATE 11 — a provider `update` (the rating answer or the temporary deck selection). */
+    PROVIDER_UPDATE
 }
 
 /**

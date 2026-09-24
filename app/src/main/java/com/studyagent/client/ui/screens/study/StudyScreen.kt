@@ -79,6 +79,8 @@ import com.studyagent.client.ui.components.SectionHeader
 import com.studyagent.client.ui.components.StudySessionHeader
 import com.studyagent.client.ui.components.VoiceWaveVisualizer
 import com.studyagent.client.ui.components.studyPhaseOf
+import com.studyagent.client.ui.components.ratingControlsEnabled
+import com.studyagent.client.core.study.RatingCommitRecoveryUi
 import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.AppShape
 import com.studyagent.client.ui.theme.AppSpacing
@@ -121,6 +123,9 @@ fun StudyScreen(
     val audioRouteAttention = audioRouteAttentionState?.value
     val pendingAudioRouteState = viewModel.pendingAudioRoute?.collectAsStateWithLifecycle()
     val pendingAudioRoute = pendingAudioRouteState?.value
+    // GATE 11 — rating transaction status, backend-neutral (the screen never asks which backend).
+    val ratingCommitRecoveryState = viewModel.ratingCommitRecovery?.collectAsStateWithLifecycle()
+    val ratingCommitRecovery = ratingCommitRecoveryState?.value
     var phoneNoticeDismissed by rememberSaveable { mutableStateOf(false) }
 
     val phase = remember(studyState) { studyPhaseOf(studyState) }
@@ -230,8 +235,36 @@ fun StudyScreen(
                         PausedCard(onResume = { viewModel.onResumeSession() })
                     }
 
+                    // GATE 11 — saving / not saved / unconfirmed. The only actions are an explicit retry of
+                    // the *same* rating (when proven safe) and a read-only "check again"; ending the session
+                    // stays available below. A new rating is never offered while this is visible.
+                    ratingCommitRecovery?.let { recovery ->
+                        val recoveryAction: (() -> Unit)? = when {
+                            recovery.canRetry -> viewModel::onRetryRatingCommit
+                            recovery.canCheckAgain -> viewModel::onCheckRatingCommit
+                            else -> null
+                        }
+                        InfoBanner(
+                            title = recovery.title,
+                            message = recovery.message,
+                            tone = when (recovery.status) {
+                                RatingCommitRecoveryUi.Status.NOT_SAVED,
+                                RatingCommitRecoveryUi.Status.UNCONFIRMED -> BannerTone.DANGER
+                                RatingCommitRecoveryUi.Status.EARLIER_UNCONFIRMED -> BannerTone.WARNING
+                                RatingCommitRecoveryUi.Status.SAVING,
+                                RatingCommitRecoveryUi.Status.CHECKING -> BannerTone.INFO
+                            },
+                            actionLabel = when {
+                                recovery.canRetry -> "Retry same rating"
+                                recovery.canCheckAgain -> "Check again"
+                                else -> null
+                            },
+                            onAction = recoveryAction
+                        )
+                    }
+
                     // Error surface (§30): plain language here; details live in Diagnostics.
-                    (studyState as? StudyState.Error)?.let { error ->
+                    (studyState as? StudyState.Error)?.takeIf { ratingCommitRecovery == null }?.let { error ->
                         InfoBanner(
                             title = if (error.recoverable) "Something went wrong" else "Session stopped",
                             message = error.message,
@@ -401,7 +434,8 @@ fun StudyScreen(
                     RatingButtonGroup(
                         onRate = { rating -> viewModel.onRateCard(rating) },
                         suggestedRating = suggestedRating,
-                        enabled = studyState !is StudyState.Idle && studyState !is StudyState.SessionFinished
+                        enabled = ratingControlsEnabled(studyState) &&
+                            (ratingCommitRecovery?.ratingControlsEnabled ?: true)
                     )
 
                     Row(

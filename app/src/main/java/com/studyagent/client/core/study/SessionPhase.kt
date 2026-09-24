@@ -38,8 +38,23 @@ sealed interface SessionPhase {
     /** Feedback complete, awaiting user's rating. */
     data object WaitingForRating : SessionPhase
 
-    /** Rating ownership-claimed and being sent; awaiting RatingSaved. */
+    /**
+     * Rating ownership-claimed and being sent; awaiting RatingSaved (PC) or the persisted commit
+     * outcome (local Anki, GATE 11). The rating itself is data on the machine state, never a phase.
+     */
     data object SubmittingRating : SessionPhase
+
+    /**
+     * GATE 11 — the rating is known NOT applied (ledger FAILED). The turn stays unresolved: the
+     * user may retry the *same* commit when it is safe, or end the session. Never advances.
+     */
+    data object RatingCommitFailed : SessionPhase
+
+    /**
+     * GATE 11 — the rating may or may not have been applied (ledger AMBIGUOUS). Progression is
+     * blocked; only reconciliation evidence or ending the session leaves this phase. No re-rate.
+     */
+    data object ReconciliationRequired : SessionPhase
 
     /** A hint TTS is playing / hint overlay visible. */
     data object SpeakingHint : SessionPhase
@@ -93,6 +108,8 @@ sealed interface SessionPhase {
             SpeakingFeedback -> "Feedback"
             WaitingForRating -> "WaitingForRating"
             SubmittingRating -> "SubmittingRating"
+            RatingCommitFailed -> "RatingCommitFailed"
+            ReconciliationRequired -> "ReconciliationRequired"
             SpeakingHint -> "Hint"
             SpeakingExplanation -> "Explanation"
             ShowingAnswer -> "AnswerReveal"
@@ -102,7 +119,7 @@ sealed interface SessionPhase {
             Recovering -> "Recovering"
             Finishing -> "Finishing"
             Finished -> "Finished"
-            is Error -> "Error(${problem.name})"
+            is Error -> "Error(${phase.problem.name})"
         }
     }
 }

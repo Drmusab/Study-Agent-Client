@@ -61,16 +61,16 @@ class AnkiDroidIntegrationStateTest {
         assertTrue(caps.scheduledReview)
         assertTrue(caps.reviewIntervals)
         assertTrue(caps.renderedCards)
-        // The capability matrix must not move ahead of the code (§75/§147): no rating commit,
-        // no media resolution, no flags, no deck-count verification.
-        assertFalse(caps.review)
+        // The capability matrix must not move ahead of the code (§75/§147): GATE 11 implements
+        // rating commit; still no media resolution, no flags, no deck-count verification.
+        assertTrue(caps.review)
         assertFalse(caps.media)
         assertFalse(caps.flags)
         assertFalse(caps.deckCounts)
     }
 
     @Test
-    fun `the capability matrix reports card content as implemented and commit as pending`() {
+    fun `the capability matrix reports card content and rating commit as implemented`() {
         val caps = AnkiDroidCompatibilityPolicy.implementedCapabilitiesFor(spec = 2, isReady = true)
         val rows = AnkiDroidCompatibilityPolicy.apiCapabilitiesForSpec(2)
             .toCapabilityDetailList(caps)
@@ -78,10 +78,8 @@ class AnkiDroidIntegrationStateTest {
 
         assertEquals(CapabilityMaturity.IMPLEMENTED, rows.getValue("scheduledReview").maturity)
         assertEquals(CapabilityMaturity.IMPLEMENTED, rows.getValue("nextReviewIntervals").maturity)
-        assertEquals(
-            CapabilityMaturity.API_SUPPORTED_NOT_IMPLEMENTED,
-            rows.getValue("ratingCommit").maturity
-        )
+        // GATE 11 — implemented (not VERIFIED: no real-device mutation run).
+        assertEquals(CapabilityMaturity.IMPLEMENTED, rows.getValue("ratingCommit").maturity)
         // The row must be built from the same flags the backend publishes, not from a hopeful
         // default: implemented rows match the capability, flags stay API-unsupported.
         assertEquals(CapabilityMaturity.IMPLEMENTED, rows.getValue("renderedCards").maturity)

@@ -5,7 +5,11 @@ import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiReviewSession
 import com.studyagent.client.core.anki.AnkiReviewTurn
 import com.studyagent.client.core.anki.BeginReviewRequest
+import com.studyagent.client.core.anki.CommitRatingRequest
+import com.studyagent.client.core.anki.CommitRatingResult
+import com.studyagent.client.core.anki.ReviewCommitId
 import com.studyagent.client.core.anki.ReviewTurnId
+import com.studyagent.client.core.models.Rating
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -37,6 +41,32 @@ internal class ReviewSessionRecord(
 
     /** The scheduler answered "nothing more for this deck" (§31/§32). */
     var schedulerExhausted: Boolean = false
+
+    /**
+     * GATE 11 — outcomes of this session's commits, keyed by commit id: a repeated commit answers
+     * from here instead of reaching the provider again (defense in depth behind the durable
+     * ledger). Bounded; the active turn's entry is never evicted.
+     */
+    val commits: LinkedHashMap<ReviewCommitId, BackendCommitRecord> = LinkedHashMap()
+
+    fun rememberCommit(commitId: ReviewCommitId, record: BackendCommitRecord) {
+        commits.remove(commitId)
+        commits[commitId] = record
+        val activeCommit = activeTurn?.commitId
+        val iterator = commits.keys.iterator()
+        while (commits.size > MAX_REMEMBERED_COMMITS && iterator.hasNext()) {
+            if (iterator.next() != activeCommit) iterator.remove()
+        }
+    }
+
+    private companion object {
+        const val MAX_REMEMBERED_COMMITS = 32
+    }
+}
+
+/** GATE 11 — one remembered commit: its payload (for conflict detection) and its outcome. */
+internal data class BackendCommitRecord(val card: AnkiCardRef, val rating: Rating, val result: CommitRatingResult) {
+    fun samePayload(request: CommitRatingRequest): Boolean = request.card == card && request.rating == rating
 }
 
 /**

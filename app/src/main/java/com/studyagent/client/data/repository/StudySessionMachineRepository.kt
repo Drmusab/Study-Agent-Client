@@ -78,6 +78,26 @@ class StudySessionMachineRepository(
         machine.dispatch(com.studyagent.client.core.study.AnkiStudyEvent.Start(request))
     }
 
+    /** GATE 11 — derived by the machine from its authoritative state; never written here. */
+    override val ratingCommitRecovery: StateFlow<RatingCommitRecoveryUi?>
+        get() = machine.ratingCommitRecovery
+
+    /**
+     * GATE 11 — intents only. The reducer decides whether a retry is legal (FAILED and proven safe)
+     * and re-sends the *recorded* request, so this can never change the rating or the commit id.
+     */
+    override suspend fun retryRatingCommit() {
+        val state = machine.machineState.value
+        val commit = state.anki?.commit ?: return
+        machine.dispatch(AnkiStudyEvent.RetryRatingCommit(state.epoch, commit.commitId))
+    }
+
+    override suspend fun reconcileRatingCommit() {
+        val state = machine.machineState.value
+        val commit = state.anki?.commit ?: return
+        machine.dispatch(AnkiStudyEvent.ReconcileRatingCommit(state.epoch, commit.commitId))
+    }
+
     override suspend fun startStudy(deckName: String?, mode: String, config: com.studyagent.client.core.models.SessionStartConfig?) {
         startOrBlock(deckName, mode, config)
     }

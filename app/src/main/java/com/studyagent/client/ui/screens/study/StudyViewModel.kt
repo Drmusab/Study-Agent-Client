@@ -12,6 +12,7 @@ import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudySession
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.models.VoiceCommand
+import com.studyagent.client.core.study.RatingCommitRecoveryUi
 import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.data.preferences.PreferencesDataStore
@@ -67,6 +68,22 @@ class StudyViewModel(
         viewModelScope.launch {
             studySessionRepository.rateCurrentCard(rating)
         }
+    }
+
+    /**
+     * GATE 11 — backend-neutral rating-transaction status. `null` for repositories without local
+     * rating commits (the PC path keeps its own remote idempotency).
+     */
+    val ratingCommitRecovery: StateFlow<RatingCommitRecoveryUi?>? = studySessionRepository.ratingCommitRecovery
+
+    /** Retry the same, proven-not-applied rating (same commit id and rating). Never a new rating. */
+    fun onRetryRatingCommit() {
+        viewModelScope.launch { studySessionRepository.retryRatingCommit() }
+    }
+
+    /** Read-only reconciliation of an unconfirmed rating. Never re-sends the rating. */
+    fun onCheckRatingCommit() {
+        viewModelScope.launch { studySessionRepository.reconcileRatingCommit() }
     }
 
     fun onRepeatQuestion() {

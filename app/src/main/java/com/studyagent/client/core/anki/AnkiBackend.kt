@@ -81,11 +81,48 @@ interface AnkiBackend {
     suspend fun hydrateCardContent(card: AnkiCardRef): AnkiResult<AnkiRenderedCard>
 
     /**
+     * GATE 11 — read-only preparation of one rating transaction, called *before* the ledger marks
+     * the commit SUBMITTING.
+     *
+     * A backend that can verify its own writes returns [CommitPreparation.Ready] with opaque
+     * [ReviewCommitEvidence] (for AnkiDroid: the card's stored review counters). The evidence is
+     * persisted with SUBMITTING, so a commit interrupted by process death can still be reconciled
+     * against the state that existed before the mutation. [CommitPreparation.Refused] is a
+     * pre-mutation refusal: nothing was written.
+     *
+     * The default is "no evidence concept": commits still work, but reconciliation stays
+     * [ReconcileCommitResult.Unsupported] — honest, never fabricated certainty.
+     */
+    suspend fun prepareCommit(request: CommitRatingRequest): CommitPreparation = CommitPreparation.Ready(null)
+
+    /**
      * Same commit ID and payload must not mutate twice; different payload is a conflict.
      * Ambiguous writes block progression and blind resubmission until reconciled.
      * This interface supplies correlation, NOT a claim of distributed exactly-once delivery.
+     *
+     * GATE 11 result contract (see [CommitRatingResult]): `Committed` only when the backend has
+     * proof the scheduler applied the rating; `RetryableFailure`/`Rejected` only when it is proven
+     * NOT applied; everything uncertain — a timeout, a lost response, an unclassified exception
+     * after dispatch — is `Ambiguous`. "No exception" is not proof of success.
      */
     suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult
+
+    /**
+     * GATE 11 — decide an AMBIGUOUS commit from backend-observable evidence, *without* mutating.
+     *
+     * Implemented only where the backend exposes enough state to decide; the default answers
+     * [ReconcileCommitResult.Unsupported], which keeps the commit AMBIGUOUS. Implementations must
+     * not report `Applied` from a change that cannot be attributed to this transaction.
+     */
+    suspend fun reconcileCommit(request: ReconcileCommitRequest): ReconcileCommitResult =
+        ReconcileCommitResult.Unsupported()
+
+    /**
+     * GATE 11 — forget a review session handle after the user ended the study session. Never a
+     * mutation towards Anki (no rating, no bury): it releases the backend's runtime record so a
+     * fresh session can ask the scheduler for authoritative state. `false` = nothing to release.
+     */
+    suspend fun endReview(session: AnkiReviewSession): Boolean = false
 }
 
 /** Scheduled review only. Null deck means backend-defined collection-wide review. */
@@ -169,18 +206,49 @@ data class AnkiReviewTurn(
     val commitId: ReviewCommitId get() = ReviewCommitId(backendId, studySessionId, turnId)
 }
 
-/** Existing Rating has exactly AGAIN/HARD/GOOD/EASY semantics; no parallel AnkiRating enum. */
+/**
+ * Existing Rating has exactly AGAIN/HARD/GOOD/EASY semantics; no parallel AnkiRating enum.
+ *
+ * GATE 11: [commitId] carries the study session id and the review turn id, so the request is the
+ * spec's `(sessionId, turnId, cardRef, commitId, rating, answerTime)` without duplicated fields.
+ * [answerDurationMs] is measured from question presentation to rating selection (see
+ * `docs/SESSION_STATE_MACHINE.md` §17). [evidence] is the backend's own pre-mutation baseline from
+ * [AnkiBackend.prepareCommit]; the ledger persists it, so every retry re-sends the same request.
+ */
 data class CommitRatingRequest(
     val commitId: ReviewCommitId,
     val card: AnkiCardRef,
     val rating: Rating,
     val ratedAtEpochMs: Long,
-    val answerDurationMs: Long? = null
+    val answerDurationMs: Long? = null,
+    val evidence: ReviewCommitEvidence? = null
 ) {
+    val sessionId: String get() = commitId.studySessionId
+    val turnId: ReviewTurnId get() = commitId.turnId
+
     init {
         require(commitId.backendId == card.backendId)
         require(ratedAtEpochMs >= 0)
         require(answerDurationMs == null || answerDurationMs >= 0)
+    }
+}
+
+/**
+ * GATE 11 — everything a backend needs to decide an AMBIGUOUS commit after the fact, taken from the
+ * durable ledger record (so it works after process death, without the original session handle).
+ * The mutation window is `[submittedAtEpochMs, windowEndEpochMs]`.
+ */
+data class ReconcileCommitRequest(
+    val commitId: ReviewCommitId,
+    val card: AnkiCardRef,
+    val rating: Rating,
+    val evidence: ReviewCommitEvidence?,
+    val submittedAtEpochMs: Long,
+    val windowEndEpochMs: Long
+) {
+    init {
+        require(commitId.backendId == card.backendId)
+        require(submittedAtEpochMs >= 0 && windowEndEpochMs >= submittedAtEpochMs)
     }
 }
 

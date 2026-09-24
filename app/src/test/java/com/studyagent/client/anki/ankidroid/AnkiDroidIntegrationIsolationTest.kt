@@ -149,18 +149,16 @@ class AnkiDroidIntegrationIsolationTest {
     }
 
     @Test
-    fun `the integration layer never writes and links no AnkiDroid internals`() {
+    fun `the integration layer writes only through the single rating writer and links no AnkiDroid internals`() {
         val forbidden = listOf(
-            // mutations (§67/§79/§80) — the provider is read through one bounded query only
-            ".insert(", ".update(", ".delete(", "openFileDescriptor", "openInputStream",
+            // mutations other than the one GATE 11 owns (§67/§79/§80)
+            ".insert(", ".delete(", "openFileDescriptor", "openInputStream",
             "openOutputStream", "ContentProviderOperation", "resolver.call(",
-            // GATE 06+ APIs that must not exist yet
+            // APIs that must not exist
             "addNote(", "addNotes(", "updateNote(", "addMediaFromUri(", "addNewDeck(",
             "selectDeckWithCheck", "getNextCard(",
-            // GATE 06 — the review path is a *read*. These are the provider's answer/bury/suspend
-            // column names and the scheduler calls behind them: naming any of them would be the
-            // first step towards GATE 11's mutation, which this gate must not begin (§35/§37).
-            "answer_ease", "time_taken", "\"buried\"", "\"suspended\"",
+            // bury / suspend stay out of scope (GATE 11 answers cards and nothing else)
+            "\"buried\"", "\"suspended\"",
             // `sched.` prefixed so the scan cannot be fooled by an unrelated name: the layer does
             // have a `suspendCards` *capability flag*, and it must keep having one.
             "sched.answerCard", "sched.buryCards", "sched.suspendCards",
@@ -171,6 +169,30 @@ class AnkiDroidIntegrationIsolationTest {
         for (token in forbidden) {
             val found = offenders(token, layerFiles)
             assertTrue("'$token' must not appear in the integration layer's code: $found", found.isEmpty())
+        }
+    }
+
+    /**
+     * GATE 11 — the write allowlist. The platform `update` call exists in exactly one place (the
+     * provider client), the answer columns are named only by the pinned contract, and only the
+     * rating gateway issues writes. A new writer anywhere else fails this test.
+     */
+    @Test
+    fun `GATE 11 write tokens appear only in their owning file`() {
+        val allowed = mapOf(
+            ".update(" to setOf("AnkiDroidProviderClient.kt"),
+            "\"answer_ease\"" to setOf("AnkiDroidApiContract.kt"),
+            "\"time_taken\"" to setOf("AnkiDroidApiContract.kt"),
+            "safeUpdate(" to setOf("AnkiDroidProviderClient.kt", "AndroidAnkiDroidProbe.kt", "AnkiDroidRatingGateway.kt"),
+            "submitAnswer(" to setOf("AnkiDroidRatingGateway.kt", "AnkiDroidRatingCommitter.kt"),
+            "easeFor(" to setOf("AnkiDroidCommitEvidence.kt", "AnkiDroidRatingGateway.kt")
+        )
+        // Provider-specific tokens are checked app-wide; generic names only inside the layer
+        // (the PC protocol legitimately has a `submitAnswer(` message factory).
+        val layerOnly = setOf(".update(", "submitAnswer(", "easeFor(")
+        for ((token, owners) in allowed) {
+            val found = offenders(token, if (token in layerOnly) layerFiles else mainSources).toSet()
+            assertTrue("'$token' may only appear in $owners, found in $found", found.isNotEmpty() && owners.containsAll(found))
         }
     }
 

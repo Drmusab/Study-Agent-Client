@@ -31,7 +31,9 @@ class AnkiStudyInteractionTest {
             }
             override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
                 commitCalls++
-                error("Gate 10 must never call commitRating")
+                // These read-path tests never *execute* a CommitRating effect; GATE 11's commit
+                // flow is covered by AnkiRatingCommitFlowTest with a durable ledger.
+                error("read-path tests must never execute a commit effect")
             }
         }
         val executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(spy)))
@@ -68,7 +70,7 @@ class AnkiStudyInteractionTest {
         }
     }
 
-    @Test fun `manual evaluation voice turn stops at pending selection without advancing`() = runTest {
+    @Test fun `manual evaluation voice turn prepares one commit and never advances before COMMITTED`() = runTest {
         val h = Harness()
         h.load()
         val turnId = h.state.anki!!.turn!!.turnId
@@ -84,7 +86,13 @@ class AnkiStudyInteractionTest {
         assertEquals("My answer", h.state.anki!!.transcript)
         assertEquals(turnId, h.state.anki!!.turn!!.turnId)
         val selected = h.send(AnkiStudyEvent.SelectRating(h.state.epoch, turnId, Rating.GOOD))
-        assertTrue(selected.effects.isEmpty())
+        // GATE 11: selection prepares exactly one commit effect and enters SubmittingRating; it
+        // never emits a next-card read (the next card waits for a COMMITTED outcome).
+        val commit = selected.effects.filterIsInstance<AnkiStudyEffect.CommitRating>().single()
+        assertEquals(Rating.GOOD, commit.request.rating)
+        assertEquals(turnId, commit.request.commitId.turnId)
+        assertTrue(selected.effects.none { it is AnkiStudyEffect.Next })
+        assertEquals(SessionPhase.SubmittingRating, h.state.phase)
         assertEquals(Rating.GOOD, h.state.anki!!.selectedRating)
         assertNull(h.state.cardTurn!!.suggestedRating)
         assertEquals(1, h.nextCalls)
@@ -140,7 +148,7 @@ class AnkiStudyInteractionTest {
         h.assertNoMutation()
     }
 
-    @Test fun `pause rejects late speech resume keeps turn and rating selection`() = runTest {
+    @Test fun `pause rejects late speech resume keeps turn and a submitting rating cannot be paused away`() = runTest {
         val h = Harness()
         h.load()
         val turn = h.state.anki!!.turn
@@ -152,9 +160,11 @@ class AnkiStudyInteractionTest {
         assertEquals(turn, h.state.anki!!.turn)
         h.send(StudyEvent.UserRequestAnswer(h.state.currentCardId))
         h.send(StudyEvent.UserRateCard(Rating.GOOD, h.state.currentCardId!!))
-        h.send(StudyEvent.UserPauseRequested("pause2"))
-        h.send(StudyEvent.UserResumeRequested("resume2"))
-        assertEquals(SessionPhase.WaitingForRating, h.state.phase)
+        // GATE 11: once the commit is prepared, pause/resume cannot rewind it to WaitingForRating
+        // (that would re-open rating input while a mutation may be in flight).
+        assertFalse(h.send(StudyEvent.UserPauseRequested("pause2")).accepted)
+        assertFalse(h.send(StudyEvent.UserResumeRequested("resume2")).accepted)
+        assertEquals(SessionPhase.SubmittingRating, h.state.phase)
         assertEquals(Rating.GOOD, h.state.anki!!.selectedRating)
         assertEquals(1, h.nextCalls)
         h.assertNoMutation()
@@ -224,6 +234,7 @@ class AnkiStudyInteractionTest {
         assertFalse(h.send(AnkiStudyEvent.SelectRating(h.state.epoch, ReviewTurnId("old"), Rating.GOOD)).accepted)
         assertEquals(original!!.turn, h.state.anki!!.turn)
         assertNull(h.state.anki!!.selectedRating)
+        assertNull(h.state.anki!!.commit)
         h.assertNoMutation()
     }
 

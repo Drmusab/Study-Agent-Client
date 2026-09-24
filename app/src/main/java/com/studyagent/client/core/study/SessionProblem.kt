@@ -23,6 +23,10 @@ enum class SessionProblem {
     VOICE_ONLY_FAILURE,
     RECOGNIZER_UNAVAILABLE,
     TTS_UNAVAILABLE,
+    /** GATE 11 — the Anki rating is known NOT to have been saved (ledger FAILED). */
+    ANKI_RATING_NOT_SAVED,
+    /** GATE 11 — whether the Anki rating was saved cannot be confirmed (ledger AMBIGUOUS). */
+    ANKI_RATING_UNCONFIRMED,
     UNKNOWN
 }
 
@@ -53,5 +57,7 @@ fun SessionProblem.severity(): SessionProblemSeverity = when (this) {
     SessionProblem.VOICE_ONLY_FAILURE,
     SessionProblem.RECOGNIZER_UNAVAILABLE,
     SessionProblem.TTS_UNAVAILABLE -> SessionProblemSeverity.DEGRADED
+    SessionProblem.ANKI_RATING_NOT_SAVED,
+    SessionProblem.ANKI_RATING_UNCONFIRMED -> SessionProblemSeverity.RECOVERABLE
     SessionProblem.UNKNOWN -> SessionProblemSeverity.RECOVERABLE
 }

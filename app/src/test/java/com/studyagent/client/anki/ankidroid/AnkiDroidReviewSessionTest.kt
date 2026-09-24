@@ -575,7 +575,7 @@ class AnkiDroidReviewSessionTest {
     // ---------------------------------------------------------------- no mutation, ever
 
     @Test
-    fun `commitRating stays a truthful refusal and no review turn is mutated`() = runTest {
+    fun `without a rating writer commitRating is a truthful refusal and no review turn is mutated`() = runTest {
         val h = harness(reviewResults = mutableListOf(available()))
         val turn = (h.backend.nextCard(h.open()) as NextCardResult.Card).turn
 
@@ -588,8 +588,9 @@ class AnkiDroidReviewSessionTest {
         val result = h.backend.commitRating(request)
 
         assertTrue(result is CommitRatingResult.Rejected)
+        // GATE 11: this harness wires no rating gateway, so the refusal names the missing writer.
         assertEquals(
-            "ratingCommitIntegrationPending",
+            "ratingCommit",
             ((result as CommitRatingResult.Rejected).error as AnkiError.UnsupportedAction).action
         )
         // GATE 06 §35/§175: zero rating mutations, so the scheduler is never asked again either.

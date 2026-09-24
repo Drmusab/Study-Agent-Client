@@ -362,6 +362,78 @@ object AnkiDroidApiContract {
     const val CARD_TYPE_REVIEW: Int = 2
     const val CARD_TYPE_RELEARNING: Int = 3
 
+    // ------------------------------------------------------------------------------------------
+    // GATE 11 — rating commit contract (`update` on the review-info endpoint, verified at v2.24.1)
+    //
+    // Source read for this gate: `CardContentProvider.update` SCHEDULE branch and its private
+    // `answerCard`/`getCard`, `FlashCardsContract.ReviewInfo`, `libanki/sched/Ease`,
+    // `libanki/sched/Scheduler.answerCard`, and rslib 25.09.2 (the backend pinned by v2.24.1's
+    // `ankiBackend = 0.1.64-anki25.09.2`) `scheduler/answering/{mod,preview}.rs`.
+    //
+    // | Fact | Value | Verified from |
+    // |---|---|---|
+    // | Mutation call | `ContentResolver.update(content://<authority>/schedule, values, null, null)` | `update` → `SCHEDULE` branch |
+    // | Card address | `note_id` (long) + `ord` (int) — never the card id | same branch reads `ReviewInfo.NOTE_ID` / `ReviewInfo.CARD_ORD`, then `getCard(noteId, ord)` |
+    // | Rating column | `answer_ease` (int) | `ReviewInfo.EASE = "answer_ease"`; write-only |
+    // | Ease values | `1`/`2`/`3`/`4` | `Ease.fromValue(v)` (`AGAIN(1) HARD(2) GOOD(3) EASY(4)`) → `CardAnswer.Rating.forNumber(ease.value - 1)`; proto `AGAIN=0 HARD=1 GOOD=2 EASY=3` |
+    // | Answer time column | `time_taken` (long, **milliseconds**) | `ReviewInfo.TIME_TAKEN` KDoc "(in milliseconds)"; provider sets `timerStarted = now - timeTaken` |
+    // | Answer time absent | revlog records Anki's cap (deck max answer time) | `Card.timeTaken` = `min(now - timerStarted(=0), timeLimit)` |
+    // | `buried` / `suspended` | never sent (out of scope); if either were 1 the call would bury/suspend instead of answering | same branch |
+    // | Permission | checked first; `SecurityException` before any collection access | `if (!hasReadWritePermission() && shouldEnforceUpdateSecurity(uri)) throwSecurityException(...)` |
+    // | Unknown note / ord | `IllegalArgumentException` from `getCard` **before** answering | `getCard` throws "Card with ord … does not exist" |
+    // | Provider unresolvable | client-side `IllegalArgumentException("Unknown URI …")` before any IPC | `ContentResolver.update` when `acquireProvider` returns null |
+    // | Provider process death during the call | `ContentResolver.update` returns **-1** (RemoteException swallowed) | platform `ContentResolver.update` |
+    // | Return value | `1` once the branch reached `answerCard`, `0` if note/ord keys were absent | `updated++` after `answerCard(...)` |
+    // | **`1` is NOT proof of mutation** | `answerCard` wraps `col.sched.answerCard` in `catch (e: RuntimeException)` and swallows it, then `updated++` still runs | private `answerCard` in `CardContentProvider`; AnkiDroid issue #20763 is exactly this path |
+    // | **Queue-front precondition (v2.24.1)** | the answer is built from `queuedCards.first().states` of AnkiDroid's *currently selected* deck; if that is another card, rslib rejects it (`card was modified`) — swallowed as above | `Scheduler.answerCard(card, rating)` legacy path; rslib `answer_card_inner` `require!(current_state == answer.current_state)`; empty queue → `NoSuchElementException` (#20763) |
+    // | Fixed after the pin | v2.25.0alpha1+ use `getSchedulingStates(card.id)` (commit 3e0bc30c7b, "Fix #20763") | GitHub compare; not relied upon — the precondition is kept for every version |
+    // | Atomicity | one rslib `transact(Op::AnswerCard)`: card update + revlog + deck stats commit together or not at all | `Collection::answer_card` |
+    // | Evidence of an applied answer | normal answer: `reps += 1` **and** `last_review_time = answered_at` | `apply_normal_study_state`; `answer_card_inner` |
+    // | Filtered-deck *preview* answer | no `reps` change, no `last_review_time`; queue/due/deck change instead | `preview.rs::apply_preview_state` |
+    // | Deck selection write | `update(content://<authority>/selected_deck, {deck_id})` → `selectDeckWithCheck` → `col.decks.select(did)`; returns 1 when the deck exists | `update` `DECK_SELECTED` branch |
+    // | Queue front read | `query(schedule, [note_id, ord], "limit=1")` with **no** `deckID` reads the selected deck without re-selecting | `SCHEDULE` query branch: `select` only when `deckID` is present |
+    // ------------------------------------------------------------------------------------------
+
+    /** `ReviewInfo.EASE` — the write-only rating column of the schedule endpoint. */
+    const val REVIEW_ANSWER_EASE_COLUMN: String = "answer_ease"
+
+    /** `ReviewInfo.TIME_TAKEN` — write-only answer time, in milliseconds. */
+    const val REVIEW_TIME_TAKEN_COLUMN: String = "time_taken"
+
+    /** `Card.RAW_DUE` — stored due value; raw scheduler state used only as commit evidence. */
+    const val CARD_DUE_COLUMN: String = "due"
+
+    /** `update` answers this row count once it reached `answerCard` — not proof of mutation. */
+    const val REVIEW_ANSWER_REACHED_ROWS: Int = 1
+
+    /** `ContentResolver.update` returns this when the provider process died mid-call. */
+    const val UPDATE_REMOTE_FAILURE_ROWS: Int = -1
+
+    /**
+     * Commit evidence projection: identity + stored review counters only. No content columns, so
+     * no question/answer text ever enters the commit path.
+     */
+    val CARD_STATE_PROJECTION: Array<String> = arrayOf(
+        CARD_ID_COLUMN,
+        CARD_NOTE_ID_COLUMN,
+        CARD_ORD_COLUMN,
+        CARD_DECK_ID_COLUMN,
+        CARD_ORIGINAL_DECK_ID_COLUMN,
+        CARD_REPS_COLUMN,
+        CARD_LAPSES_COLUMN,
+        CARD_INTERVAL_COLUMN,
+        CARD_TYPE_COLUMN,
+        CARD_QUEUE_COLUMN,
+        CARD_DUE_COLUMN,
+        CARD_LAST_REVIEW_TIME_COLUMN
+    )
+
+    /** Queue-front projection: which card the selected deck would answer next. */
+    val QUEUE_FRONT_PROJECTION: Array<String> = arrayOf(
+        REVIEW_NOTE_ID_COLUMN,
+        REVIEW_CARD_ORD_COLUMN
+    )
+
     /** Documented `queue` codes (`Card.RAW_QUEUE` KDoc). Anything else maps to `UNKNOWN`. */
     const val CARD_QUEUE_MANUALLY_BURIED: Int = -3
     const val CARD_QUEUE_SIBLING_BURIED: Int = -2

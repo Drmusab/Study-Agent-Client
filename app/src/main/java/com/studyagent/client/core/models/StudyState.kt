@@ -4,7 +4,13 @@ sealed interface StudyState {
     data object Idle : StudyState
 
     data class Loading(
-        val message: String
+        val message: String,
+        /**
+         * GATE 11 — the rating being saved while a rating transaction is pending. Carried as data
+         * (never as a per-rating state) so the UI can say what is being saved and keep the rating
+         * controls disabled until the transaction resolves.
+         */
+        val pendingRating: Rating? = null
     ) : StudyState
 
     data class SpeakingQuestion(
