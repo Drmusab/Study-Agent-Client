@@ -608,7 +608,7 @@ class AnkiCardRenderControllerTest {
         harness.controller.submit(renderCard(), turnId(), AnkiCardSide.QUESTION)
         harness.clock.advance(500L)
         harness.controller.onLoadFailure(harness.request, errorCode = -11)
-        assertEquals("a failure is not a fast success", 0L, harness.snapshot().documentLoad.count)
+        assertEquals("a failure is not a fast success", 0L, harness.snapshot().documentLoad.lifetimeSamples)
     }
 
     // ------------------------------------------------------------------ links and scripts

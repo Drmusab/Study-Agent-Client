@@ -79,14 +79,12 @@ class IdempotencyTest {
     fun startSessionIdempotent() {
         val start1 = ClientMessage.StartSession(
             deck = "Deck A",
-            messageId = "start-001",
-            sessionRevision = 1
+            messageId = "start-001"
         )
 
         val start2 = ClientMessage.StartSession(
             deck = "Deck A",
-            messageId = "start-001",
-            sessionRevision = 1
+            messageId = "start-001"
         )
 
         assertEquals(start1.messageId, start2.messageId)
@@ -110,9 +108,9 @@ class IdempotencyTest {
     @Test
     fun messageIdUniquePerMutation() {
         val messages = listOf(
-            ClientMessage.RateCard("s1", "c1", Rating.GOOD, messageId = "msg-1"),
-            ClientMessage.RateCard("s1", "c2", Rating.EASY, messageId = "msg-2"),
-            ClientMessage.RateCard("s1", "c1", Rating.GOOD, messageId = "msg-1") // duplicate
+            ClientMessage.RateCard(cardId = "c1", rating = Rating.GOOD, messageId = "msg-1"),
+            ClientMessage.RateCard(cardId = "c2", rating = Rating.EASY, messageId = "msg-2"),
+            ClientMessage.RateCard(cardId = "c1", rating = Rating.GOOD, messageId = "msg-1") // duplicate
         )
 
         val uniqueIds = messages.map { it.messageId }.toSet()

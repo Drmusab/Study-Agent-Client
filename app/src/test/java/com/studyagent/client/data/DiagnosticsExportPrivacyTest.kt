@@ -38,7 +38,7 @@ class DiagnosticsExportPrivacyTest {
     }
 
     /** Diagnostics over a live harness: the real machine, the real timeline, the real log buffer. */
-    private fun StudySessionHarness.diagnostics(appInfo: DiagnosticsAppInfo = testAppInfo()): DefaultDiagnosticsRepository =
+    private fun StudySessionHarness.diagnosticsRepo(appInfo: DiagnosticsAppInfo = testAppInfo()): DefaultDiagnosticsRepository =
         DefaultDiagnosticsRepository(
             connectionRepository = connection,
             audioRouteManager = routeManager,
@@ -77,7 +77,7 @@ class DiagnosticsExportPrivacyTest {
         h.startSession()
         h.playCard()
 
-        val export = h.diagnostics().getFormattedLogsText()
+        val export = h.diagnosticsRepo().getFormattedLogsText()
 
         assertFalse(
             "a patient-describing transcript must never reach an export",
@@ -100,7 +100,7 @@ class DiagnosticsExportPrivacyTest {
         val h = newHarness(serverDeckSize = 5)
         h.startSession()
 
-        val export = h.diagnostics().getFormattedLogsText()
+        val export = h.diagnosticsRepo().getFormattedLogsText()
         assertFalse(export.contains("eyJhbGciOiJIUzI1NiJ9"))
         assertFalse(export.contains("fake-device-token-1234567890"))
         assertFalse(export.contains("not-a-real-password"))
@@ -112,7 +112,7 @@ class DiagnosticsExportPrivacyTest {
     fun `the export says which build device and protocol produced it`() = runTest {
         val h = newHarness(serverDeckSize = 5)
         h.startSession()
-        val export = h.diagnostics().getFormattedLogsText()
+        val export = h.diagnosticsRepo().getFormattedLogsText()
 
         assertTrue(export.contains("2.5.0-debug"))
         assertTrue(export.contains("debug"))
@@ -178,7 +178,7 @@ class DiagnosticsExportPrivacyTest {
         val h = newHarness(serverDeckSize = 5)
         h.startSession()
         h.playCard()
-        val repository = h.diagnostics()
+        val repository = h.diagnosticsRepo()
 
         assertTrue(repository.timelineEvents().isNotEmpty())
         assertTrue(repository.logs.value.isNotEmpty())
@@ -200,7 +200,7 @@ class DiagnosticsExportPrivacyTest {
         h.startSession()
         AppLogger.i("Marker", "a row that must not be copied into the compact summary")
 
-        val repository = h.diagnostics()
+        val repository = h.diagnosticsRepo()
         val summary = repository.getSummaryText()
         val detailed = repository.getFormattedLogsText()
 
@@ -217,7 +217,7 @@ class DiagnosticsExportPrivacyTest {
         h.startSession()
         repeat(20) { h.playCard() }
 
-        val repository = h.diagnostics()
+        val repository = h.diagnosticsRepo()
         val events = repository.timelineEvents()
         assertTrue("the timeline is bounded by construction", events.size <= 300)
         assertEquals("events must be ordered oldest → newest", events.map { it.sequence }.sorted(), events.map { it.sequence })

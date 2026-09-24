@@ -80,8 +80,8 @@ class StudyVoiceTurnGate(
      *        needs a moment to actually stop (§27).
      */
     suspend fun awaitListenWindow(
-        stillValid: () -> Boolean,
-        waitForSpeechToSettleMs: Long = 0L
+        waitForSpeechToSettleMs: Long = 0L,
+        stillValid: () -> Boolean
     ): VoiceTurnDecision {
         val route = routeProvider()
 

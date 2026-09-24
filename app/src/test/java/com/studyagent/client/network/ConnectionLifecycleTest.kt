@@ -11,7 +11,7 @@ class ConnectionLifecycleTest {
     fun lifecycleOrder() {
         val states = listOf(
             ConnectionState.Disconnected,
-            ConnectionState.Resolving("192.168.1.100"),
+            ConnectionState.Resolving("192.168.1.100", 8765),
             ConnectionState.ConnectingTransport("192.168.1.100", 8765),
             ConnectionState.TransportConnected("192.168.1.100", 8765, "PC"),
             ConnectionState.Handshaking("192.168.1.100", 8765),
@@ -107,7 +107,7 @@ class ConnectionLifecycleTest {
     fun wrongServiceDetectionViaHandshakeTimeout() {
         val handshakeTimeout = ConnectionState.HandshakeTimeout("192.168.1.100", 8765)
         assertEquals("HANDSHAKE_TIMEOUT", handshakeTimeout.phaseName)
-        assertTrue(handshakeTimeout.message.contains("Study Agent", ignoreCase = true) || handshakeTimeout.host.isNotEmpty())
+        assertTrue(handshakeTimeout.host.isNotEmpty())
     }
 
     @Test
@@ -116,15 +116,13 @@ class ConnectionLifecycleTest {
             TransportStatus.DISCONNECTED,
             TransportStatus.RESOLVING,
             TransportStatus.CONNECTING,
-            TransportStatus.OPEN,
-            TransportStatus.HANDSHAKING,
-            TransportStatus.AUTHENTICATING,
-            TransportStatus.NEGOTIATING,
-            TransportStatus.READY
+            TransportStatus.OPEN
         )
 
-        assertEquals(8, statuses.size)
-        assertEquals(TransportStatus.READY, statuses.last())
+        assertEquals(4, statuses.size)
+        assertEquals(TransportStatus.OPEN, statuses.last())
+        assertTrue(TransportStatus.CLOSING.name.isNotEmpty())
+        assertTrue(TransportStatus.FAILED.name.isNotEmpty())
     }
 
     @Test

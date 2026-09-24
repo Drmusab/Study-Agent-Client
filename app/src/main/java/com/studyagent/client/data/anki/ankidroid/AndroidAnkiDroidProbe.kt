@@ -214,16 +214,10 @@ class AndroidAnkiDroidPermissionManager(
             )
         }
 
-    @Suppress("DEPRECATION") // the typed-flags overload only exists on API 33+
     private fun permissionInfoOrNull(permission: String): PermissionInfo? = try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            appContext.packageManager.getPermissionInfo(
-                permission,
-                PackageManager.PackageInfoFlags.of(0L)
-            )
-        } else {
-            appContext.packageManager.getPermissionInfo(permission, 0)
-        }
+        // getPermissionInfo takes plain int flags on every API level (PackageInfoFlags is only for
+        // the getPackageInfo family).
+        appContext.packageManager.getPermissionInfo(permission, 0)
     } catch (_: PackageManager.NameNotFoundException) {
         // No installed, visible package declares this permission (for example: AnkiDroid is not
         // installed, or an unexpected application id is installed instead).

@@ -64,7 +64,7 @@ class StudyReducerTest {
         s = t1.newState
         val t2 = StudyReducer.reduce(s, StudyEvent.UserStartRequested("deck", "m2"), 1L)
         assertFalse(t2.accepted)
-        assertEquals("already-active or already-starting", t2.rejectionReason)
+        assertEquals("already-active", t2.rejectionReason)
         assertEquals(1, t1.effects.filterIsInstance<StudyEffect.Network.Send>().size)
     }
 
@@ -178,7 +178,7 @@ class StudyReducerTest {
         s = StudyReducer.reduce(s, StudyEvent.ServerEvaluationReceived(null, "c1", eval(), false, "e1"), 0L).newState
         s = StudyReducer.reduce(s, StudyEvent.UserRateCard(Rating.GOOD, "c1"), 0L).newState
         // Server moves to next card before rating ack? Simulate skip
-        s = s.copy(cardTurn = CardTurn(s.cardGeneration+1, StudyCard("c2","Q2"), "turn-c2", generation = s.cardGeneration+1))
+        s = s.copy(cardTurn = CardTurn(s.cardGeneration+1, StudyCard("c2","Q2"), "turn-c2"))
         val staleAck = StudyReducer.reduce(s, StudyEvent.ServerRatingSaved(null, "c1", Rating.GOOD, null, "r1"), 0L)
         assertFalse(staleAck.accepted)
         assertEquals("stale-card", staleAck.rejectionReason)

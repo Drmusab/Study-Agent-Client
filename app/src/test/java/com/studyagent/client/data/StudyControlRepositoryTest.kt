@@ -31,14 +31,14 @@ import kotlin.time.Duration.Companion.seconds
  */
 class StudyControlRepositoryTest {
 
-    private class Harness(saveTimeoutMs: Long = 8_000L) {
+    private class Harness(val saveTimeoutMs: Long = 8_000L) {
         val connection = FakeConnectionRepository()
         val storage = InMemoryManagementCacheStorage()
         lateinit var scope: CoroutineScope
         lateinit var capabilities: CapabilityStore
         lateinit var control: DefaultStudyControlRepository
 
-        fun start(scheduler: kotlinx.coroutines.test.TestScheduler) {
+        fun start(scheduler: kotlinx.coroutines.test.TestCoroutineScheduler) {
             scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(scheduler))
             capabilities = CapabilityStore(connection, scope, negotiationTimeoutMs = 4_000L)
             control = DefaultStudyControlRepository(

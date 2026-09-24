@@ -1,6 +1,8 @@
 package com.studyagent.client.data
 
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.mutablePreferencesOf
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.mutablePreferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -50,7 +52,7 @@ class SettingsPersistenceRegressionTest {
         useFakeAgent = true
     )
 
-    private fun corruptedCachePreferences(): Preferences {
+    private fun corruptedCachePreferences(): MutablePreferences {
         val prefs = mutablePreferencesOf()
         AppSettingsPreferencesCodec.writeSettings(prefs, userSettings)
         // Caches as a broken/older/newer build might have left them: truncated JSON, a number

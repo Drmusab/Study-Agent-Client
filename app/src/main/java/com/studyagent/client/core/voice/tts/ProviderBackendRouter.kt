@@ -140,7 +140,7 @@ class ProviderBackendRouter(
     private fun markAllUnavailable(
         providers: Map<TtsProvider, RemoteProviderInfo>
     ): Map<TtsProvider, RemoteProviderInfo> = providers.mapValues { (_, info) ->
-        info.copy(connected = false, available = false)
+        info.copy(connected = false, healthy = false)
     }
 
     /** Refresh provider capability/health from the agent (idempotent, bounded). */

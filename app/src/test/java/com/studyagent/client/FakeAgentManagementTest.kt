@@ -30,7 +30,7 @@ class FakeAgentManagementTest {
         val messages = mutableListOf<ServerMessage>()
 
         /** Subscribes eagerly (unconfined) so frames emitted during connect are captured. */
-        fun attach(scheduler: kotlinx.coroutines.test.TestScheduler, connection: FakeAgentConnection) {
+        fun attach(scheduler: kotlinx.coroutines.test.TestCoroutineScheduler, connection: FakeAgentConnection) {
             val scope = CoroutineScope(kotlinx.coroutines.test.UnconfinedTestDispatcher(scheduler))
             scope.launch { connection.incomingMessages.collect { messages.add(it) } }
         }

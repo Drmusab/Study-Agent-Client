@@ -40,7 +40,7 @@ class DashboardRepositoryTest {
         lateinit var capabilities: CapabilityStore
         lateinit var dashboard: DefaultDashboardRepository
 
-        fun start(scheduler: kotlinx.coroutines.test.TestScheduler) {
+        fun start(scheduler: kotlinx.coroutines.test.TestCoroutineScheduler) {
             scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(scheduler))
             capabilities = CapabilityStore(connection, scope, negotiationTimeoutMs = 4_000L)
             dashboard = DefaultDashboardRepository(
