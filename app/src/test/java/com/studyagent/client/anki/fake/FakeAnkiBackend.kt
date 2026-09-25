@@ -408,14 +408,15 @@ class FakeAnkiBackend(
                     previous.request.deckRef != request.deckRef) {
                     return@withLock CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card))
                 }
-                if (guaranteeLevel == CommitGuaranteeLevel.LOCAL_DEDUP_ONLY &&
-                    previous.result is CommitRatingResult.Committed) {
-                    // Deliberately unsafe backend: tests can verify the *client ledger*, not a UI
-                    // debounce, is what stops this second scheduler effect.
+                if (guaranteeLevel == CommitGuaranteeLevel.LOCAL_DEDUP_ONLY && previous.mutationCount > 0) {
+                    // Deliberately unsafe backend with no memory (the pessimistic AnkiDroid model):
+                    // once an id had an effect — confirmed or behind a lost response — any repeat
+                    // applies again. Tests can verify the *client ledger*, not a UI debounce or a
+                    // backend table, is what stops this second scheduler effect.
                     physicalCalls.incrementAndGet()
                     ledger[request.commitId] = previous.copy(attempts = previous.attempts + 1,
-                        mutationCount = previous.mutationCount + 1)
-                    return@withLock previous.result
+                        mutationCount = previous.mutationCount + 1, result = CommitRatingResult.Committed())
+                    return@withLock CommitRatingResult.Committed()
                 }
                 if (commitSemantics.supportsIdempotentReplay && previous.result is CommitRatingResult.Ambiguous) {
                     // The backend's durable logical-commit table knows the actual effect even
