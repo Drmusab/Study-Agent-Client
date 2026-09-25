@@ -155,6 +155,8 @@ class FakeAnkiBackend(
     val reconcileResults: ArrayDeque<ReconcileCommitResult> = ArrayDeque()
     var reconcileCalls: Int = 0
         private set
+    /** When set, reconciliation suspends on it first (models a hung provider query). */
+    var reconcileGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
     var endReviewCalls: Int = 0
         private set
 
@@ -356,6 +358,7 @@ class FakeAnkiBackend(
      * mirrored into the fake's own ledger, exactly like the real backend's session record.
      */
     override suspend fun reconcileCommit(request: ReconcileCommitRequest): ReconcileCommitResult {
+        reconcileGate?.await()
         delay(latencyMs)
         return mutex.withLock {
             reconcileCalls += 1

@@ -277,6 +277,33 @@ class AnkiRatingCommitFlowTest {
         assertEquals(1, h.fake.physicalCommitCalls)
     }
 
+    @Test fun `H5 a hung reconciliation times out as still ambiguous and can be checked again`() = runTest {
+        val h = AnkiCommitHarness.reconcilable(commitSteps = listOf(
+            CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("ack-lost")), appliedWhenAmbiguous = true)))
+        h.loadToRating()
+        h.rate()
+        h.drain()
+        h.fake.reconcileGate = CompletableDeferred() // never answers
+        h.send(AnkiStudyEvent.ReconcileRatingCommit(h.state.epoch, h.commit!!.commitId))
+        val started = testScheduler.currentTime
+        h.drain()
+        assertEquals(AnkiStudyEffectExecutor.DEFAULT_RECONCILE_TIMEOUT_MS, testScheduler.currentTime - started)
+        assertEquals(SessionPhase.ReconciliationRequired, h.state.phase)
+        assertFalse(h.commit!!.reconciling)
+        val record = h.ledger.get(h.commit!!.commitId)!!
+        assertEquals(ReviewCommitState.AMBIGUOUS, record.state)
+        assertEquals(ReviewCommitResolution.RECONCILIATION_INCONCLUSIVE, record.resolution)
+        assertEquals("A", h.turn!!.cardRef.cardId) // no advance on an unknown outcome
+        assertEquals(1, h.fake.physicalCommitCalls) // and never a second mutation
+
+        h.fake.reconcileGate = null // the provider answers on the next explicit check
+        h.send(AnkiStudyEvent.ReconcileRatingCommit(h.state.epoch, h.commit!!.commitId))
+        h.drain()
+        assertEquals("B", h.turn!!.cardRef.cardId)
+        assertEquals(1, h.state.session!!.totalReviewedInSession)
+        assertEquals(1, h.fake.physicalCommitCalls)
+    }
+
     @Test fun `H4 inconclusive or unsupported reconciliation stays AMBIGUOUS`() = runTest {
         val h = AnkiCommitHarness(commitSteps = listOf(CommitStep(CommitRatingResult.Ambiguous())))
         h.loadToRating()
