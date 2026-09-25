@@ -1,5 +1,6 @@
 package com.studyagent.client.core.anki
 
+import com.studyagent.client.core.common.orOnStoreFailure
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -561,9 +562,9 @@ class ReviewCommitLedger(
     private suspend fun loadedLocked(): LinkedHashMap<String, ReviewCommitRecord>? {
         records?.let { return it }
         if (unavailableReason != null) return null
-        val read = try { store.read() } catch (_: Exception) {
-            return disable("store_read_failed")
-        }
+        // A throwing store fails closed; a cancelled caller does not disable the ledger.
+        val read = orOnStoreFailure<ReviewCommitStoreRead?>(null) { store.read() }
+            ?: return disable("store_read_failed")
         val raw = when (read) {
             is ReviewCommitStoreRead.Unreadable -> return disable("store_unreadable:${read.reason}")
             is ReviewCommitStoreRead.Snapshot -> read.value
@@ -674,11 +675,11 @@ class ReviewCommitLedger(
     private suspend fun writeLocked(next: LinkedHashMap<String, ReviewCommitRecord>): String? {
         // DataStore's suspending edit completes before returning. Never launch this in another job.
         // Tombstones travel with every snapshot so a later commit write cannot forget pruned ids.
-        val written = try {
+        val written = orOnStoreFailure(false) {
             withContext(NonCancellable) {
                 store.write(ReviewCommitLedgerCodec.encode(next.values, tombstones.values))
             }
-        } catch (_: Exception) { false }
+        }
         return if (written) null else "store_write_failed"
     }
 

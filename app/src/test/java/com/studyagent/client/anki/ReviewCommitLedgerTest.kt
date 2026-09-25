@@ -53,6 +53,33 @@ class ReviewCommitLedgerTest {
             store.writes.map { (ReviewCommitLedgerCodec.decode(it) as ReviewCommitLedgerCodec.Decoded.Records).records.single().phase })
     }
 
+    @Test fun `a cancelled first load does not disable the ledger but a throwing store fails closed`() = runTest {
+        val backing = InMemoryReviewCommitStore()
+        var mode = "cancel"
+        val store = object : ReviewCommitStore {
+            override suspend fun read(): ReviewCommitStoreRead = when (mode) {
+                "cancel" -> throw kotlinx.coroutines.CancellationException("caller went away")
+                "throw" -> throw IllegalStateException("io")
+                else -> backing.read()
+            }
+            override suspend fun write(snapshot: String): Boolean = backing.write(snapshot)
+        }
+        val ledger = ReviewCommitLedger(store, clock)
+        try {
+            ledger.prepare(request())
+            fail("cancellation must propagate")
+        } catch (_: kotlinx.coroutines.CancellationException) { }
+        mode = "ok"
+        assertTrue(ledger.prepare(request()) is ReviewCommitLedger.PrepareResult.Prepared)
+
+        mode = "throw"
+        val broken = ReviewCommitLedger(store, clock)
+        assertTrue(broken.prepare(request()) is ReviewCommitLedger.PrepareResult.Unavailable)
+        mode = "ok"
+        assertTrue("an unexplained store throw stays fail-closed for this ledger instance",
+            broken.prepare(request()) is ReviewCommitLedger.PrepareResult.Unavailable)
+    }
+
     @Test fun `different rating or new turn with unresolved commit is refused`() = runTest {
         val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), clock)
         val r = request()
