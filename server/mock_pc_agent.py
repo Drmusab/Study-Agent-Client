@@ -35,6 +35,14 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "websockets"])
     import websockets
 
+from review_commit_store import (
+    OUTCOME_APPLIED,
+    OUTCOME_CONFLICT,
+    OUTCOME_DUPLICATE,
+    OUTCOME_UNKNOWN,
+    ReviewCommitProcessor,
+    ReviewCommitTable,
+)
 from tts.models import (
     CANONICAL_CHANNELS,
     CANONICAL_FORMAT,
@@ -144,6 +152,30 @@ DEFAULT_STUDY_CONFIG = {
 
 FULL_CAPABILITIES = ["dashboard", "deck_list", "study_config", "history", "component_health", "learning_insights", "ai_usage", "session_progress", "session_recovery"]
 PARTIAL_CAPABILITIES = ["dashboard", "deck_list", "study_config"]
+REVIEW_COMMIT_IDEMPOTENCY = "review_commit_idempotency"
+
+# Simulated Desktop Anki scheduler: counts real review effects per card so tests can assert that a
+# replayed review_commit_id never produces a second effect.
+ANKI_REVIEW_EFFECTS = {}
+
+
+def apply_simulated_anki_review(request):
+    """The mutation boundary of the mock. A real agent calls Anki's answerCard here."""
+    card_id = request["card_id"]
+    ANKI_REVIEW_EFFECTS[card_id] = ANKI_REVIEW_EFFECTS.get(card_id, 0) + 1
+    return {"next_interval": "1 day"}
+
+
+def build_commit_processor(commit_store_path):
+    """Durable when a path is given; otherwise process memory only (never advertised)."""
+    return ReviewCommitProcessor(
+        ReviewCommitTable(commit_store_path),
+        apply_simulated_anki_review,
+        trace=lambda line: print(f"[commit] {line}"),
+    )
+
+
+COMMIT_PROCESSOR = build_commit_processor(None)
 
 def fake_dashboard_snapshot(active_session_info=None):
     return {
@@ -447,6 +479,9 @@ async def handler(websocket, chaos_opts=None, server_opts=None):
                         caps = list(FULL_CAPABILITIES)
                     else:
                         caps = list(PARTIAL_CAPABILITIES)
+                    if COMMIT_PROCESSOR.table.durable:
+                        # Only a durable effect-dedup table may claim idempotent replay (§395/§436).
+                        caps.append(REVIEW_COMMIT_IDEMPOTENCY)
                     if TTS_STATE["enabled"]:
                         # Remote TTS capability surface (master prompt §121/§122/§123).
                         caps.extend(["tts", "tts:streaming", "tts:voice_catalog"])
@@ -630,15 +665,41 @@ async def handler(websocket, chaos_opts=None, server_opts=None):
                 await send_with_chaos(response)
 
             elif msg_type == "rate_card":
-                # review_commit_id is ignored. The message_id cache below is process memory only
-                # and is not advertised as review_commit_idempotency or commit_reconciliation.
-                _ = data.get("review_commit_id")
                 card_id = data.get("card_id")
                 rating = data.get("rating")
-                print(f"[★] Card {card_id} rated: {rating.upper()}")
+                print(f"[★] Card {card_id} rated: {str(rating).upper()}")
 
                 if chaos.get('enable') and rnd.random() < 0.2:
                     await asyncio.sleep(rnd.uniform(0.15, 0.4))
+
+                commit_outcome = None
+                commit_result = {"next_interval": "1 day"}
+                if data.get("review_commit_id"):
+                    # Effect dedup by the logical id, independent of message_id (delivery dedup).
+                    outcome = COMMIT_PROCESSOR.commit({
+                        "review_commit_id": data.get("review_commit_id"),
+                        "session_id": data.get("session_id"),
+                        "review_turn_id": data.get("review_turn_id"),
+                        "card_id": card_id,
+                        "rating": rating,
+                    })
+                    commit_outcome = outcome.outcome
+                    if not outcome.is_success:
+                        code = outcome.outcome if outcome.outcome in (OUTCOME_CONFLICT, OUTCOME_UNKNOWN) \
+                            else "COMMIT_REJECTED"
+                        await send_with_chaos({
+                            "protocol_version": negotiated_protocol or "2",
+                            "type": "error",
+                            "code": code,
+                            "message": outcome.category or code,
+                            "in_reply_to": msg_id,
+                            "review_commit_id": data.get("review_commit_id"),
+                            "retryable": False,
+                        })
+                        continue
+                    commit_result = outcome.result or commit_result
+                else:
+                    apply_simulated_anki_review({"card_id": card_id})
 
                 response = {
                     "protocol_version": negotiated_protocol or "2",
@@ -648,18 +709,21 @@ async def handler(websocket, chaos_opts=None, server_opts=None):
                     "session_id": data.get("session_id"),
                     "card_id": card_id,
                     "rating": rating,
-                    "next_interval": "1 day",
+                    "next_interval": commit_result.get("next_interval", "1 day"),
                     "timestamp": iso_now(),
                     "review_turn_id": data.get("review_turn_id"),
                     "session_revision": current_session.next_revision() if current_session else 1
                 }
+                if data.get("review_commit_id"):
+                    response["review_commit_id"] = data.get("review_commit_id")
+                    response["duplicate"] = commit_outcome == OUTCOME_DUPLICATE
                 if current_session and msg_id:
-                    # Check if already processed (idempotency)
-                    cached = current_session.get_cached_response(msg_id)
-                    if cached:
-                        await send_with_chaos(cached)
-                        continue
                     current_session.remember_message(msg_id, response)
+
+                if commit_outcome == OUTCOME_DUPLICATE:
+                    # The effect and the advance already happened for this logical rating.
+                    await send_with_chaos(response)
+                    continue
 
                 await send_with_chaos(response)
 
@@ -1028,7 +1092,12 @@ async def main():
                         help="TTS media plane HTTP port (0 = ephemeral)")
     parser.add_argument("--tts-fail", choices=["rate_limit", "quota", "auth", "synthesis"],
                         default=None, help="Inject a typed provider failure (mock mode only)")
+    parser.add_argument("--commit-store", type=str, default=None,
+                        help="Durable review_commit_id table (JSON). Enables review_commit_idempotency.")
     args = parser.parse_args()
+
+    global COMMIT_PROCESSOR
+    COMMIT_PROCESSOR = build_commit_processor(args.commit_store)
 
     chaos_opts = {"enable": args.chaos, "seed": args.seed, "dup_prob": 0.15, "delay_prob": 0.15, "drop_prob": 0.05, "max_delay": 0.4}
     capability_mode = "v1" if args.v1 else ("partial" if args.partial else "full")
@@ -1048,6 +1117,7 @@ async def main():
     print(f"   Mode: {capability_mode} | Auth: {args.auth} | Chaos: {args.chaos} | WrongService: {args.wrong_service}")
     print(f"   Agent ID: {PERSISTENT_AGENT_ID} | Version: {SERVER_VERSION}")
     print(f"   Protocol: Server chooses selected_protocol via welcome")
+    print(f"   Review commits: {'durable ' + args.commit_store if args.commit_store else 'memory only (not advertised)'}")
     print(f"   Features: welcome handshake, Bearer auth, in_reply_to, idempotency, review_turn_id, session_revision, recovery")
     if TTS_STATE["enabled"]:
         print(f"   TTS: control plane via WebSocket | media plane http://{HOST}:{TTS_STATE['media_port']} "
