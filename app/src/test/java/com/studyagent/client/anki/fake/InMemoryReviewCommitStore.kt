@@ -21,6 +21,8 @@ class InMemoryReviewCommitStore(initial: String? = null) : ReviewCommitStore {
     val writes: MutableList<String> = mutableListOf()
 
     /** Makes the next N writes throw (disk full / IO error) without changing [snapshot]. */
+    /** Observer for ordering tests: called after a write became durable, before write() returns. */
+    @Volatile var onDurableWrite: ((String) -> Unit)? = null
     @Volatile var failNextWrites: Int = 0
 
     /** Makes [read] throw, like a corrupt or unreadable file. */
@@ -42,6 +44,7 @@ class InMemoryReviewCommitStore(initial: String? = null) : ReviewCommitStore {
         }
         this.snapshot = snapshot
         writes += snapshot
+        onDurableWrite?.invoke(snapshot)
         return true
     }
 
