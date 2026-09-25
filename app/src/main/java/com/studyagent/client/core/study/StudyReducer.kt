@@ -103,7 +103,7 @@ object StudyReducer {
             is StudyEvent.UserEndRequested -> handleEndRequested(state, event, clockMs)
             is StudyEvent.ServerSessionFinished -> handleSessionFinished(state, event)
             is StudyEvent.ConnectionLost -> handleConnectionLost(state, event, clockMs)
-            is StudyEvent.ConnectionRestored -> handleConnectionRestored(state, event)
+            is StudyEvent.ConnectionRestored -> handleConnectionRestored(state, event, clockMs)
             is StudyEvent.SessionStatusReceived -> handleStatusReceived(state, event, clockMs)
             is StudyEvent.ServerSnapshotReceived -> handleSnapshot(state, event, clockMs)
             is StudyEvent.AudioRouteLost -> handleAudioLost(state, event)
@@ -273,7 +273,7 @@ object StudyReducer {
                         val ready = handleQuestion(state, StudyEvent.ServerQuestionReceived(
                             state.sessionId, turn.cardRef.stableKey, card.questionText.orEmpty(), turn.position,
                             turn.remaining, speak, null, turn.turnId.value
-                        ), now)
+                        ), now, preserveServerTurnId = true)
                         ready.copy(newState = ready.newState.copy(
                             anki = local.copy(turn = attached.value, turnPresentedAtMs = now),
                             activeSpeechEffectId = if (speak) ready.newState.activeSpeechEffectId else null
@@ -650,7 +650,10 @@ object StudyReducer {
             recentServerMessageIds = linkedSetOf(),
             cardGeneration = 0L,
             pendingRatingConfirmation = null,
-            pendingTranscript = null
+            pendingTranscript = null,
+            // GATE 11: freeze what the agent proved it can do *before* the first mutation of
+            // this session. commitSemanticsFromAgent clamps overclaims; null stays fail-closed.
+            commitSemantics = com.studyagent.client.core.anki.commitSemanticsFromAgent(event.agentCapabilities)
         ).recordTransition(event, state.phase, SessionPhase.Starting)
             .rememberServerMessageId(msgId)
         return Transition(newState, listOf(send, StudyEffect.ScheduleTimeout(msgId, pending.timeoutMs, pending.type), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Starting, null, newEpoch)))
@@ -685,7 +688,19 @@ object StudyReducer {
 
     // ------------------------------------------------------------------ QUESTION
 
-    private fun handleQuestion(state: SessionMachineState, event: StudyEvent.ServerQuestionReceived, clockMs: Long): Transition {
+    private fun handleQuestion(
+        state: SessionMachineState,
+        event: StudyEvent.ServerQuestionReceived,
+        clockMs: Long,
+        /**
+         * Anki hydration reuses this handler but must keep the scheduler's turn id verbatim:
+         * the GATE-11 commit pipeline correlates ReviewCommitId.turnId with cardTurn.turnId,
+         * so that identity is the scheduler's, not a client-qualified derivative. PC server
+         * turn ids get epoch-qualified — a restarted server session may legitimately reuse
+         * "turn-1" and a ghost callback from epoch N must never match epoch N+1's turn.
+         */
+        preserveServerTurnId: Boolean = false
+    ): Transition {
         // A pushed next card / changed revision is not a transaction-correlated rating receipt.
         if (state.anki == null && state.cardTurn?.let { state.ledger.hasRatingInFlight(it.turnId) } == true) {
             return Transition.reject(state, event, "pc-rating-unconfirmed")
@@ -694,10 +709,19 @@ object StudyReducer {
         if (event.sessionId != null && state.session?.sessionId != null && event.sessionId != state.session?.sessionId) {
             return Transition.reject(state, event, "stale-session")
         }
-        // Duplicate detection §20: exact same turn already speaking/listening
+        // Duplicate detection §20: exact same turn already speaking/listening — or already
+        // answered and awaiting/holding its rating. A retransmitted question for the live turn
+        // must never rewind the turn (re-speak, reopen an answer window, cancel a rating in
+        // flight) at any point of the turn's lifecycle. A genuinely new ask of the same card
+        // arrives under a different server turn id and is not suppressed.
         val cur = state.cardTurn
         val isExactDuplicate = cur != null && cur.cardId == event.cardId && cur.card.question == event.question &&
-                (state.phase is SessionPhase.SpeakingQuestion || state.phase is SessionPhase.WaitingForAnswer || state.phase is SessionPhase.PendingAnswerReview)
+                (event.serverTurnId == null || cur.serverTurnId == null || event.serverTurnId == cur.serverTurnId) &&
+                (state.phase is SessionPhase.SpeakingQuestion || state.phase is SessionPhase.WaitingForAnswer ||
+                    state.phase is SessionPhase.PendingAnswerReview || state.phase is SessionPhase.SubmittingAnswer ||
+                    state.phase is SessionPhase.WaitingForEvaluation || state.phase is SessionPhase.ShowingAnswer ||
+                    state.phase is SessionPhase.SpeakingFeedback || state.phase is SessionPhase.WaitingForRating ||
+                    state.phase is SessionPhase.SubmittingRating)
         if (isExactDuplicate && state.isDuplicateServerMessage(event.messageId)) {
             return Transition.reject(state, event, "duplicate-question")
         }
@@ -712,7 +736,8 @@ object StudyReducer {
 
         val card = StudyCard(event.cardId, event.question, event.cardNumber, event.remaining, state.session?.deckName)
         val newGen = state.cardGeneration + 1
-        val turnId = CardTurn.generateTurnId(state.epoch, card.id, newGen, event.serverTurnId)
+        val turnId = if (preserveServerTurnId && !event.serverTurnId.isNullOrBlank()) event.serverTurnId
+        else CardTurn.generateTurnId(state.epoch, card.id, newGen, event.serverTurnId)
         val newTurn = CardTurn(newGen, card, turnId, event.serverTurnId, event.serverRevision)
         val newSession = state.session?.copy(
             currentCard = card,
@@ -847,6 +872,12 @@ object StudyReducer {
         if (state.cardTurn?.cardId != event.cardId) {
             return Transition.reject(state, event, "stale-card")
         }
+        // An evaluation answers a submitted answer. In WaitingForFirstCard nothing is in flight
+        // for this turn any more — it was skipped, or already rated — so a late evaluation must
+        // not resurrect it (§19/§55).
+        if (state.phase is SessionPhase.WaitingForFirstCard) {
+            return Transition.reject(state, event, "no-answer-in-flight")
+        }
         // Duplicate evaluation §21
         if (state.phase is SessionPhase.SpeakingFeedback || state.phase is SessionPhase.WaitingForRating) {
             // If already showing same evaluation, treat as duplicate
@@ -875,6 +906,10 @@ object StudyReducer {
         if (event.speak && event.evaluation.shortFeedback.isNotBlank()) {
             newPhase = SessionPhase.SpeakingFeedback
             effectId = EffectIds.next("feedback")
+            // Half duplex: a (re-)evaluation can arrive while the rating microphone of an
+            // earlier presentation is open; the feedback utterance owns the voice channel and
+            // the rating window reopens when it completes.
+            effects.add(StudyEffect.Voice.CancelRecognition("evaluation"))
             effects.add(StudyEffect.Voice.Speak(speechRequestForFeedback(event.cardId, event.evaluation.shortFeedback), effectId))
         } else {
             newPhase = SessionPhase.WaitingForRating
@@ -888,7 +923,10 @@ object StudyReducer {
             session = newSession,
             ledger = ledger2,
             pendingAction = null, // Clear answer pending
-            activeSpeechEffectId = effectId
+            activeSpeechEffectId = effectId,
+            // The feedback utterance cancelled any open microphone; the state must not keep
+            // claiming a recognition effect that no longer owns a turn (§22).
+            activeRecognitionEffectId = if (effectId != null) null else state.activeRecognitionEffectId
         ).recordTransition(event, state.phase, newPhase)
             .rememberServerMessageId(event.messageId)
 
@@ -970,8 +1008,12 @@ object StudyReducer {
         // Only an ACK correlated to the original delivery can move the turn. A changed card,
         // next question, revision or unrequested server message is not proof of this rating.
         val pending = state.pendingAction
+        // WaitingForRating joins the set for the retryable-timeout rollback only: there the
+        // original pendingAction is deliberately retained, so a late ack for *that* delivery is
+        // still correlated (and any ack without a matching pending is rejected as before).
         if (pending?.type != PendingAction.ActionType.RATE_CARD || state.phase !in setOf(
-                SessionPhase.SubmittingRating, SessionPhase.Error(SessionProblem.RATING_TIMEOUT))) {
+                SessionPhase.SubmittingRating, SessionPhase.Error(SessionProblem.RATING_TIMEOUT),
+                SessionPhase.WaitingForRating)) {
             return Transition.reject(state, event, "unrequested-rating-ack")
         }
         if (pending.cardId != event.cardId) return Transition.reject(state, event, "stale-pending")
@@ -1137,6 +1179,16 @@ object StudyReducer {
 
     private fun handleRepeat(state: SessionMachineState, event: StudyEvent.UserRequestRepeat, clockMs: Long): Transition {
         val card = state.cardTurn?.card ?: state.session?.currentCard ?: return Transition.reject(state, event, "no-card")
+        // A repeat rewinds the turn to its question. That is only legal while the turn is still
+        // in its question/answer window: while paused nothing may speak until the session is
+        // resumed (§96), and once the evaluation is on screen the turn belongs to the rating
+        // flow — rewinding would strand the evaluation in an illegal phase and reopen an answer
+        // window for an answer that was already submitted (§80 choose-contract stays local).
+        if (state.phase is SessionPhase.Paused || state.phase is SessionPhase.Pausing ||
+            state.isFinished || state.isIdle || state.cardTurn?.evaluation != null
+        ) {
+            return Transition.reject(state, event, "illegal-phase")
+        }
         // Choose contract §80: local repeat only + optional server request but duplicate suppressed
         val effectId = EffectIds.next("repeat")
         val speak = SpeechRequest(
@@ -1152,9 +1204,12 @@ object StudyReducer {
         val newState = state.copy(
             phase = SessionPhase.SpeakingQuestion,
             activeSpeechEffectId = effectId,
+            // Half duplex: the repeated question owns the voice channel — any open answer or
+            // rating microphone is closed first and reopens when the utterance completes.
+            activeRecognitionEffectId = null,
             pendingAction = pending
         ).recordTransition(event, state.phase, SessionPhase.SpeakingQuestion)
-        return Transition(newState, listOf(StudyEffect.Voice.Speak(speak, effectId), send, StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.SpeakingQuestion, card.id, state.epoch)))
+        return Transition(newState, listOf(StudyEffect.Voice.CancelRecognition("repeat"), StudyEffect.Voice.Speak(speak, effectId), send, StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.SpeakingQuestion, card.id, state.epoch)))
     }
 
     private fun handleSkip(state: SessionMachineState, event: StudyEvent.UserSkipRequested, clockMs: Long): Transition {
@@ -1173,6 +1228,9 @@ object StudyReducer {
             pendingAction = pending,
             pendingTranscript = null,
             pendingRatingConfirmation = null,
+            // The evaluation retires with the turn it answered (§15): a skipped turn waits for
+            // the next question with no feedback on screen — the same rule rating_saved follows.
+            cardTurn = state.cardTurn?.copy(evaluation = null),
             ledger = if (state.cardTurn != null) state.ledger.copy(entries = state.ledger.entries.mapValues { (_, v) ->
                 if (v.turnId == state.cardTurn.turnId) v.copy(skipState = SubmissionLedger.SubmissionState.IN_FLIGHT) else v
             }) else state.ledger
@@ -1190,11 +1248,16 @@ object StudyReducer {
         val msgId = event.messageId.ifBlank { UUID.randomUUID().toString() }
         val pending = newPending(PendingAction.ActionType.PAUSE_SESSION, state, msgId, state.cardTurn?.turnId, state.cardTurn?.cardId, clockMs)
         val send = StudyEffect.Network.Send(msgId, ClientMessage.PauseSession(sessionId = state.session?.sessionId, messageId = msgId))
-        val resumeCtx = ResumeContext(state.epoch, state.phase, state.cardTurn, state.pendingTranscript?.text, clockMs)
+        val resumeCtx = ResumeContext(state.epoch, state.phase, state.cardTurn, state.pendingTranscript?.text, clockMs, routeLossBeforePause = event.routeLoss)
         val newState = state.copy(
             phase = SessionPhase.Pausing,
             pauseContext = resumeCtx,
-            pendingAction = pending
+            pendingAction = pending,
+            // State hygiene: this transition cancels the voice pipeline, so the published state
+            // must not keep claiming live effect ownership — a paused phase holding a recognition
+            // effect is exactly what the paused-with-open-mic invariant forbids (§22).
+            activeSpeechEffectId = null,
+            activeRecognitionEffectId = null
         ).recordTransition(event, state.phase, SessionPhase.Pausing)
         return Transition(newState, listOf(StudyEffect.Voice.CancelSpeech("pause"), StudyEffect.Voice.CancelRecognition("pause"), send, StudyEffect.ScheduleTimeout(msgId, pending.timeoutMs, pending.type), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Pausing, state.currentCardId, state.epoch)))
     }
@@ -1211,7 +1274,9 @@ object StudyReducer {
         val newState = state.copy(
             phase = SessionPhase.Paused,
             pauseContext = ctx,
-            pendingAction = null
+            pendingAction = null,
+            activeSpeechEffectId = null,
+            activeRecognitionEffectId = null
         ).recordTransition(event, state.phase, SessionPhase.Paused)
             .rememberServerMessageId(event.messageId)
         return Transition(newState, listOf(StudyEffect.CancelTimeout(state.pendingAction?.messageId ?: ""), StudyEffect.Voice.CancelSpeech("server-paused"), StudyEffect.Voice.CancelRecognition("server-paused"), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Paused, state.currentCardId, state.epoch)))
@@ -1234,14 +1299,23 @@ object StudyReducer {
             return Transition.reject(state, event, "not-resuming")
         }
         val ctx = state.pauseContext
-        val safePhase = ResumeContext.safeRestartPhase(ctx, SessionPhase.WaitingForAnswer)
+        // A pause the disconnect policy forced on the user (§96/§97) interrupted a question the
+        // user's new route never finished hearing: resume repeats it once, then reopens the
+        // answer window when the utterance completes. Any later turn stage resumes as before.
+        val before = ctx?.phaseBeforePause
+        val routeLossRePresent = ctx?.routeLossBeforePause == true && ctx.cardTurn?.card != null &&
+            (before is SessionPhase.SpeakingQuestion || before is SessionPhase.WaitingForAnswer ||
+                before is SessionPhase.PendingAnswerReview)
+        val safePhase = if (routeLossRePresent) SessionPhase.SpeakingQuestion
+        else ResumeContext.safeRestartPhase(ctx, SessionPhase.WaitingForAnswer)
         val card = ctx?.cardTurn?.card ?: state.cardTurn?.card
         val newCardTurn = ctx?.cardTurn ?: state.cardTurn
         val newState = state.copy(
             phase = safePhase,
             cardTurn = newCardTurn,
             pauseContext = null,
-            pendingAction = null
+            pendingAction = null,
+            activeRecognitionEffectId = null
         ).recordTransition(event, state.phase, safePhase)
             .rememberServerMessageId(event.messageId)
 
@@ -1252,6 +1326,9 @@ object StudyReducer {
             when (safePhase) {
                 SessionPhase.SpeakingQuestion -> {
                     val effId = EffectIds.next("resume-question")
+                    // Half duplex: the repeated question replaces any microphone window that
+                    // survived the pause; the answer window reopens when the utterance ends.
+                    effects.add(StudyEffect.Voice.CancelRecognition("resume-question"))
                     effects.add(StudyEffect.Voice.Speak(speechRequestForQuestion(card), effId))
                     // update activeSpeechEffectId via state copy? We'll handle executor assignment
                 }
@@ -1313,27 +1390,40 @@ object StudyReducer {
         return Transition(newState, listOf(StudyEffect.Voice.CancelSpeech("connection-lost"), StudyEffect.Voice.CancelRecognition("connection-lost"), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Recovering, state.currentCardId, state.epoch)))
     }
 
-    private fun handleConnectionRestored(state: SessionMachineState, event: StudyEvent.ConnectionRestored): Transition {
+    private fun handleConnectionRestored(state: SessionMachineState, event: StudyEvent.ConnectionRestored, clockMs: Long): Transition {
         if (state.phase !is SessionPhase.Recovering && state.phase !is SessionPhase.Error) {
             // If already connected, treat as no-op but request status for safety
             if (state.connection == SessionConnectionStatus.CONNECTED) return Transition.reject(state, event, "already-connected")
         }
-        // Request authoritative snapshot §35-§37
+        // Request authoritative snapshot §35-§37. The request is the session's one in-flight
+        // action until the snapshot answers it: tracked as a pending action so the watchdog,
+        // the single-pending rule and diagnostics all see the reconciliation in progress.
         val msgId = UUID.randomUUID().toString()
         val send = StudyEffect.Network.Send(msgId, ClientMessage.RequestSessionStatus(sessionId = state.session?.sessionId, messageId = msgId))
+        val pending = newPending(PendingAction.ActionType.REQUEST_SESSION_STATUS, state, msgId, state.cardTurn?.turnId, state.cardTurn?.cardId, clockMs)
         val newState = state.copy(
             connection = SessionConnectionStatus.RECOVERING,
             phase = SessionPhase.Recovering,
+            pendingAction = pending,
             cardTurn = state.cardTurn?.copy(evaluation = null)
         ).recordTransition(event, state.phase, SessionPhase.Recovering)
-        return Transition(newState, listOf(send, StudyEffect.ScheduleTimeout(msgId, PendingAction.timeoutFor(PendingAction.ActionType.REQUEST_SESSION_STATUS), PendingAction.ActionType.REQUEST_SESSION_STATUS), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Recovering, state.currentCardId, state.epoch)))
+        return Transition(newState, listOf(send, StudyEffect.ScheduleTimeout(msgId, pending.timeoutMs, PendingAction.ActionType.REQUEST_SESSION_STATUS), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.Recovering, state.currentCardId, state.epoch)))
     }
 
     private fun handleStatusReceived(state: SessionMachineState, event: StudyEvent.SessionStatusReceived, clockMs: Long): Transition {
         // Reconcile §39
         val reconciliation = SessionReconciler.reconcile(state, event.snapshot, clockMs)
-        val finalState = reconciliation.newState.recordTransition(event, state.phase, reconciliation.newState.phase)
-        return Transition(finalState, reconciliation.effects + StudyEffect.LogTransition(state.phase, event.debugName, finalState.phase, finalState.currentCardId, state.epoch))
+        var finalState = reconciliation.newState
+        val extraEffects = mutableListOf<StudyEffect>()
+        // The authoritative snapshot answers the pending status request: retire it and its
+        // watchdog so the session has no phantom in-flight action blocking the next turn.
+        val answered = finalState.pendingAction
+        if (answered?.type == PendingAction.ActionType.REQUEST_SESSION_STATUS) {
+            extraEffects += StudyEffect.CancelTimeout(answered.messageId)
+            finalState = finalState.copy(pendingAction = null)
+        }
+        finalState = finalState.recordTransition(event, state.phase, finalState.phase)
+        return Transition(finalState, reconciliation.effects + extraEffects + StudyEffect.LogTransition(state.phase, event.debugName, finalState.phase, finalState.currentCardId, state.epoch))
     }
 
     private fun handleSnapshot(state: SessionMachineState, event: StudyEvent.ServerSnapshotReceived, clockMs: Long): Transition {
@@ -1350,7 +1440,12 @@ object StudyReducer {
      * question, a rating/command in the feedback and rating windows.
      */
     private fun handlePttStarted(state: SessionMachineState, event: StudyEvent.PttStarted): Transition {
-        if (state.isIdle || state.isFinished || state.phase is SessionPhase.Error) {
+        // A paused session holds no microphone (§22): push-to-talk must never silently reopen
+        // one — the user resumes the session explicitly first. Recovering stays allowed: PTT is
+        // precisely the path that must work while an automatic window is not open.
+        if (state.isIdle || state.isFinished || state.phase is SessionPhase.Error ||
+            state.phase is SessionPhase.Paused || state.phase is SessionPhase.Pausing
+        ) {
             return Transition.reject(state, event, "illegal-phase")
         }
         val card = state.cardTurn?.card ?: state.session?.currentCard
@@ -1436,8 +1531,13 @@ object StudyReducer {
         if (state.cardTurn?.cardId != event.cardId && event.cardId != null) return Transition.reject(state, event, "stale-card")
         val effectId = EffectIds.next("route-restore")
         val speak = speechRequestForQuestion(card)
-        val newState = state.copy(phase = SessionPhase.SpeakingQuestion, activeSpeechEffectId = effectId).recordTransition(event, state.phase, SessionPhase.SpeakingQuestion)
-        return Transition(newState, listOf(StudyEffect.Voice.Speak(speak, effectId), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.SpeakingQuestion, card.id, state.epoch)))
+        val newState = state.copy(
+            phase = SessionPhase.SpeakingQuestion,
+            activeSpeechEffectId = effectId,
+            // Half duplex: the repeated question owns the voice channel (see handleRepeat).
+            activeRecognitionEffectId = null
+        ).recordTransition(event, state.phase, SessionPhase.SpeakingQuestion)
+        return Transition(newState, listOf(StudyEffect.Voice.CancelRecognition("route-restore"), StudyEffect.Voice.Speak(speak, effectId), StudyEffect.LogTransition(state.phase, event.debugName, SessionPhase.SpeakingQuestion, card.id, state.epoch)))
     }
 
     private fun handleStopSpeaking(state: SessionMachineState): Transition {
@@ -1505,8 +1605,26 @@ object StudyReducer {
                 return Transition(newState, listOf(StudyEffect.LogRejected(event.debugName, "submit-timeout", state.phase, pending.cardId)))
             }
             PendingAction.ActionType.RATE_CARD -> {
-                // The server may have applied the rating even if its ACK was lost. Preserve the
-                // original message correlation, do NOT mark it retryable or reopen rating/skip.
+                val turnId = pending.cardTurnId
+                if (com.studyagent.client.core.anki.PcRatingReplayPolicy.automaticReplayAllowed(state.commitSemantics)) {
+                    // The agent froze `review_commit_idempotency` for this session: a replay of
+                    // the same logical commit (same review_commit_id) cannot double-apply, so the
+                    // turn may return to the rating window and the *user* may retry. The client
+                    // still never resends on its own, and a late correlated ack is still honoured.
+                    val ledger2 = if (turnId != null) state.ledger.markRatingFailed(turnId, true) else state.ledger
+                    val newState = state.copy(
+                        phase = SessionPhase.WaitingForRating,
+                        ledger = ledger2,
+                        error = SessionProblemHolder(SessionProblem.RATING_TIMEOUT,
+                            "Rating acknowledgement timed out. The agent deduplicates this commit; retrying will not apply it twice.",
+                            true, clockMs)
+                    ).recordTransition(event, state.phase, SessionPhase.WaitingForRating)
+                    return Transition(newState, listOf(StudyEffect.LogRejected(event.debugName, "rating-timeout-retryable", state.phase, pending.cardId)))
+                }
+                // The server may have applied the rating even if its ACK was lost, and nothing
+                // proves a replay would be deduplicated. Preserve the original message
+                // correlation, do NOT mark it retryable or reopen rating/skip: the only exit is a
+                // correlated receipt (GATE 11: ambiguous outcomes never blindly retry).
                 val newState = state.copy(
                     phase = SessionPhase.Error(SessionProblem.RATING_TIMEOUT),
                     error = SessionProblemHolder(SessionProblem.RATING_TIMEOUT,

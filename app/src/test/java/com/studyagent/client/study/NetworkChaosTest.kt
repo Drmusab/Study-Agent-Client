@@ -65,10 +65,11 @@ class NetworkChaosTest {
         assertEquals("the client must not resubmit an answer on its own", 0, h.server.answersReceived)
 
         // The user retries once the network is back — through push-to-talk, the path that is
-        // always available when the automatic window is no longer open.
+        // always available when the automatic window is no longer open. The window opens behind
+        // the route's acoustic gap (~560 ms on the phone speaker), so advance past it.
         h.connection.failAllSends = false
         h.pressToTalk()
-        h.advance(500)
+        h.advance(1_000)
         h.speakAnswer()
         assertTrue(
             "the retry must reach the server",

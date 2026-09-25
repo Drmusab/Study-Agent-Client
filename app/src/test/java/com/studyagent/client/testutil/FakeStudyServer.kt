@@ -48,6 +48,20 @@ class FakeStudyServer(
     var replyDelayMs: Long = 1L
 ) {
 
+    /**
+     * What this agent advertises at handshake. The default advertises `review_commit_idempotency`
+     * because this fake genuinely implements it below: a replayed `rate_card` carrying the same
+     * logical commit id is answered from the stored receipt and never applied twice — first write
+     * wins, exactly like the mock PC agent's `--commit-store` (PROTOCOL.md §6: rate_card is
+     * idempotent). Set to an empty set to play a legacy agent that must not be replayed against.
+     */
+    var advertisedCapabilities: Set<String> = setOf(
+        com.studyagent.client.core.models.AgentCapability.REVIEW_COMMIT_IDEMPOTENCY
+    )
+
+    /** Durable per-commit receipts, keyed by the logical review commit id. */
+    private val ratingCommits = LinkedHashMap<String, ServerMessage.RatingSaved>()
+
     /** Where replies go. Wired by the harness to the connection double. */
     var onReply: ((ServerMessage) -> Unit)? = null
 
@@ -130,7 +144,9 @@ class FakeStudyServer(
                     suggestedRating = evaluation.suggestedRating,
                     confidence = evaluation.confidence,
                     speak = speakFeedback,
-                    reviewTurnId = message.reviewTurnId
+                    reviewTurnId = message.reviewTurnId,
+                    // PROTOCOL.md §3.4: evaluation_response correlates via in_reply_to.
+                    inReplyTo = message.messageId
                 )
                 lastEvaluation = frame
                 if (reorderReplies) send(ServerMessage.Pong())
@@ -138,27 +154,44 @@ class FakeStudyServer(
             }
 
             is ClientMessage.RateCard -> {
-                ratedCards += message.cardId
-                val ack = ServerMessage.RatingSaved(
-                    sessionId = sessionId,
-                    cardId = message.cardId,
-                    rating = message.rating,
-                    nextInterval = "1d",
-                    reviewTurnId = message.reviewTurnId
-                )
-                lastRatingSaved = ack
-                repeat(duplicateRatingAcks + 1) { send(ack) }
-                if (ratedCards.size >= totalCards) {
-                    sessionFinished = true
-                    send(
-                        ServerMessage.SessionFinished(
-                            sessionId = sessionId,
-                            totalReviewed = ratedCards.size,
-                            summary = "Deck complete"
-                        )
-                    )
+                val commitKey = message.reviewCommitId ?: message.reviewTurnId
+                val stored = if (commitKey != null && advertisesIdempotency()) ratingCommits[commitKey] else null
+                if (stored != null) {
+                    // Idempotent replay: the logical commit was already applied. The card is not
+                    // counted again and the deck does not advance again; the stored receipt is
+                    // re-answered correlated to *this* request so a user retry completes, and the
+                    // current question is re-pushed in case the original push was lost. A retry
+                    // that changed the rating still gets the first committed rating back — the
+                    // client's rating correlation then fails closed, which is the honest answer.
+                    send(stored.copy(messageId = null, inReplyTo = message.messageId))
+                    if (!sessionFinished) lastQuestion?.let { send(it.copy(messageId = null)) }
                 } else {
-                    nextQuestion()
+                    ratedCards += message.cardId
+                    val ack = ServerMessage.RatingSaved(
+                        sessionId = sessionId,
+                        cardId = message.cardId,
+                        rating = message.rating,
+                        nextInterval = "1d",
+                        reviewTurnId = message.reviewTurnId,
+                        // PROTOCOL.md §3.5: rating_saved correlates via in_reply_to, and the
+                        // client only accepts an ack that proves it answers this exact rate_card.
+                        inReplyTo = message.messageId
+                    )
+                    lastRatingSaved = ack
+                    if (commitKey != null && advertisesIdempotency()) ratingCommits[commitKey] = ack
+                    repeat(duplicateRatingAcks + 1) { send(ack) }
+                    if (ratedCards.size >= totalCards) {
+                        sessionFinished = true
+                        send(
+                            ServerMessage.SessionFinished(
+                                sessionId = sessionId,
+                                totalReviewed = ratedCards.size,
+                                summary = "Deck complete"
+                            )
+                        )
+                    } else {
+                        nextQuestion()
+                    }
                 }
             }
 
@@ -235,6 +268,9 @@ class FakeStudyServer(
 
     /** Injects an arbitrary frame; used by the chaos and protocol suites. */
     fun push(message: ServerMessage) = send(message)
+
+    private fun advertisesIdempotency(): Boolean =
+        com.studyagent.client.core.models.AgentCapability.REVIEW_COMMIT_IDEMPOTENCY in advertisedCapabilities
 
     fun sessionStatus(): ServerMessage.SessionStatus = ServerMessage.SessionStatus(
         sessionId = sessionId,

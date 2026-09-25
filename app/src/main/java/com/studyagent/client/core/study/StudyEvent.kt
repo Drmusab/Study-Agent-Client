@@ -18,7 +18,13 @@ sealed interface StudyEvent {
         /** Study mode wire value; defaults to the v1-compatible due-review mode. */
         val mode: String = "review_due",
         /** Optional Protocol v2 session configuration from the Control Center (§75). */
-        val config: com.studyagent.client.core.models.SessionStartConfig? = null
+        val config: com.studyagent.client.core.models.SessionStartConfig? = null,
+        /**
+         * Capabilities negotiated with the agent at start time. The reducer freezes the commit
+         * semantics derived from them for the whole session (GATE 11: a capability refresh after
+         * a mutation started must never flip replay safety on). Null = nothing negotiated yet.
+         */
+        val agentCapabilities: com.studyagent.client.core.models.AgentCapabilities? = null
     ) : StudyEvent
     data class UserSubmitAnswer(val cardId: String, val transcript: String) : StudyEvent
     data class UserSubmitPendingTranscript(val cardId: String, val transcript: String) : StudyEvent
@@ -29,7 +35,12 @@ sealed interface StudyEvent {
     data class UserRequestAnswer(val cardId: String?) : StudyEvent
     data class UserRequestRepeat(val cardId: String?) : StudyEvent
     data class UserSkipRequested(val cardId: String?) : StudyEvent
-    data class UserPauseRequested(val messageId: String) : StudyEvent
+    /**
+     * @param routeLoss true when the pause is the disconnect policy's reaction to a lost audio
+     *   route (§96/§97). Resume from such a pause repeats the current question on the new route
+     *   instead of silently reopening a microphone the user never heard the question on.
+     */
+    data class UserPauseRequested(val messageId: String, val routeLoss: Boolean = false) : StudyEvent
     data class UserResumeRequested(val messageId: String) : StudyEvent
     data class UserEndRequested(val messageId: String) : StudyEvent
     data object UserStopSpeaking : StudyEvent

@@ -208,6 +208,11 @@ class DiagnosticsExportPrivacyTest {
         val repository = h.diagnosticsRepo()
 
         assertTrue(repository.timelineEvents().isNotEmpty())
+        // A clean session logs only INFO rows, and INFO publication is coalesced behind the
+        // publish executor (WARN/ERROR publish immediately). Tests asserting on the observable
+        // stream flush first — the pattern the AppLogger KDoc prescribes. (This assertion used
+        // to pass only because the flow under test was producing rejected-event WARN spam.)
+        AppLogger.flush()
         assertTrue(repository.logs.value.isNotEmpty())
 
         repository.clearLogs()

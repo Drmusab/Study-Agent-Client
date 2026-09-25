@@ -380,11 +380,21 @@ class StudySessionMachine(
             if (machine.currentCardId != null && machine.currentCardId != turn.cardId) {
                 recordInvariantViolation("evaluation-card-drift", "evaluation on ${turn.cardId} while current card is ${machine.currentCardId}")
             }
+            val ratingTimeoutFreeze = machine.phase is SessionPhase.Error &&
+                (machine.phase as SessionPhase.Error).problem == SessionProblem.RATING_TIMEOUT
             val legal = machine.phase is SessionPhase.SpeakingFeedback ||
                 machine.phase is SessionPhase.WaitingForRating ||
                 machine.phase is SessionPhase.SubmittingRating ||
                 machine.phase is SessionPhase.Paused ||
-                machine.phase is SessionPhase.Pausing
+                machine.phase is SessionPhase.Pausing ||
+                // Resuming continues the very turn that was paused with its evaluation on
+                // screen; the retention is deliberate until the resume receipt re-publishes it
+                // in its restart phase (a paused turn's feedback survives pause→resume).
+                machine.phase is SessionPhase.Resuming ||
+                // A rating timeout freezes the turn together with its evaluation: the
+                // fail-closed Error(RATING_TIMEOUT) waits for a correlated receipt for *this*
+                // turn, so the evaluation stays legitimately visible until the turn resolves.
+                ratingTimeoutFreeze
             if (!legal) {
                 recordInvariantViolation("evaluation-in-illegal-phase", "evaluation visible in ${SessionPhase.serverPhaseName(machine.phase)}")
             }
@@ -622,7 +632,7 @@ class StudySessionMachine(
                     StudyAudioDisconnectPolicy.PAUSE_VOICE -> {
                         val phase = _machineState.value.phase
                         if (phase !is SessionPhase.Paused && phase !is SessionPhase.Pausing) {
-                            dispatch(StudyEvent.UserPauseRequested("route-loss-${clock()}"))
+                            dispatch(StudyEvent.UserPauseRequested("route-loss-${clock()}", routeLoss = true))
                         }
                     }
 

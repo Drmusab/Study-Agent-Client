@@ -44,7 +44,14 @@ data class CardTurn(
     fun incrementHint(): CardTurn = copy(hintCount = hintCount + 1)
 
     companion object {
+        /**
+         * Turn ids are client-scoped identities: they key the submission ledger, turn-ownership
+         * checks and stale-callback rejection, so they must be unique *per epoch*. A server turn
+         * id alone is only unique within one server session — after a restart the server may
+         * legitimately reuse "turn-1", and a ghost callback from epoch N must never match the
+         * fresh turn of epoch N+1. Both branches therefore carry the epoch.
+         */
         fun generateTurnId(epoch: Long, cardId: String, generation: Long, serverTurnId: String? = null): String =
-            serverTurnId ?: "$epoch:$cardId:$generation"
+            if (serverTurnId.isNullOrBlank()) "$epoch:$cardId:$generation" else "$epoch:$serverTurnId"
     }
 }

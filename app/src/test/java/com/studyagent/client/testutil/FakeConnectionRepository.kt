@@ -102,8 +102,20 @@ class FakeConnectionRepository(
 
     // Members the ConnectionRepository interface gained in an earlier gate without this fake being
     // updated (pre-existing compile error in every harness-based study test, fixed in GATE 11).
-    override val connectionSnapshot: StateFlow<AgentConnectionSnapshot> =
-        MutableStateFlow(AgentConnectionSnapshot.disconnected())
+    private val _connectionSnapshot = MutableStateFlow(AgentConnectionSnapshot.disconnected())
+    override val connectionSnapshot: StateFlow<AgentConnectionSnapshot> = _connectionSnapshot
+
+    /**
+     * What the scripted peer advertised during handshake. The machine freezes the commit
+     * semantics from this at session start (GATE 11), so a test that wants the fail-closed
+     * legacy behaviour advertises nothing before starting the session.
+     */
+    fun advertiseCapabilities(capabilities: Set<String>, protocolVersion: String = "2") {
+        _connectionSnapshot.value = _connectionSnapshot.value.copy(
+            protocolVersion = protocolVersion,
+            capabilities = capabilities
+        )
+    }
 
     override suspend fun connectWithOverride(profile: ServerProfile?) = connect(profile)
 

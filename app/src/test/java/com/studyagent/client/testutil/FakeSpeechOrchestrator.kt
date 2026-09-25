@@ -94,6 +94,29 @@ class FakeSpeechOrchestrator(
     var onSpeakEnd: ((SpeechRequest, SpeechResult) -> Unit)? = null
 
     override suspend fun speak(request: SpeechRequest): SpeechResult {
+        // PARK models an engine that accepted the request but has not started voicing it: the
+        // utterance sits in the engine's queue until the test releases it with completeNext().
+        // A parked request therefore does NOT claim the voice channel — no started/spoken
+        // bookkeeping, no speaking flag, no overlap window — and on release it runs to its
+        // result immediately (off-screen), which is what the manual drivers have always
+        // expected. This keeps half-duplex observations honest: a parked next-question and an
+        // open microphone are not an overlap, and a caller observing the harness right after a
+        // rating commit sees a clean voice timeline.
+        if (mode == Mode.PARK) {
+            val gate = CompletableDeferred<SpeechResult>()
+            parked[request.id] = gate
+            val parkedResult = try {
+                gate.await()
+            } finally {
+                parked.remove(request.id)
+            }
+            val releasedAt = clock()
+            started += request
+            spoken += Spoken(request, releasedAt, clock(), parkedResult)
+            onSpeakStart?.invoke(request)
+            onSpeakEnd?.invoke(request, parkedResult)
+            return parkedResult
+        }
         started += request
         inFlight++
         _isSpeaking.value = true
@@ -116,15 +139,7 @@ class FakeSpeechOrchestrator(
                     SpeechResult.Failed(failWith)
                 }
 
-                Mode.PARK -> {
-                    val deferred = CompletableDeferred<SpeechResult>()
-                    parked[request.id] = deferred
-                    try {
-                        deferred.await()
-                    } finally {
-                        parked.remove(request.id)
-                    }
-                }
+                Mode.PARK -> SpeechResult.Completed // unreachable: parked requests return above
             }
         } finally {
             inFlight = (inFlight - 1).coerceAtLeast(0)

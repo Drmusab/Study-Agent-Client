@@ -594,7 +594,7 @@ device/CI evidence owed; **BLOCKED** = cannot execute in this environment.
 | 44 | Commit diagnostics are metadata-only | PASS | code reading (codes §15) + harness timeline (§17) |
 | 45 | Rating mapping AGAIN/HARD/GOOD/EASY = 1/2/3/4 | PARTIAL | contract suites green; pinned re-fetch owed (§16) |
 | 46 | Unsupported rating refused (`rating_not_offered_by_scheduler`) | PASS | `AnkiStudyInteractionTest`, contract tests |
-| 47 | Exactly-once holds under chaos (dup/reorder/loss) | PARTIAL | unit-level green; `NetworkChaosTest` residual (§20-B) |
+| 47 | Exactly-once holds under chaos (dup/reorder/loss) | PASS (harness-level, §32) | commit suites + `NetworkChaosTest` 15/15 + 100-seed `StudyAgentChaosTest` + `ReconnectAtEveryPhaseTest` green under real virtual time; production confirmation still owes §0 evidence |
 | 48 | Production exactly-once on real AnkiDroid (disposable collection) | **BLOCKED** | no device/CI (verdict §0.2) |
 
 Aggregate: 43 PASS · 4 PARTIAL · 1 BLOCKED. A PASS verdict requires 48/48 with the blocked one
@@ -623,3 +623,238 @@ replaced by real device evidence.
 
 _Prepared by the Arena validation session. No claim in this report rests on CI evidence; CI is
 billing-locked and everything above is labelled with its actual evidence class._
+
+---
+
+# PART XII — Capability-driven rating-commit semantics; study/voice cluster green
+
+_Evidence class: JVM harness (tools/jvm-harness, real `kotlinx-coroutines-test` 1.10.2 virtual
+time), same limitations as PART X/XI — no Gradle, no device. Full-run logs in the harness work
+dir (`run-full2.log`, `run-study.log`)._
+
+## 24. Why this part exists
+
+PART XI left the study/voice cluster red: after the harness was rebuilt on real virtual time and
+the fake agent learned PROTOCOL.md §3.4/§3.5 `in_reply_to` correlation, 8 failures remained
+across `StudySessionHappyPathTest`, `NetworkChaosTest`, `StudyAgentChaosTest`,
+`ReconnectAtEveryPhaseTest`, `SessionReconstructionTest`, `PhoneModeMachineIntegrationTest`,
+`StudySessionSimulationTest`, `StudyReducerTest`. Triage exposed one design contradiction and
+one wiring gap:
+
+1. **The contradiction.** `StudyReducerTest."PC rating timeout retains original delivery and
+   refuses blind replay or next card"` pins the fail-closed contract: an unconfirmed PC rating
+   parks the session in `Error(RATING_TIMEOUT)`, retry and next-question are rejected
+   (`pc-rating-unconfirmed`), only a correlated receipt advances. `StudyAgentChaosTest."a dropped
+   rating acknowledgement times out and leaves a retryable state"` and
+   `ReconnectAtEveryPhaseTest."reconnecting while the rating is in flight does not rate again"`
+   demand the opposite surface: a *retryable* `WaitingForRating` the user can act on. Both are
+   right — for different agents.
+2. **The wiring gap.** PART XI built the resolver (`commitSemanticsFromAgent`,
+   `PcRatingReplayPolicy.automaticReplayAllowed` in `core/anki/CommitSemanticsValidation.kt`) but
+   every machine/reducer/reconciler call site passed `null`: advertised capabilities were never
+   frozen into session state, so `automaticReplayAllowed` was permanently false and the
+   replay-safe branch was unreachable in production code.
+
+## 25. Design: freeze advertised semantics at session start, branch on them at uncertainty
+
+- `StudyEvent.UserStartRequested` gained `agentCapabilities: AgentCapabilities?` (default null).
+  `StudySessionMachineRepository.startOrBlock` fills it from
+  `connectionRepository.connectionSnapshot` — the capabilities the agent advertised at handshake
+  (`LEGACY_V1` when a v1 agent negotiated nothing, `fromStrings` otherwise, null when no
+  handshake happened).
+- `handleStart` freezes `commitSemanticsFromAgent(event.agentCapabilities)` into
+  `SessionMachineState.commitSemantics` **before the first mutation of the session**. A later
+  capability refresh can never flip replay safety mid-turn; `commitSemanticsFromAgent` clamps
+  overclaims (no `COMMIT_RECONCILIATION` ⇒ never authoritative; nothing advertised ⇒
+  `UNVERIFIED`/`AT_MOST_ONCE_FAIL_CLOSED`).
+- **Rating watchdog timeout** (`handleTimeout`, `RATE_CARD`): if
+  `PcRatingReplayPolicy.automaticReplayAllowed(state.commitSemantics)` — the agent proved
+  `review_commit_idempotency` — the turn returns to `WaitingForRating` with a retryable
+  `RATING_TIMEOUT` error and `ledger.markRatingFailed(retryable=true)`; the original pending
+  delivery is retained so a late correlated ack still resolves the turn. Otherwise the pinned
+  fail-closed behaviour is untouched. **In neither branch does the client ever resend by
+  itself**: retry is a user action, replays carry the same deterministic `review_commit_id`, and
+  progression stays blocked until a receipt or the user's retry resolves the turn.
+- **Reconnect with a rating in flight** (`SessionReconciler`): the same branch. Replay-safe ⇒
+  `WaitingForRating` + retryable marker (a legal resume state the user can act on); otherwise ⇒
+  `Error(RATING_TIMEOUT)` fail-closed, receipt-or-nothing. The reconciler still never resends.
+- `handleRatingSaved` accepts a correlated ack in `WaitingForRating` as well — required only for
+  the retryable rollback, where the original `pendingAction` is deliberately kept; correlation
+  rules (turn id, `in_reply_to`/`messageId`, expected rating) are unchanged, and an ack without
+  a matching pending is still rejected.
+
+## 26. Honest doubles: the fake agent implements what it advertises
+
+- `FakeStudyServer` now advertises `review_commit_idempotency` **and genuinely implements it**:
+  receipts are stored per logical commit id (`review_commit_id ?: review_turn_id`); a replay is
+  answered from the stored receipt correlated to the retry's `messageId`, the deck does not
+  advance twice, the card is not counted twice, and the current question is re-pushed in case
+  the original push was lost. A retry that changed the rating receives the first committed
+  rating back — client-side correlation then fails closed (`unexpected-rating-ack`), which is
+  the honest answer for a conflicting replay. `advertisedCapabilities` is settable so a test can
+  play a legacy agent.
+- `FakeConnectionRepository.connectionSnapshot` became settable
+  (`advertiseCapabilities(caps, protocolVersion)`); the harness wires it from the fake server so
+  the machine freezes exactly what the transport advertised.
+- Reducer unit tests construct bare states (no capabilities) ⇒ `commitSemantics == null` ⇒ the
+  pinned fail-closed contract keeps passing verbatim. The chaos/reconnect harnesses advertise
+  the capability ⇒ the retryable contract passes. The contradiction is resolved by evidence, not
+  by picking a side.
+
+## 27. Half-duplex and state-hygiene repairs found by the 100-seed chaos sweep
+
+Each item below was a distinct seeded-chaos failure (seed reported in the run log), fixed in the
+reducer/machine and re-verified across all 100 seeds:
+
+1. **Repeat is turn-window-only.** `handleRepeat` now rejects while paused/pausing/finished/idle
+   and once the evaluation is on screen (seed 100: a paused session spoke again and stranded the
+   evaluation in `SpeakingQuestion` — `evaluation-in-illegal-phase`). The repeat re-speak cancels
+   an open microphone first (`CancelRecognition` before `Speak`) and clears
+   `activeRecognitionEffectId` in the published state.
+2. **Evaluation feedback cancels the mic.** A re-evaluation can arrive while the rating window's
+   microphone is open (seed 113: TTS/STT overlap); `handleEvaluation` now emits
+   `CancelRecognition("evaluation")` before the feedback speak and retires the recognition
+   effect id in the published state.
+3. **Route-restore re-speak** got the same half-duplex pairing.
+4. **Pause/resume state hygiene.** The pause transitions publish with
+   `activeSpeechEffectId`/`activeRecognitionEffectId` cleared (the cancels are in the same
+   transition's effects) — `paused-with-open-mic` can no longer trip at publication. The
+   reconciler's generic path does the same for a **reconciled** pause (seed 141: PTT opened a
+   mic during `Recovering`, the snapshot said paused, the published `Paused` state still held
+   the effect id).
+5. **PTT while paused is rejected** (seed 101: `PttStarted` in `Paused` opened a mic on a paused
+   session). PTT during `Recovering` stays allowed — that is precisely the path that must work
+   when no automatic window is open.
+6. **Route-loss pause → resume repeats the question.** `UserPauseRequested` gained
+   `routeLoss: Boolean`; `ResumeContext` records `routeLossBeforePause`; resuming such a pause
+   from a question/answer-window phase restarts in `SpeakingQuestion` and repeats the question
+   once on the new route (§96/§97) instead of silently reopening a microphone for a question the
+   user never heard (`PhoneModeMachineIntegrationTest."losing headphones mid-question…"`).
+   Later turn stages still resume through `safeRestartPhase` unchanged.
+7. **Skip retires the evaluation** (seed 128 family): `handleSkip` clears `cardTurn.evaluation`
+   — the same rule `handleRatingSaved` follows — so `WaitingForFirstCard` never shows feedback
+   from a dead turn; a late evaluation for a skipped/rated turn is rejected
+   (`no-answer-in-flight`) in `WaitingForFirstCard` (`StudyReducerTest."skip invalidates old
+   events"`).
+8. **Invariant allow-list completed, not weakened.** `evaluation-in-illegal-phase` now also
+   accepts `Error(RATING_TIMEOUT)` (the fail-closed freeze deliberately keeps the turn and its
+   evaluation visible while awaiting a receipt) and `Resuming` (the paused turn's feedback
+   survives pause→resume; seed 128).
+
+## 28. Turn identity is epoch-scoped; the Anki scheduler id stays verbatim
+
+`CardTurn.generateTurnId` now epoch-qualifies server turn ids (`"$epoch:$serverTurnId"`).
+Rationale: turn ids key the submission ledger, turn-ownership checks and stale-callback
+rejection; a restarted server session may legitimately reuse `turn-1`, and a ghost callback from
+epoch N must never match epoch N+1's fresh turn
+(`SessionReconstructionTest."callbacks from the previous epoch cannot mutate the new session"`).
+The Anki hydration path passes `preserveServerTurnId = true`: the GATE-11 commit pipeline
+correlates `ReviewCommitId.turnId` with `cardTurn.turnId`, so that identity remains the
+scheduler's, byte for byte (`AnkiStudyInteractionTest` pins both sides).
+
+## 29. Reconnect reconciliation details
+
+- **Inert status frames.** A `SessionStats`/status frame that claims nothing new (server phase
+  `UNKNOWN`, same card, session live and connected, not finished/paused) now only refreshes
+  counters — no voice effects, no pending-action teardown. Before, every chatty push ran the
+  full reconciliation, cancelling the live mic window and re-speaking the question
+  (`NetworkChaosTest."chatty duplicate frames do not wake the voice pipeline"`; the 51-utterance
+  flood in the PART XI probe). Real reconnect recovery is untouched: it arrives with an explicit
+  server phase or finds the session disconnected/recovering, and reconciles in full.
+- **The status request is a tracked pending action.** `handleConnectionRestored` now records
+  `REQUEST_SESSION_STATUS` as the session's one in-flight action (watchdog + single-pending rule
+  see the reconciliation in progress; `StudyReducerTest."connection loss in-flight answer
+  requires reconciliation"`), and `handleStatusReceived` retires it plus its timer when the
+  authoritative snapshot answers.
+
+## 30. The harness under real virtual time
+
+The doubles were stabilized so that assertions observe defined boundaries, not scheduler races:
+
+- **Mic-window-aware awaits.** `awaitWaitingForAnswer/Rating` wait for the *live* window (the
+  acoustic gap opens the mic ~450–560 ms after the phase flip), with escapes for phase-moved-on,
+  parked utterances and routes without a usable microphone.
+- **`playCard` returns at the turn boundary with the next question caught parked.** The server
+  pushes the next question together with the receipt and a real engine would start speaking at
+  once; the caller's assertions belong to the turn just rated ("exactly one question + one
+  feedback utterance", "no microphone window the user did not ask for", generation advanced).
+  `playCard` therefore switches the speech double to PARK across the rating boundary: the card
+  change is observable while the new question's utterance has neither started nor completed.
+- **PARK means "accepted, not yet voicing".** The fake speech orchestrator no longer claims the
+  voice channel for parked requests (no `started`/`speaking` bookkeeping until release) — parked
+  ≠ overlapping, which keeps half-duplex observations honest; on release the utterance runs to
+  its result immediately, exactly as the chaos drivers expect. The harness's `advance()`
+  releases parked utterances in normal COMPLETE mode ("a real engine always terminates
+  eventually"); chaos holds PARK explicitly and drives completion by hand, unchanged.
+- **PTT retries respect the acoustic gap** (`NetworkChaosTest."a failed send never becomes a
+  submitted answer"` advanced 500 ms < the 562 ms phone gap before speaking into the window).
+- **Stale bounded-memory assertions updated to the documented bounds.** The 1000-card reducer
+  simulation asserted an *unbounded* ledger/history (pre-§21/§137 expectations): now it asserts
+  the real bounds (ledger ≤ 33 entries around the prune threshold of 32, live turn always
+  survives pruning, history capped at `CARD_TURN_HISTORY_LIMIT = 64`), and the long-session
+  simulation uses a timeline capacity (500) smaller than a hundred cards' worth of events so the
+  rotation it asserts actually happens.
+- `AppLogger` publication is coalesced for INFO rows behind the publish executor; a clean
+  (rejection-free) session therefore needs the documented `AppLogger.flush()` before asserting
+  on the observable log stream (`DiagnosticsExportPrivacyTest."clearing logs…"` — it previously
+  passed only on rejected-event WARN spam, which immediate-publishes).
+
+## 31. Results
+
+- **Study/voice cluster: 190/190 green** (20 classes: HappyPath, NetworkChaos ×15,
+  Simulation ×5, Endurance, Idempotency, Chaos (incl. all 100 seeds of the seeded sweep),
+  ReconnectAtEveryPhase ×7, SessionReconstruction ×8, PhoneMode, Reducer ×24, Control/Anki
+  interaction suites).
+- **Named contract tests, all PASS:** "a dropped rating acknowledgement times out and leaves a
+  retryable state" · "PC rating timeout retains original delivery and refuses blind replay or
+  next card" (unchanged, bare state) · "reconnecting while the rating is in flight does not rate
+  again" · "reconnecting while waiting for a rating opens a rating window again" · "callbacks
+  from the previous epoch cannot mutate the new session" · "skip invalidates old events" ·
+  "connection loss in-flight answer requires reconciliation" · "1000 card simulation no duplicate
+  submissions bounded memory" · "a full card turn sends exactly one answer and one rating and
+  advances one card" · "chatty duplicate frames do not wake the voice pipeline" · "a paused
+  session never opens the microphone".
+- **Commit-surface suites all still green** (ReviewCommitLedger, AnkiRatingCommit{Flow,Machine,
+  Architecture}, AnkiDroidRatingCommit, AnkiDroidCommitVerifier, FakeAnkiBackend{,Contract},
+  ReviewCommit{Chaos,CrashWindow,DurabilityOrder}, AnkiStudyInteraction): the durability order
+  (intent → claim → `MUTATION_CALL_ENTERED` durable before the effect → `COMMITTED` → next card)
+  and the frozen per-backend guarantees are untouched. The PC client still never auto-resends —
+  it merely stops *stranding* the user when the agent proved dedup.
+- **Full JVM harness run: 1267 tests / 1221 passed / 46 failed / 111 classes** (baseline this
+  gate: 1188/79). Every remaining failure is in the pre-existing non-study catalogue (§20/
+  Appendix B) with reasons byte-identical to the baseline triage: StudyControlRepository ×9,
+  DashboardRepository ×5, AnkiDroidHealthRepository ×5, ProtocolFuzz ×4, DiagnosticsExportPrivacy
+  ×3, AnkiCardRenderController ×3, AnkiDroidReviewSession ×2, AnkiDroidCardMapper ×2,
+  AnkiDroidCardGateway ×2, and 11 singles (TtsVoiceSelector, SpeechQueue, SpeechOrchestrator,
+  AnkiRenderEvent, ProfileValidator, Idempotency, DashboardUiMapper — incl. the real
+  `MCCQE::Cardiology` mapper bug — AnkiMediaResolverPolicy, AnkiCardHydration, AnkiCardFlow,
+  ProtocolJson). One flake observed once under full-run load and green on isolated + repeat runs:
+  `StudyAudioRouteCoordinatorTest."concurrent device preference and boundary churn…"` (raw
+  `Thread`/wall-clock concurrency).
+- **Server side:** `server/test_review_commit_store.py` — 21 tests, OK (2 skipped), unchanged.
+
+## 32. Invariant table delta
+
+| # | Invariant | Was | Now | Evidence |
+|---|-----------|-----|-----|----------|
+| 47 | Exactly-once holds under chaos (dup/reorder/loss) | PARTIAL (unit-level; NetworkChaos residual) | **PASS (harness-level)** | commit suites + NetworkChaos 15/15 + 100-seed chaos + ReconnectAtEveryPhase green under real virtual time (§31) |
+
+No other row changes. Production-level confirmation of row 47 still hinges on the §0 evidence
+class (Gradle command run + real device), which this environment cannot produce.
+
+## 33. Verdict — unchanged
+
+**GATE 11 = BLOCKED.** The owed items are exactly the PART X/XI ones:
+
+1. INV-48: real AnkiDroid mutation validation on a disposable collection (no device/emulator in
+   this environment).
+2. Gradle command evidence (`clean/testDebugUnitTest/lint/assembleDebug/assembleRelease/
+   connectedDebugAndroidTest`) — Maven/Gradle mirrors are unreachable from this sandbox; the JVM
+   harness is equivalence evidence only.
+3. The residual non-study failure catalogue (§20/Appendix B) — 46 failures, untouched by this
+   part, reasons unchanged.
+
+What changed: the study/voice/commit behavioural surface this gate is about is now green under
+real virtual time, and the rating-timeout semantics are capability-driven instead of
+contradictory — fail-closed by default, replay-safe only where the agent froze
+`review_commit_idempotency` at session start, and never auto-resending anywhere.

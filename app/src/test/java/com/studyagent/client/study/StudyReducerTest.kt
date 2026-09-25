@@ -437,12 +437,17 @@ class StudyReducerTest {
             s = r.newState
             s = StudyReducer.reduce(s, StudyEvent.ServerRatingSaved("s1", cardId, Rating.GOOD, null, "r-$i",
                 inReplyTo = s.pendingAction!!.messageId), i*10L+4).newState
-            // After each card, ledger should have one entry per card; prune keeps bounded
-            assertTrue(s.ledger.entries.size <= 1005) // bounded
-            assertEquals(i+1, s.cardTurnHistory.size)
+            // Both structures are bounded (§21/§137): the ledger prunes to the window that can
+            // still receive a late callback once it passes 32 entries (prune floor: the last 20
+            // turn ids + the new turn), the history keeps a fixed identity window — a 1000-card
+            // session holds the same small footprint as a 10-card one.
+            assertTrue("ledger must stay bounded, saw ${s.ledger.entries.size}", s.ledger.entries.size <= 33)
+            assertTrue("the live turn must survive pruning", s.ledger.entries.containsKey(s.cardTurn!!.turnId))
+            assertEquals(minOf(i + 1, StudyReducer.CARD_TURN_HISTORY_LIMIT), s.cardTurnHistory.size)
         }
         assertEquals(SessionPhase.WaitingForFirstCard, s.phase)
-        assertEquals(1000, s.ledger.entries.size)
+        assertTrue("ledger must stay bounded, saw ${s.ledger.entries.size}", s.ledger.entries.size <= 33)
+        assertEquals(StudyReducer.CARD_TURN_HISTORY_LIMIT, s.cardTurnHistory.size)
     }
 
     @Test fun `invariants hold across randomized events`() {
