@@ -10,7 +10,6 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.core.toMutablePreferences
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.ServerProfile

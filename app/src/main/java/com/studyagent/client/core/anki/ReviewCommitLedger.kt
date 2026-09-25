@@ -286,7 +286,7 @@ class ReviewCommitLedger(
                             (record.state == ReviewCommitState.SUBMITTING &&
                                 record.phase != CommitAttemptPhase.PREPARED)) &&
                         (collectionKey == null || record.card.collectionKey == null ||
-                            record.card.collectionKey == collectionKey)))
+                            record.card.collectionKey == collectionKey))
             }
         }
 
