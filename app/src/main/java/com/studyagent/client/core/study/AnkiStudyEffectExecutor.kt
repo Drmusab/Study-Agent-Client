@@ -4,6 +4,7 @@ import com.studyagent.client.core.anki.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -29,8 +30,12 @@ class AnkiStudyEffectExecutor(
     private val ledger: ReviewCommitLedger? = null,
     private val clock: () -> Long = System::currentTimeMillis,
     private val faults: CommitFaultInjector = NoCommitFaults,
-    private val phases: CommitPhaseSink = CommitPhaseSink { _, _ -> }
+    private val phases: CommitPhaseSink = CommitPhaseSink { _, _ -> },
+    /** Upper bound for one read-only reconciliation query; expiry leaves the commit AMBIGUOUS. */
+    private val reconcileTimeoutMs: Long = DEFAULT_RECONCILE_TIMEOUT_MS
 ) {
+    init { require(reconcileTimeoutMs > 0) }
+
     /** Known only while this process lives. A lost durable response never authorizes replay. */
     private val unpersistedResponses = ConcurrentHashMap<ReviewCommitId, CommitRatingResult>()
 
@@ -321,9 +326,13 @@ class AnkiStudyEffectExecutor(
         val submittedAt = record.submittedAtEpochMs ?: record.createdAtEpochMs
         val windowEnd = maxOf(submittedAt, record.resolvedAtEpochMs ?: clock())
         val result = try {
-            backend.reconcileCommit(ReconcileCommitRequest(
-                commitId, record.card, record.rating, record.evidence, submittedAt, windowEnd
-            ))
+            // Read-only and bounded: a hung provider query must not hold the session in CHECKING.
+            // Expiry is "still unknown", never "not applied" — the user can check again later.
+            withTimeoutOrNull(reconcileTimeoutMs) {
+                backend.reconcileCommit(ReconcileCommitRequest(
+                    commitId, record.card, record.rating, record.evidence, submittedAt, windowEnd
+                ))
+            } ?: ReconcileCommitResult.StillAmbiguous(RECONCILE_TIMEOUT)
         } catch (cancelled: CancellationException) {
             throw cancelled // read-only: nothing to undo, the record stays AMBIGUOUS
         } catch (_: Exception) {
@@ -353,4 +362,10 @@ class AnkiStudyEffectExecutor(
         ReviewCommitState.AMBIGUOUS, ReviewCommitState.SUBMITTING, ReviewCommitState.NOT_STARTED ->
             AnkiCommitOutcome.Ambiguous(failure?.category ?: "ambiguous")
     }
+
+    companion object {
+        const val DEFAULT_RECONCILE_TIMEOUT_MS: Long = 10_000L
+        const val RECONCILE_TIMEOUT: String = "reconcile_timeout"
+    }
+
 }
