@@ -91,7 +91,7 @@ class AnkiDroidBackendTest {
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
         val backend = AnkiDroidBackend(
             gateway = gateway,
-            scope = this,
+            scope = backgroundScope,
             deckGateway = FakeAnkiDroidDeckGateway(),
             reviewGateway = FakeAnkiDroidReviewGateway(),
             cardGateway = FakeAnkiDroidCardGateway()
@@ -103,7 +103,7 @@ class AnkiDroidBackendTest {
     @Test
     fun `backend exposes availability and capabilities flows`() = runTest {
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         assertTrue(backend.availability.value is AnkiAvailability.Checking || backend.availability.value is AnkiAvailability.Ready)
         assertEquals(AnkiCapabilities.NONE, backend.capabilities.value)
@@ -112,7 +112,7 @@ class AnkiDroidBackendTest {
     @Test
     fun `backend refreshAvailability updates state`() = runTest {
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         backend.refreshAvailability()
 
@@ -123,7 +123,7 @@ class AnkiDroidBackendTest {
     @Test
     fun `backend getDecks returns UnsupportedAction not empty list`() = runTest {
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         val result = backend.getDecks()
 
@@ -136,7 +136,7 @@ class AnkiDroidBackendTest {
     @Test
     fun `backend beginReview without the scheduledReview capability is refused truthfully`() = runTest {
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         val context = AnkiSessionContext(
             backendId = AnkiBackendId.AnkiDroidLocal,
@@ -159,7 +159,7 @@ class AnkiDroidBackendTest {
     @Test
     fun `backend nextCard on an unknown session handle returns typed Failure`() = runTest {
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         val context = AnkiSessionContext(
             backendId = AnkiBackendId.AnkiDroidLocal,
@@ -180,7 +180,7 @@ class AnkiDroidBackendTest {
     @Test
     fun `backend commitRating returns Rejected not crash`() = runTest {
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         val cardRef = AnkiCardRef(AnkiBackendId.AnkiDroidLocal, cardId = "1")
         val request = CommitRatingRequest(
@@ -200,7 +200,7 @@ class AnkiDroidBackendTest {
             stateToReturn = readyState(),
             throwable = CancellationException("cancelled")
         )
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         try {
             backend.refreshAvailability()
@@ -213,7 +213,7 @@ class AnkiDroidBackendTest {
     @Test
     fun `backend concurrent refresh is consistent`() = runTest {
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         val jobs = (1..10).map {
             async { backend.refreshAvailability() }
@@ -228,7 +228,7 @@ class AnkiDroidBackendTest {
     fun `backend availability remains independent from PC agent`() = runTest {
         // AnkiDroid Ready + PC Disconnected is valid (§88)
         val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         backend.refreshAvailability()
 
@@ -245,7 +245,7 @@ class AnkiDroidBackendTest {
             availability = AnkiAvailability.Ready(AnkiCapabilities.NONE)
         )
         val gateway = FakeAnkiDroidGateway(stateToReturn = state)
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         backend.refreshAvailability()
 
@@ -260,7 +260,7 @@ class AnkiDroidBackendTest {
             lastError = AnkiError.PermissionRequired()
         )
         val gateway = FakeAnkiDroidGateway(stateToReturn = permState)
-        val backend = AnkiDroidBackend(gateway = gateway, scope = this, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
+        val backend = AnkiDroidBackend(gateway = gateway, scope = backgroundScope, deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(), cardGateway = FakeAnkiDroidCardGateway())
 
         backend.refreshAvailability()
 
@@ -282,7 +282,7 @@ class AnkiDroidBackendTest {
         deckGateway.succeed(decks, selected = decks.first().ref)
         val backend = AnkiDroidBackend(
             gateway = FakeAnkiDroidGateway(stateToReturn = listingReady()),
-            scope = this,
+            scope = backgroundScope,
             deckGateway = deckGateway, reviewGateway = FakeAnkiDroidReviewGateway(),
             cardGateway = FakeAnkiDroidCardGateway()
         )
@@ -299,7 +299,7 @@ class AnkiDroidBackendTest {
         val deckGateway = FakeAnkiDroidDeckGateway()
         val backend = AnkiDroidBackend(
             gateway = FakeAnkiDroidGateway(stateToReturn = listingReady()),
-            scope = this,
+            scope = backgroundScope,
             deckGateway = deckGateway, reviewGateway = FakeAnkiDroidReviewGateway(),
             cardGateway = FakeAnkiDroidCardGateway()
         )
@@ -313,7 +313,7 @@ class AnkiDroidBackendTest {
             gateway = FakeAnkiDroidGateway(stateToReturn = listingReady().copy(
                 availability = AnkiAvailability.PermissionRequired()
             )),
-            scope = this,
+            scope = backgroundScope,
             deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(),
             cardGateway = FakeAnkiDroidCardGateway()
         )
@@ -327,7 +327,7 @@ class AnkiDroidBackendTest {
             gateway = FakeAnkiDroidGateway(stateToReturn = listingReady().copy(
                 availability = AnkiAvailability.CollectionNotInitialized
             )),
-            scope = this,
+            scope = backgroundScope,
             deckGateway = FakeAnkiDroidDeckGateway(), reviewGateway = FakeAnkiDroidReviewGateway(),
             cardGateway = FakeAnkiDroidCardGateway()
         )
