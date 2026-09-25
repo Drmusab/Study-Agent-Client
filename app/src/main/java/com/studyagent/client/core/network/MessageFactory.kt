@@ -32,7 +32,10 @@ class MessageFactory(
             clientName = context.clientName,
             clientVersion = context.clientVersion,
             supportedVersions = context.supportedVersions,
-            clientCapabilities = listOf("dashboard", "study_control", "session_recovery")
+            clientCapabilities = listOf(
+                "dashboard", "study_control", "session_recovery",
+                "review_commit_idempotency", "commit_reconciliation"
+            )
         )
     }
 
@@ -89,7 +92,13 @@ class MessageFactory(
         )
     }
 
-    fun rateCard(cardId: String, rating: com.studyagent.client.core.models.Rating, reviewTurnId: String?, sessionRevision: Long?): ClientMessage.RateCard {
+    fun rateCard(
+        cardId: String,
+        rating: com.studyagent.client.core.models.Rating,
+        reviewTurnId: String?,
+        sessionRevision: Long?,
+        reviewCommitId: String? = null
+    ): ClientMessage.RateCard {
         return ClientMessage.RateCard(
             protocolVersion = context.negotiatedVersion,
             messageId = UUID.randomUUID().toString(),
@@ -97,7 +106,8 @@ class MessageFactory(
             cardId = cardId,
             rating = rating,
             reviewTurnId = reviewTurnId,
-            sessionRevision = sessionRevision
+            sessionRevision = sessionRevision,
+            reviewCommitId = reviewCommitId
         )
     }
 

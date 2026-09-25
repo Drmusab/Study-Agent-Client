@@ -89,7 +89,15 @@ class AnkiDroidBackend(
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
     // The public provider has neither a ReviewCommitId key nor a durable commit receipt.
+    // Construction fails closed if this claim is later widened without the matching primitives.
     override val commitSemantics = com.studyagent.client.core.anki.CommitSemantics.ANKIDROID
+
+    init {
+        val validation = com.studyagent.client.core.anki.validateCommitSemantics(commitSemantics, id)
+        check(validation is com.studyagent.client.core.anki.CommitSemanticsValidation.Valid) {
+            "AnkiDroid commit semantics overclaim"
+        }
+    }
 
     /** Distinguishes handles this instance issued from handles issued by a previous process. */
     private val instanceId: String = UUID.randomUUID().toString()

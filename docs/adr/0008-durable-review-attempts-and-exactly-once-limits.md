@@ -26,3 +26,11 @@ The PC integration guide describes what a *future* PC server must implement to c
 ## Explicit non-claims
 
 No cross-process backend-side exactly-once for AnkiDroid; no progress guarantee after ambiguity; no durable PC logical-commit dedup, PC receipt or snapshot-based proof; no assumption that provider row counts, card-state deltas, time windows, next-card changes, local debounce, or abandonment prove a scheduler mutation. Retrying after a confirmed pre-call failure is a new *attempt* under the same logical ID, not a second logical commit.
+
+## Continuation (2026-09-25) — still not exactly-once
+
+The ledger now stamps a per-record version and rejects an illegal or stale transition before the snapshot is replaced. `ABANDONED` is not a state: leaving the screen only notes a timestamp. Old `COMMITTED` payloads may be compacted after a retention window; the commit id is kept as a tombstone so the same identity cannot be prepared again. Unresolved rows are not pruned. The ledger file is excluded from backup and device transfer, and `allowBackup` is false.
+
+AnkiDroid remains `AT_MOST_ONCE_FAIL_CLOSED`. A provider write that is already in flight is `Ambiguous`, not a safe retry. Semantics are frozen onto the record at prepare and are not upgraded if a later capability refresh looks stronger. Reconciliation success is the only copy that may say the rating was verified as saved. Opening AnkiDroid and viewing diagnostics are navigation; they do not resubmit.
+
+The PC `rate_card` frame may carry an optional `review_commit_id`, omitted when absent. The client advertising `review_commit_idempotency` does not mean the server implements it. The mock agent ignores that field. Its `message_id` cache is process memory and is not a durable scheduler dedup. Automatic transport replay of a rating stays off unless the frozen semantics of that transaction advertise idempotent replay. That is not an end-to-end exactly-once claim.

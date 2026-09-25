@@ -3,6 +3,7 @@ package com.studyagent.client.core.anki
 import com.studyagent.client.core.models.Rating
 
 /** These are claims about scheduler *effects*, not the number of requests delivered. */
+@kotlinx.serialization.Serializable
 enum class CommitGuaranteeLevel {
     /** Local input deduplication only. No safe replay or crash-window claim. */
     LOCAL_DEDUP_ONLY,
@@ -26,6 +27,9 @@ data class CommitSemantics(
     init {
         require(!supportsIdempotentReplay || guaranteeLevel == CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED ||
             guaranteeLevel == CommitGuaranteeLevel.END_TO_END_EXACTLY_ONCE)
+        require(guaranteeLevel != CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED || supportsIdempotentReplay)
+        require(guaranteeLevel != CommitGuaranteeLevel.END_TO_END_EXACTLY_ONCE ||
+            (supportsIdempotentReplay && supportsAuthoritativeReconciliation))
         require(commitReceiptKind != CommitReceiptKind.BACKEND_TRANSACTION_ID || supportsAuthoritativeReconciliation)
     }
 

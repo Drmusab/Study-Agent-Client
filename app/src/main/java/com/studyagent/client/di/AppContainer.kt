@@ -80,6 +80,7 @@ import com.studyagent.client.data.repository.StudySessionRepository
 import com.studyagent.client.core.network.NetworkStatsRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.map
 
 interface AppContainer {
@@ -253,6 +254,11 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         )
     }
 
+    init {
+        // Startup recovery is off the splash path: load the ledger, do not mutate study state.
+        ankiDroidScope.launch { reviewCommitLedger.health() }
+    }
+
     override val ankiLibraryRepository: AnkiLibraryRepository by lazy {
         AnkiLibraryRepository(backend = ankiDroidBackend)
     }
@@ -401,7 +407,13 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             timeline = AppDiagnostics.timeline,
             ankiEffects = com.studyagent.client.core.study.AnkiStudyEffectExecutor(
                 registry = ankiBackendRegistry,
-                ledger = reviewCommitLedger
+                ledger = reviewCommitLedger,
+                phases = com.studyagent.client.core.anki.CommitPhaseSink { phase, _ ->
+                    AppDiagnostics.timeline.record(
+                        category = com.studyagent.client.core.diagnostics.DiagnosticCategory.SESSION,
+                        event = "REVIEW_COMMIT_$phase"
+                    )
+                }
             )
         )
     }

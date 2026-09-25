@@ -139,7 +139,13 @@ class StudyReducerTest {
         s = StudyReducer.reduce(s, StudyEvent.ServerEvaluationReceived(null, "c1", eval(), false, "e1"), 0L).newState
         val rating = StudyReducer.reduce(s, StudyEvent.UserRateCard(Rating.GOOD, "c1"))
             .effects.filterIsInstance<StudyEffect.Network.Send>().single().message
-        assertEquals(s.cardTurn?.turnId, (rating as com.studyagent.client.core.models.ClientMessage.RateCard).reviewTurnId)
+        val rateCard = rating as com.studyagent.client.core.models.ClientMessage.RateCard
+        assertEquals(s.cardTurn?.turnId, rateCard.reviewTurnId)
+        assertEquals(
+            com.studyagent.client.core.anki.PcRatingReplayPolicy.logicalCommitId("s1", s.cardTurn!!.turnId),
+            rateCard.reviewCommitId
+        )
+        assertFalse(rateCard.reviewCommitId!!.contains("good", ignoreCase = true))
     }
 
     @Test fun `PC rating timeout retains original delivery and refuses blind replay or next card`() {

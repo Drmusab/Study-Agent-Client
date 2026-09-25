@@ -552,7 +552,16 @@ class DefaultDiagnosticsRepository(
             "Ledger committed" to (data.committed?.toString() ?: "Not checked"),
             "Ledger safe failures" to (data.safeFailures?.toString() ?: "Not checked"),
             "Ledger interrupted on restore" to (data.interruptedOnRestore?.toString() ?: "Not checked"),
-            "Ledger last write failed" to if (data.lastWriteFailed) "Yes" else "No"
+            "Ledger last write failed" to if (data.lastWriteFailed) "Yes" else "No",
+            "Commit attempts" to data.attemptTotal.toString(),
+            "Commit successes" to data.successTotal.toString(),
+            "Commit safe failures" to data.safeFailureTotal.toString(),
+            "Commit ambiguous outcomes" to data.ambiguousTotal.toString(),
+            "Commit conflicts" to data.conflictTotal.toString(),
+            "Commit duplicate rejected" to data.duplicateRejectedTotal.toString(),
+            "Commit recoveries" to data.recoveryTotal.toString(),
+            "Reconciliation unresolved" to data.reconciliationUnresolvedTotal.toString(),
+            "Exactly-once claim" to "Not claimed"
         )
     } ?: emptyList()
 

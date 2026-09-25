@@ -53,9 +53,10 @@ internal class AnkiDroidRatingCommitter(
         if (noteId == null || cardOrd == null) {
             return CommitRatingResult.Rejected(AnkiError.InvalidRequest("answer_requires_note_and_ord"))
         }
-        // A write from an earlier attempt that never returned may still land: do not add another.
+        // A write from an earlier attempt that never returned may still land. This attempt has not
+        // entered, but non-application of the in-flight write is not proven, so retry is not safe.
         if (gateway.writeInFlight) {
-            return CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("provider_write_busy"))
+            return CommitRatingResult.Ambiguous(AnkiError.QueryFailure("provider_write_busy"))
         }
 
         // 1. Fresh baseline, compared with the durable one captured before SUBMITTING.

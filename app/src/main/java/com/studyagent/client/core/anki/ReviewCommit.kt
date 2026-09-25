@@ -122,7 +122,21 @@ data class ReviewCommitRecord(
     /** Stable token saying *how* the state was reached (for diagnostics and the report). */
     val resolution: String? = null,
     /** The user has seen and dismissed a FAILED/AMBIGUOUS outcome; only then may it be pruned. */
-    val acknowledged: Boolean = false
+    val acknowledged: Boolean = false,
+    /**
+     * Optimistic concurrency token. The ledger increments it on every successful write.
+     * `0` is the value of a newly prepared record that has not yet transitioned.
+     */
+    val version: Long = 0,
+    /** Semantics frozen when the record was created. Null on records written before this field. */
+    val frozenGuarantee: CommitGuaranteeLevel? = null,
+    val frozenIdempotentReplay: Boolean = false,
+    val frozenAuthoritativeReconciliation: Boolean = false,
+    /**
+     * Historical note that the UI session was left while this transaction was unfinished.
+     * Never a state, and never proof the scheduler mutation did not happen.
+     */
+    val abandonedAtEpochMs: Long? = null
 ) {
     init {
         require(commitId.backendId == card.backendId) { "A commit and its card share one backend" }
@@ -133,6 +147,10 @@ data class ReviewCommitRecord(
             state == ReviewCommitState.FAILED) { "Only a never-dispatched record has zero attempts" }
         require(state != ReviewCommitState.FAILED || failure != null) { "FAILED needs a reason" }
         require(ratedAtEpochMs >= 0 && (answerDurationMs == null || answerDurationMs >= 0))
+        require(version >= 0)
+        require(abandonedAtEpochMs == null || abandonedAtEpochMs >= 0)
+        require(!frozenIdempotentReplay || frozenGuarantee == CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED ||
+            frozenGuarantee == CommitGuaranteeLevel.END_TO_END_EXACTLY_ONCE)
     }
 
     val sessionId: String get() = commitId.studySessionId

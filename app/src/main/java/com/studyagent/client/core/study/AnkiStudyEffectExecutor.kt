@@ -27,7 +27,9 @@ import java.util.concurrent.ConcurrentHashMap
 class AnkiStudyEffectExecutor(
     private val registry: AnkiBackendRegistry,
     private val ledger: ReviewCommitLedger? = null,
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val faults: CommitFaultInjector = NoCommitFaults,
+    private val phases: CommitPhaseSink = CommitPhaseSink { _, _ -> }
 ) {
     /** Known only while this process lives. A lost durable response never authorizes replay. */
     private val unpersistedResponses = ConcurrentHashMap<ReviewCommitId, CommitRatingResult>()
@@ -143,10 +145,15 @@ class AnkiStudyEffectExecutor(
         val ledger = this.ledger ?: return resolved(AnkiCommitOutcome.PersistenceFailure("ledger_unavailable"))
         fun storageFault(category: String) = resolved(AnkiCommitOutcome.PersistenceFailure(category))
 
+        faults.on(CommitFaultPoint.BEFORE_LEDGER_CREATE)
         // 1. CommitPrepared — NOT_STARTED durable, or the existing record for this identity.
-        val record = when (val prepared = ledger.prepare(request)) {
+        // Semantics are frozen here and are not rewritten if the record already exists.
+        val backendForFreeze = registry.find(commitId.backendId)
+        val record = when (val prepared = ledger.prepare(request, backendForFreeze?.commitSemantics?.enforced(backendForFreeze.id))) {
             is ReviewCommitLedger.PrepareResult.Prepared -> prepared.record
             is ReviewCommitLedger.PrepareResult.Existing -> prepared.record
+            is ReviewCommitLedger.PrepareResult.Tombstoned ->
+                return resolved(AnkiCommitOutcome.Committed("ledger_tombstone"))
             // The recorded rating is immutable: a different payload for this id is never sent.
             is ReviewCommitLedger.PrepareResult.Conflict -> return refused("commit_payload_conflict", safe = false)
             ReviewCommitLedger.PrepareResult.Full -> return storageFault("ledger_full")
@@ -198,7 +205,9 @@ class AnkiStudyEffectExecutor(
             is ReviewCommitLedger.ClaimResult.StoreFailed -> return storageFault("commit_persistence_failure")
             is ReviewCommitLedger.ClaimResult.Unavailable -> return storageFault("ledger_unavailable")
         }
+        phases.onPhase("PREPARED", claimed.attemptCount)
         emit(AnkiStudyEvent.RatingCommitStarted(effect.epoch, commitId, claimed.attemptCount))
+        faults.on(CommitFaultPoint.AFTER_PREPARED)
 
         // The backend may perform preflight while PREPARED. Its boundary callback persists
         // CALL_ENTERED immediately before the real scheduler API. A failed write prevents it.
@@ -213,6 +222,11 @@ class AnkiStudyEffectExecutor(
                     val saved = withContext(NonCancellable) { ledger.markMutationEntered(commitId) }
                     mutationEntered = saved != null
                     if (!mutationEntered) boundaryFault = true
+                    if (mutationEntered) {
+                        phases.onPhase("CALL_ENTERED", claimed.attemptCount)
+                        faults.on(CommitFaultPoint.AFTER_CALL_ENTERED)
+                        faults.on(CommitFaultPoint.BEFORE_PROVIDER_CALL)
+                    }
                     mutationEntered
                 }
             }
@@ -222,6 +236,8 @@ class AnkiStudyEffectExecutor(
                 else ledger.markPreparedFailure(commitId)
             }
             throw cancelled
+        } catch (fault: CommitFaultException) {
+            throw fault
         } catch (_: Exception) {
             if (mutationEntered) CommitRatingResult.Ambiguous(AnkiError.Unknown("commit_threw"))
             else CommitRatingResult.RetryableFailure(AnkiError.Unknown("preflight_threw"))
@@ -247,10 +263,16 @@ class AnkiStudyEffectExecutor(
 
         // A backend result in memory alone is not authority to move to the next card.
         unpersistedResponses[commitId] = result
+        faults.on(CommitFaultPoint.AFTER_PROVIDER_MUTATION)
+        faults.on(CommitFaultPoint.BEFORE_RESPONSE_PERSIST)
         withContext(NonCancellable) { ledger.markResponseReceived(commitId, result) }
             ?: return storageFault("commit_persistence_failure")
+        faults.on(CommitFaultPoint.AFTER_RESPONSE_PERSIST)
+        faults.on(CommitFaultPoint.BEFORE_COMMITTED_PERSIST)
         val final = withContext(NonCancellable) { ledger.complete(commitId, result) }
             ?: return storageFault("commit_persistence_failure")
+        faults.on(CommitFaultPoint.AFTER_COMMITTED_PERSIST)
+        phases.onPhase("LOCAL_COMMIT_PERSISTED", final.attemptCount)
         unpersistedResponses.remove(commitId)
         return resolved(final.toOutcome(committedSource = "backend_confirmed"))
     }
@@ -291,7 +313,9 @@ class AnkiStudyEffectExecutor(
             return done(AnkiCommitOutcome.Ambiguous("backend_identity_mismatch"))
         }
         // A backend that only observes counters/time cannot turn them into transaction truth.
-        if (!backend.commitSemantics.supportsAuthoritativeReconciliation) {
+        val authoritative = if (record.frozenGuarantee != null) record.frozenAuthoritativeReconciliation
+            else backend.commitSemantics.supportsAuthoritativeReconciliation
+        if (!authoritative) {
             return done(AnkiCommitOutcome.Ambiguous("authoritative_reconciliation_unavailable"))
         }
         val submittedAt = record.submittedAtEpochMs ?: record.createdAtEpochMs

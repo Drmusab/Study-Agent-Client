@@ -390,6 +390,8 @@ So multiple delayed pings cannot confuse latency measurement.
 }
 ```
 
+`review_commit_id` is optional and omitted when absent so older agents keep this frame. It is a logical rating-transaction id, not an auth token, not derived from the rating, and not a backend receipt. A server that does not advertise `review_commit_idempotency` must ignore it. Client hello capabilities are not evidence that the server implements that capability.
+
 Other: repeat_question, request_hint, request_explanation, request_answer, skip_card, pause_session, resume_session, end_session, ping (with sent_at for correlation).
 
 ## 13. Server Messages

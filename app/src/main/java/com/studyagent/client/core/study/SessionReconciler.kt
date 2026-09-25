@@ -1,5 +1,6 @@
 package com.studyagent.client.core.study
 
+import com.studyagent.client.core.anki.PcRatingReplayPolicy
 import com.studyagent.client.core.models.StudyCard
 import com.studyagent.client.core.voice.stt.RecognitionPurpose
 
@@ -25,6 +26,10 @@ object SessionReconciler {
         // different next card or finished session cannot attribute a lost rate_card delivery.
         // Keep the pending original message for a later correlated ACK, but never replay it.
         if (local.anki == null && local.cardTurn?.let { local.ledger.hasRatingInFlight(it.turnId) } == true) {
+            // No frozen idempotent capability on this delivery. Do not resend rate_card.
+            check(!PcRatingReplayPolicy.automaticReplayAllowed(null)) {
+                "in-flight PC rating must not be replayed without frozen idempotent semantics"
+            }
             return Reconciliation(local.copy(
                 phase = SessionPhase.Error(SessionProblem.RATING_TIMEOUT),
                 connection = SessionConnectionStatus.CONNECTED,
