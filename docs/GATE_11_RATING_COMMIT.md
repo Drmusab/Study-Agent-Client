@@ -6,6 +6,236 @@
 
 ---
 
+## PART XI — Continuation report (2026-09-25, branch `arena/01a0d7b4-study-agent-client`, from `be726ca`)
+
+> This part supersedes the verdict and the build/test numbers of the PART X revision below. PART X
+> is kept for history. Where the two disagree, this part is based on commands run on this branch.
+
+### XI.0 Verdict
+
+**GATE 11: BLOCKED. REAL MUTATION VERIFICATION NOT RUN.**
+
+- **Real mutation:** no disposable AnkiDroid collection or device was available. `adb`, an emulator
+  and AnkiDroid are all absent. No real `ContentResolver.update` against AnkiDroid has run.
+- **Build validation:** the mandated Gradle commands could not run. Every Maven mirror is blocked
+  from this sandbox. The commands are `./gradlew --stop / clean / testDebugUnitTest / lint /
+  assembleDebug / assembleRelease / connectedDebugAndroidTest`.
+- **What ran instead:** a Gradle-free JVM harness (`tools/jvm-harness/`, deviations in its README)
+  and the Python server tests.
+- **Residual failures:** 79 JVM failures remain outside the commit surface (§XI.8).
+- **Not claimed:** "exactly-once guaranteed". The gate-lock commit is not created and GATE 12 is not
+  started.
+
+### XI.1 Implementation order in this continuation (commits, oldest first)
+
+| # | Commit | Files | Why |
+|---|---|---|---|
+| 1 | `fix: restore compilation of the app module` | `core/anki/ReviewCommitLedger.kt`, `core/security/SecureTokenStorage.kt`, `data/preferences/PreferencesDataStore.kt` | At `be726ca` the app did not compile. Causes: an unbalanced `)` in `recoveryBlocker`; `EncryptedSharedPreferences.create` called without `Context` (verified against androidx sources); an import of the member function `Preferences.toMutablePreferences`. No Gradle build could have succeeded, so the PART X "0 errors" claim does not hold for this commit. |
+| 2 | `test: run AnkiDroidBackend state in backgroundScope` | `AnkiDroidBackendTest.kt` | `stateIn(scope, Eagerly)` in the `runTest` scope hung every test (16) until the runTest timeout. |
+| 3 | `fix(ledger): never treat coroutine cancellation as a store failure` | `core/common/StoreFailureBoundary.kt` (new), `ReviewCommitLedger.kt`, `ReviewCommitLedgerTest.kt` | `catch (Exception)` around `store.read()` swallowed `CancellationException`. A cancelled caller during the first load disabled the durable ledger for the process lifetime. The change also removes exception types from `core/anki` (`AnkiDomainIsolationTest`). |
+| 4 | `test(gate11): run reconciliation flows under a reconcilable backend identity` | `AnkiCommitHarness.kt`, `AnkiRatingCommitFlowTest.kt` | H2/H3 expected AnkiDroid-identity reconciliation, which enforcement correctly forbids. They now run under a PcAgent identity. New H2b pins the AnkiDroid behaviour: stays AMBIGUOUS, `reconcileCommit` is never called. |
+| 5 | `feat(gate11): bound read-only reconciliation with a timeout` | `core/study/AnkiStudyEffectExecutor.kt`, `FakeAnkiBackend.kt`, test H5 | `reconcile()` had no timeout. It now uses `withTimeoutOrNull(10 s)`, and expiry maps to `StillAmbiguous("reconcile_timeout")`. The record stays AMBIGUOUS, there is no advance and no resend. |
+| 6 | `test(gate11): record the commit durability order end to end` | `ReviewCommitDurabilityOrderTest.kt` (new), `InMemoryReviewCommitStore.kt` | One trace across ledger writes, backend calls and physical effects (§XI.3). |
+| 7 | `test(gate11): seeded commit chaos over a backend with no memory` | `ReviewCommitChaosTest.kt` (new), `FakeAnkiBackend.kt` | 150 seeds × 2 identities, with crash at every fault point, redelivery, duplicates, reconcile and retry. Planted-bug check below. |
+| 8 | `feat(server): durable review_commit_id effect dedup for the PC agent` | `server/review_commit_store.py` (new), `server/mock_pc_agent.py`, `server/test_review_commit_store.py` (new) | PC-side contract (§XI.5). |
+| 9 | `tools: add a Gradle-free JVM unit-test harness` | `tools/jvm-harness/**` | Makes the evidence reproducible. No jars are committed. |
+
+**Reused unchanged, per the "no parallel concepts" rule:**
+
+- `ReviewCommit*`, `CommitSemantics*` and `CommitFaultInjection` in `core/anki`
+- `DataStoreReviewCommitStore`
+- `AnkiDroidRatingCommitter` / `AnkiDroidBackend` / `AnkiDroidProviderClient`
+- `StudyReducer` / `AnkiStudyEffectExecutor`
+
+No Room, no new manager classes and no project reorganisation.
+
+### XI.2 Exact mutation boundary
+
+| Backend | Call chain (file : symbol) | The irreversible call |
+|---|---|---|
+| AnkiDroid | `core/study/AnkiStudyEffectExecutor.kt` `commit()` → `backend.commitRating(req) { markMutationEntered }` (l.222) → `data/anki/ankidroid/AnkiDroidBackend.kt` `commitLocked` (l.641) → `AnkiDroidRatingCommitter.commit`: `if (!mutationEntry()) return …` (l.110), then `gateway.submitAnswer(...)` (l.112) → `AnkiDroidProviderClient.safeUpdate` | `contentResolver.update(content://<authority>/schedule, values, null, null)` (`AnkiDroidProviderClient.kt` l.340). Exactly one call, no internal retry. Preflight (queue-front check, deck selection) stays on the PREPARED side. |
+| PC agent (client) | `StudyReducer` (l.944) puts `review_commit_id = PcRatingReplayPolicy.logicalCommitId(session, turn)` on `rate_card` | The WebSocket send. The client never resends: `automaticReplayAllowed(null)` is enforced in `SessionReconciler` / `StudySessionMachine`. |
+| PC agent (server, mock) | `mock_pc_agent.py` `rate_card` → `ReviewCommitProcessor.commit` | `apply_fn(request)` after the durable INTENT write. A real agent would call Anki's `answerCard` here. |
+
+### XI.3 Durability order and its evidence
+
+Asserted verbatim by `ReviewCommitDurabilityOrderTest`:
+
+```
+durable:NOT_STARTED/null                      intent row, before anything else
+durable:SUBMITTING/PREPARED                   CAS claim, before the backend call
+backend:commitRating(enter)
+boundary:mutationEntry-requested
+durable:SUBMITTING/MUTATION_CALL_ENTERED      durable BEFORE the effect
+boundary:mutationEntry=true physical=0        effect not yet applied
+backend:commitRating(return) physical=1       exactly one physical effect
+durable:SUBMITTING/MUTATION_RESPONSE_RECEIVED
+durable:COMMITTED/LOCAL_RESULT_PERSISTED
+backend:nextCard                              only after durable COMMITTED
+```
+
+The reducer's `CommitRating` transition contains no `Next` effect. If the `MUTATION_CALL_ENTERED`
+write fails, the provider is never called (second test).
+
+### XI.4 Crash-window table (client, AnkiDroid identity)
+
+| Crash point (`CommitFaultPoint`) | Durable state after restart | Recovery | Physical effects | Evidence |
+|---|---|---|---|---|
+| BEFORE_LEDGER_CREATE | no record | nothing to recover; the user rates again (nothing was sent) | 0 | `ReviewCommitCrashWindowTest` |
+| AFTER_LEDGER_CREATE / AFTER_PREPARED | NOT_STARTED or SUBMITTING/PREPARED | FAILED, safe-to-retry (`RECOVERED_PREPARED`); retry only by explicit user action, same id | 0 | `ReviewCommitLedgerTest`, chaos |
+| AFTER_CALL_ENTERED / BEFORE_PROVIDER_CALL | SUBMITTING/CALL_ENTERED | **AMBIGUOUS**; never resubmitted | 0 (unknowable to the app) | crash test 1 |
+| AFTER_PROVIDER_MUTATION / BEFORE_RESPONSE_PERSIST | SUBMITTING/CALL_ENTERED | **AMBIGUOUS**; never resubmitted | 1 | crash test 2 |
+| AFTER_RESPONSE_PERSIST / BEFORE_COMMITTED_PERSIST | SUBMITTING/RESPONSE_RECEIVED | terminal from the durable response | 1 | `ReviewCommitLedgerTest` |
+| AFTER_COMMITTED_PERSIST | COMMITTED | redelivery answers `ledger_replay` | 1 | chaos |
+
+**Planted-bug check.** I temporarily treated an orphaned CALL_ENTERED row as retry-safe, the most
+dangerous regression, and then reverted it.
+
+- The crash-window tests failed (2/4).
+- `ReviewCommitChaosTest` failed with `I1 … applied 3x`.
+
+The chaos test detects this only because its fake backend has *no memory*. With the old default
+fake, the fake's own dedup hid the bug. That is why the chaos test uses the no-memory model.
+
+### XI.5 Per-backend guarantee matrix
+
+| Backend | Frozen guarantee | Idempotent replay | Authoritative reconciliation | Automatic resend | Evidence |
+|---|---|---|---|---|---|
+| AnkiDroid (API v2.24.1) | **AT_MOST_ONCE_FAIL_CLOSED**; overclaims are clamped at freeze time | no | no; AMBIGUOUS stays AMBIGUOUS | never | H2b, `AnkiDroidRatingCommitTest` (18), `AnkiDroidBackendTest` (16) |
+| PC agent, client side | whatever the welcome advertises, via `commitSemanticsFromAgent`; never END_TO_END_EXACTLY_ONCE | only if `review_commit_idempotency` is advertised | only if `commit_reconciliation` is advertised | **never** (`automaticReplayAllowed(null)`) | `ReviewCommitCrashWindowTest` "pc capabilities do not upgrade…" |
+| Mock PC agent + `--commit-store` | server-side idempotent replay while the table file survives | yes: same id+payload → stored result; different payload → `COMMIT_CONFLICT`; intent without result → `COMMIT_OUTCOME_UNKNOWN` | not advertised | n/a | `server/test_review_commit_store.py` (21) |
+| Mock PC agent without store | memory only; capability **not** advertised | per process only | no | n/a | same |
+| Fake (tests) | configurable | configurable | configurable | never | contract tests |
+
+**Exactly-once claim category:**
+
+- AnkiDroid is **AT_MOST_ONCE_FAIL_CLOSED**. Duplicate mutation is prevented by the client ledger;
+  an unknown outcome is surfaced as UNCONFIRMED and never guessed.
+- End-to-end exactly-once is **not claimed** for any backend.
+
+### XI.6 Evidence actually executed (this branch)
+
+**JVM harness** (Kotlin 2.3 K2, coroutines 1.10.2 and stubs; see `tools/jvm-harness/README.md`):
+
+- Compile: main 194 files and tests 130 files, both with **0 errors**.
+- **Commit surface: 165/165 pass in 15 classes:**
+
+  | Class | Tests |
+  |---|---|
+  | ReviewCommitLedgerTest | 23 |
+  | ReviewCommitRecoveryPolicyTest | 4 |
+  | ReviewCommitBackendContractTest | 4 |
+  | ReviewCommitCrashWindowTest | 4 |
+  | ReviewCommitDurabilityOrderTest | 2 |
+  | ReviewCommitChaosTest | 1 (300 seeded runs) |
+  | AnkiRatingCommitFlowTest | 30 |
+  | AnkiRatingCommitMachineTest | 3 |
+  | AnkiRatingCommitArchitectureTest | 7 |
+  | AnkiStudyInteractionTest | 15 |
+  | AnkiDroidRatingCommitTest | 18 |
+  | AnkiDroidBackendTest | 16 |
+  | AnkiDomainIsolationTest | 4 |
+  | FakeAnkiBackendTest | 25 |
+  | FakeAnkiBackendContractTest | 9 |
+
+- **Full suite: 1267 tests in 111 classes; 1188 pass, 79 fail, 0 timeouts.** No failure is in the
+  commit surface. The failing set was identical on two consecutive runs.
+
+**Python** (`server/`, websockets 17.1, pytest 9.1):
+
+- `test_review_commit_store.py`: **21/21**. This includes a WebSocket end-to-end test against the
+  real mock process: two deliveries with new `message_id`s → a PC agent restart → a replay returns
+  `duplicate: true` and a different payload returns `COMMIT_CONFLICT`. The table shows exactly one
+  apply.
+- Whole `server/`: 64 pass, 22 fail, 7 skip. All 22 failures are in `test_tts_contract.py` and are
+  **pre-existing**: they are identical on untouched `be726ca` (43 pass / 22 fail), with
+  `TypeError: BaseEvent…` under websockets 17.
+
+**Not run:**
+
+- any Gradle task, lint, assemble, `connectedDebugAndroidTest`, or CI (`gh` returned
+  401 Bad credentials in this session);
+- any real AnkiDroid mutation.
+
+### XI.7 Unverified limits and residual risk
+
+1. **Real AnkiDroid behaviour.** Unverified: `update(/schedule)` semantics under contention, the
+   provider returning after applying, the process dying inside `update`, and the rating→ease mapping
+   (AGAIN/HARD/GOOD/EASY = 1/2/3/4) against a real install. The mapping was pinned from source in an
+   earlier session; the re-verification is still owed.
+2. **Dual-write limit.** The client ledger and the AnkiDroid collection are separate stores. Between
+   durable CALL_ENTERED and the provider's reply, the true outcome is unknowable. The design turns
+   this into AMBIGUOUS/UNCONFIRMED; the user can check again or end the session, and the app never
+   re-rates. Such a rating can be lost (at most once), but never doubled.
+3. **PC agent.** Only the mock implements the durable table. A production PC agent must implement
+   §XI.5 before it may advertise `review_commit_idempotency`. If its table file is lost, a replay
+   applies again; this is tested and documented. The client does not auto-replay today, so this only
+   matters if replay is enabled later.
+4. **Harness deviations.** A defect that only appears under Kotlin 1.9 K1, coroutines 1.8.1, real
+   DataStore or real JUnit would not be seen here.
+5. **Residual failures (79).** These are not investigated to root cause because they are outside
+   GATE 11:
+   - **PC voice-session stack (~35):** HappyPath, NetworkChaos, Simulation, Endurance,
+     StudyAgentChaos, Reconstruction, ReconnectAtEveryPhase, StudyReducerTest (3), PhoneMode. The
+     representative case stalls before the answer window (no `STT_READY` after `TTS_DONE`). The
+     rating-related ones fail upstream of any rating (e.g. `NetworkChaosTest` l.105), not on a double
+     rate.
+   - **PC management repositories (~17):** StudyControl, Dashboard, DiagnosticsExport,
+     DashboardUiMapper.
+   - **AnkiDroid read-side and health (~12):** CardGateway, CardMapper, HealthRepository,
+     ReviewSession, CardFlow.
+   - **Protocol fuzz and validation (7), render controller (4), TTS (3).**
+   - **Confirmed stale test or code-vs-test contradictions, independent of the harness:**
+     - `ProtocolJsonTest` expects `protocol_version "1"`, but every message defaults to `"2"`.
+     - `AnkiMediaResolverPolicyTest`: `URLDecoder` throws on `"100% ready.webp"`, so the name is
+       rejected.
+     - `AnkiCardHydrationTest` uses `originalDeckRef == scheduledDeck`, which the code deliberately
+       treats as the filtered-deck explanation.
+
+   Whether the remaining ones come from harness versions or are real regressions is **unknown**.
+   Master did not compile, so there was no green baseline to compare against.
+
+### XI.8 Final questions
+
+- **Final safety question.** Under the implemented design, can one Study-Agent review turn cause
+  more than one scheduler mutation, or advance to the next card without a durable COMMITTED?
+  - **No,** for every path exercised: unit, contract, durability-order, crash-window and 300 seeded
+    chaos runs against a backend with no memory. The planted-bug check shows these tests catch the
+    relevant regression.
+  - **Not verified** against real AnkiDroid. So the gate's required "YES, verified" answer cannot be
+    given, and the verdict cannot be PASS.
+- **Stronger end-to-end question.** Is every rating applied to Anki exactly once?
+  - **No, and it cannot be with AnkiDroid API v2.24.1.** The provider offers no commit id, receipt
+    or idempotent write. A lost reply after the write is indistinguishable from a write that never
+    happened.
+  - The strongest honest guarantee is **at most once, fail closed**. Unknown outcomes are shown to
+    the user, not guessed.
+  - With a PC agent that implements §XI.5 durably, replay becomes safe, but a crash between intent
+    and apply is still reported as unknown rather than applied.
+
+### XI.9 Lock checklist
+
+| Item | Status |
+|---|---|
+| Domain and commit core free of Android and UI imports | ✅ `AnkiDomainIsolationTest`, `AnkiRatingCommitArchitectureTest` |
+| Mutation boundary single, marked durably before the call, no internal retry | ✅ §XI.2/§XI.3 |
+| `nextCard` only after durable COMMITTED; no `Next` in the CommitRating result | ✅ durability-order test |
+| AMBIGUOUS never replayed; recovery never mints a new id nor asks to re-rate | ✅ crash tests, chaos I1/I3, H2b |
+| Payload mismatch → CONFLICT (client ledger and PC server) | ✅ ledger tests, `test_same_id_different_payload_is_conflict_without_effect` |
+| Reconciliation read-only and bounded, timeout → unresolved | ✅ H5 |
+| No secrets or card content in ledger or commit table | ✅ ledger codec tests, `test_table_stores_no_secrets_or_card_content` |
+| Seeded chaos with evidence it detects a real regression | ✅ §XI.4 |
+| PC server `review_commit_id` dedup + tests | ✅ mock plus reference module; ❌ production PC agent not in this repo |
+| `./gradlew clean testDebugUnitTest lint assembleDebug assembleRelease` | ❌ not run (network) |
+| `connectedDebugAndroidTest` | ❌ not run (no device) |
+| Real disposable-collection AnkiDroid mutation test | ❌ **REAL MUTATION VERIFICATION NOT RUN** |
+| Full JVM suite green | ❌ 79 failures outside the commit surface |
+| Gate-lock commit | ❌ not created |
+
+---
+
+# PART X (2026-09-24), kept for history; superseded by PART XI above
+
 ## 0. Verdict (read this first)
 
 **OVERALL GATE 11 RESULT: BLOCKED** — not FAIL (the exactly-once machinery exists, is
