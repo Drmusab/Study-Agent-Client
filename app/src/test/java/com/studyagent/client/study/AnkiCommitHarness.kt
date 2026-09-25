@@ -15,19 +15,32 @@ import org.junit.Assert.assertFalse
  * expressed deterministically. [ledger] can be replaced by [restartLedger] to model a new process.
  */
 class AnkiCommitHarness(
-    cards: List<AnkiRenderedCard> = listOf(card("A"), card("B")),
+    /**
+     * Backend identity the fake runs under. The default impersonates AnkiDroid, whose semantics are
+     * clamped to AT_MOST_ONCE_FAIL_CLOSED with *no* authoritative reconciliation no matter what the
+     * fake claims. Tests that need a backend with verified reconciliation must choose another id.
+     */
+    val backendId: AnkiBackendId = BACKEND,
+    private val mode: AnkiBackendMode = AnkiBackendMode.ANKIDROID_LOCAL,
+    cards: List<AnkiRenderedCard> = listOf(card("A", backendId), card("B", backendId)),
     val store: InMemoryReviewCommitStore = InMemoryReviewCommitStore(),
     commitSteps: List<FakeAnkiBackend.CommitStep> = emptyList(),
     nextErrors: List<AnkiError> = emptyList(),
-    private val faults: CommitFaultInjector = NoCommitFaults
+    private val faults: CommitFaultInjector = NoCommitFaults,
+    /** Optional decorator around the fake (e.g. an ordered call recorder). Never changes semantics. */
+    wrap: (FakeAnkiBackend) -> AnkiBackend = { it },
+    /** LOCAL_DEDUP_ONLY makes the fake re-apply any repeated id that already had an effect. */
+    guarantee: CommitGuaranteeLevel = CommitGuaranteeLevel.AT_MOST_ONCE_FAIL_CLOSED
 ) {
     var now: Long = 10_000L
     val clock: () -> Long = { now }
-    val fake = FakeAnkiBackend(id = BACKEND, decks = listOf(AnkiDeck(DECK, "Deck")), cards = cards,
-        commitSteps = commitSteps, nextErrors = nextErrors, instanceId = "gate11")
+    val deck: AnkiDeckRef = deckFor(backendId)
+    val fake = FakeAnkiBackend(id = backendId, decks = listOf(AnkiDeck(deck, "Deck")), cards = cards,
+        commitSteps = commitSteps, nextErrors = nextErrors, instanceId = "gate11", guaranteeLevel = guarantee)
+    val backend: AnkiBackend = wrap(fake)
     var ledger = ReviewCommitLedger(store, clock)
         private set
-    var executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(fake)), ledger, clock, faults)
+    var executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(backend)), ledger, clock, faults)
         private set
 
     var state = SessionMachineState.initial()
@@ -36,7 +49,7 @@ class AnkiCommitHarness(
 
     fun restartLedger() {
         ledger = store.restart(clock)
-        executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(fake)), ledger, clock, faults)
+        executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(backend)), ledger, clock, faults)
     }
 
     fun send(event: StudyEvent): Transition = StudyReducer.reduce(state, event, now).also { t ->
@@ -64,7 +77,7 @@ class AnkiCommitHarness(
     }
 
     suspend fun startAndLoad(speak: Boolean = false) {
-        send(AnkiStudyEvent.Start(AnkiStudyRequest("study-1", AnkiBackendMode.ANKIDROID_LOCAL, DECK, speakQuestion = speak)))
+        send(AnkiStudyEvent.Start(AnkiStudyRequest("study-1", mode, deck, speakQuestion = speak)))
         drain()
     }
 
@@ -91,10 +104,20 @@ class AnkiCommitHarness(
         val BACKEND = AnkiBackendId.AnkiDroidLocal
         val DECK = AnkiDeckRef(BACKEND, "1", "collection")
 
-        fun card(id: String) = AnkiRenderedCard(
-            AnkiCardRef(BACKEND, cardId = id, collectionKey = "collection"),
+        /** A non-AnkiDroid identity whose fake may legitimately advertise authoritative reconciliation. */
+        val RECONCILABLE_BACKEND = AnkiBackendId.PcAgent("gate11-reconcilable")
+
+        fun deckFor(backend: AnkiBackendId) = AnkiDeckRef(backend, "1", "collection")
+
+        fun card(id: String, backend: AnkiBackendId = BACKEND) = AnkiRenderedCard(
+            AnkiCardRef(backend, cardId = id, collectionKey = "collection"),
             "<b>Q $id</b>", "<b>A $id</b>", "Question $id", "Answer $id", "Answer $id",
-            deckRef = DECK
+            deckRef = deckFor(backend)
+        )
+
+        /** Harness over a backend whose frozen semantics include authoritative reconciliation. */
+        fun reconcilable(commitSteps: List<FakeAnkiBackend.CommitStep>) = AnkiCommitHarness(
+            backendId = RECONCILABLE_BACKEND, mode = AnkiBackendMode.PC_AGENT, commitSteps = commitSteps
         )
     }
 }
