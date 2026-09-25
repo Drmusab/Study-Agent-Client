@@ -106,6 +106,14 @@ class AnkiDroidRatingCommitTest {
 
     // ---------------------------------------------------------------- committed
 
+    @Test fun `AnkiDroid advertises fail-closed not backend idempotency or a receipt`() = runTest {
+        val semantics = rig().backend.commitSemantics
+        assertEquals(CommitGuaranteeLevel.AT_MOST_ONCE_FAIL_CLOSED, semantics.guaranteeLevel)
+        assertFalse(semantics.supportsIdempotentReplay)
+        assertFalse(semantics.supportsAuthoritativeReconciliation)
+        assertEquals(CommitReceiptKind.NONE, semantics.commitReceiptKind)
+    }
+
     @Test fun `an applied answer is Committed on evidence and releases the turn`() = runTest {
         val r = rig()
         val turn = r.openTurn()
@@ -136,19 +144,67 @@ class AnkiDroidRatingCommitTest {
         assertTrue("the queue front is read without deckID", r.provider.selectionLog.contains("limit=1"))
     }
 
+    @Test fun `mutation boundary is persisted after preflight but before the provider answer`() = runTest {
+        val r = rig()
+        val turn = r.openTurn()
+        val base = CommitRatingRequest(turn.commitId, turn.cardRef, Rating.GOOD, r.clock.now, 3_000)
+        val evidence = (r.backend.prepareCommit(base) as CommitPreparation.Ready).evidence
+        var markerCalls = 0
+        r.onAnswer = {
+            assertEquals("marker precedes real scheduler update", 1, markerCalls)
+            r.model.applyAnswer()
+            ProviderUpdateResult.Returned(1)
+        }
+        val result = r.backend.commitRating(base.copy(evidence = evidence)) {
+            assertEquals("front checked before marker", true, r.provider.selectionLog.contains("limit=1"))
+            assertEquals("session deck selected before marker", sessionDeck.deckId.toLong(), r.model.selectedDeck)
+            assertEquals(0, r.answerCalls)
+            markerCalls++
+            true
+        }
+        assertTrue(result is CommitRatingResult.Committed)
+        assertEquals(1, markerCalls)
+        assertEquals(1, r.answerCalls)
+    }
+
+    @Test fun `preflight refusal never enters the scheduler mutation boundary`() = runTest {
+        val r = rig()
+        val turn = r.openTurn()
+        r.model.frontNote = 999L
+        r.refreshProviderRows()
+        var markerCalls = 0
+        val result = r.backend.commitRating(CommitRatingRequest(turn.commitId, turn.cardRef, Rating.GOOD, r.clock.now)) {
+            markerCalls++
+            true
+        }
+        assertTrue(result is CommitRatingResult.Rejected)
+        assertEquals(0, markerCalls)
+        assertEquals(0, r.answerCalls)
+    }
+
+    @Test fun `a failed boundary callback restores deck but never sends an answer`() = runTest {
+        val r = rig()
+        val turn = r.openTurn()
+        val result = r.backend.commitRating(CommitRatingRequest(turn.commitId, turn.cardRef, Rating.GOOD, r.clock.now)) {
+            false // durable CALL_ENTERED could not be persisted
+        }
+        assertEquals(CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable()), result)
+        assertEquals(0, r.answerCalls)
+        assertEquals(42L, r.model.selectedDeck)
+    }
+
     // ---------------------------------------------------------------- not applied
 
-    @Test fun `a swallowed scheduler exception answering 1 is proven not applied and retryable`() = runTest {
+    @Test fun `swallowed scheduler exception with row 1 and no change is ambiguous not retryable`() = runTest {
         val r = rig()
         r.onAnswer = { ProviderUpdateResult.Returned(1) } // v2.24.1: caught RuntimeException, updated++
         val turn = r.openTurn()
         val (request, result) = r.commit(turn)
-        assertEquals(CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("answer_not_applied")), result)
-        // The same request may be sent again, and then applies once.
+        assertTrue(result is CommitRatingResult.Ambiguous)
         r.onAnswer = { r.model.applyAnswer(); ProviderUpdateResult.Returned(1) }
-        assertEquals(CommitRatingResult.Committed(), r.backend.commitRating(request))
-        assertEquals(2, r.answerCalls)
-        assertEquals(6, r.model.reps)
+        assertEquals(result, r.backend.commitRating(request)) // no second answer, even on new input
+        assertEquals(1, r.answerCalls)
+        assertEquals(5, r.model.reps)
     }
 
     @Test fun `a card that is no longer at the queue front is refused before any answer is sent`() = runTest {
@@ -174,25 +230,34 @@ class AnkiDroidRatingCommitTest {
         assertEquals(0, r.answerCalls)
     }
 
-    @Test fun `pre mutation provider exceptions are failures, never ambiguous`() = runTest {
-        val r = rig()
-        r.onAnswer = { ProviderUpdateResult.Threw("SecurityException",
+    @Test fun `permission lost in preparation is safe but after answer entry is not inferred from exception type`() = runTest {
+        val pre = rig()
+        val preTurn = pre.openTurn()
+        pre.provider.scriptFailure(cardPath, AnkiDroidFailure(AnkiDroidFailureCategory.PERMISSION_DENIED,
+            AnkiDroidFailureEvidence.SECURITY_EXCEPTION_TYPE))
+        val refused = pre.backend.prepareCommit(CommitRatingRequest(preTurn.commitId, preTurn.cardRef, Rating.GOOD, 1))
+        assertTrue(refused is CommitPreparation.Refused && refused.retryable)
+        assertEquals(0, pre.answerCalls)
+
+        val post = rig()
+        post.onAnswer = { ProviderUpdateResult.Threw("SecurityException",
             AnkiDroidFailure(AnkiDroidFailureCategory.PERMISSION_DENIED, AnkiDroidFailureEvidence.SECURITY_EXCEPTION_TYPE)) }
-        val (_, result) = r.commit(r.openTurn())
-        assertEquals(CommitRatingResult.RetryableFailure(AnkiError.PermissionRequired()), result)
+        assertTrue(post.commit(post.openTurn()).second is CommitRatingResult.Ambiguous)
+        assertEquals(1, post.answerCalls)
     }
 
     // ---------------------------------------------------------------- ambiguous vs evidence
 
-    @Test fun `provider death after applying is Committed from evidence and before applying is retryable`() = runTest {
+    @Test fun `provider death is ambiguous whether the card changed or not`() = runTest {
         val applied = rig()
         applied.onAnswer = { applied.model.applyAnswer(); ProviderUpdateResult.Returned(-1) }
-        assertEquals(CommitRatingResult.Committed(), applied.commit(applied.openTurn()).second)
+        assertTrue(applied.commit(applied.openTurn()).second is CommitRatingResult.Ambiguous)
+        assertEquals(6, applied.model.reps)
 
         val notApplied = rig()
         notApplied.onAnswer = { ProviderUpdateResult.Returned(-1) }
-        assertEquals(CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("provider_died_before_applying")),
-            notApplied.commit(notApplied.openTurn()).second)
+        assertTrue(notApplied.commit(notApplied.openTurn()).second is CommitRatingResult.Ambiguous)
+        assertEquals(5, notApplied.model.reps)
     }
 
     @Test fun `a hung provider call is AMBIGUOUS and blocks both a retry and reconciliation while in flight`() = runTest {
@@ -260,7 +325,7 @@ class AnkiDroidRatingCommitTest {
 
     // ---------------------------------------------------------------- reconciliation after restart
 
-    @Test fun `reconciliation after process death uses the durable baseline`() = runTest {
+    @Test fun `process-death reconciliation never infers a commit from card state alone`() = runTest {
         val r = rig()
         val turn = r.openTurn()
         val base = CommitRatingRequest(turn.commitId, turn.cardRef, Rating.GOOD, r.clock.now, 1)
@@ -274,13 +339,13 @@ class AnkiDroidRatingCommitTest {
         fresh.backend.refreshAvailability()
         val applied = fresh.backend.reconcileCommit(ReconcileCommitRequest(
             base.commitId, base.card, base.rating, evidence, submittedAt, r.clock.now))
-        assertTrue(applied is ReconcileCommitResult.Applied)
+        assertEquals(ReconcileCommitResult.StillAmbiguous("no_transaction_correlated_receipt"), applied)
 
         val untouched = rig()
         untouched.backend.refreshAvailability()
         val notApplied = untouched.backend.reconcileCommit(ReconcileCommitRequest(
             base.commitId, base.card, base.rating, evidence, submittedAt, r.clock.now))
-        assertEquals(ReconcileCommitResult.NotApplied("no_state_change", safeToRetry = true), notApplied)
+        assertEquals(ReconcileCommitResult.StillAmbiguous("no_transaction_correlated_receipt"), notApplied)
 
         val noBaseline = untouched.backend.reconcileCommit(ReconcileCommitRequest(
             base.commitId, base.card, base.rating, null, submittedAt, r.clock.now))

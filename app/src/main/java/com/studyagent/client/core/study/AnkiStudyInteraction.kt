@@ -21,7 +21,10 @@ data class AnkiStudyInteraction(
     /** When the current turn's question was presented; the start of the measured answer time. */
     val turnPresentedAtMs: Long? = null,
     /** AMBIGUOUS commits from earlier sessions, surfaced (never dropped) when a session begins. */
-    val priorUnresolvedCommits: Int = 0
+    val priorUnresolvedCommits: Int = 0,
+    /** A durable unfinished transaction blocked startup before any scheduler query. */
+    val restoredCommit: Boolean = false,
+    val blockedByPriorCommit: Boolean = false
 ) {
     /** GATE 10 name kept for callers: the accepted rating, once a commit exists. */
     val selectedRating: Rating? get() = commit?.rating
@@ -85,6 +88,11 @@ sealed interface AnkiCommitOutcome {
     data class Ambiguous(val category: String) : AnkiCommitOutcome {
         override val state: ReviewCommitState get() = ReviewCommitState.AMBIGUOUS
     }
+
+    /** The backend result cannot yet be durably recorded; NOT a backend failure or retry grant. */
+    data class PersistenceFailure(val category: String) : AnkiCommitOutcome {
+        override val state: ReviewCommitState get() = ReviewCommitState.SUBMITTING
+    }
 }
 
 /**
@@ -98,9 +106,11 @@ sealed interface AnkiStudyEvent : StudyEvent {
     data class Begun(
         val epoch: Long,
         val result: AnkiResult<AnkiReviewSession>,
-        /** Unresolved AMBIGUOUS commits left by earlier sessions (surfaced, never dropped). */
+        /** Unresolved AMBIGUOUS commits in other collections (informational only). */
         val priorUnresolvedCommits: Int = 0
     ) : AnkiStudyEvent
+    /** Startup scan found an affected session/collection: no beginReview/nextCard has occurred. */
+    data class RecoveryBlocked(val epoch: Long, val record: ReviewCommitRecord) : AnkiStudyEvent
     data class Scheduled(val epoch: Long, val result: NextCardResult) : AnkiStudyEvent
     data class Hydrated(
         val epoch: Long,
@@ -109,7 +119,7 @@ sealed interface AnkiStudyEvent : StudyEvent {
     ) : AnkiStudyEvent
     data class SelectRating(val epoch: Long, val turnId: ReviewTurnId, val rating: Rating) : AnkiStudyEvent
 
-    /** The executor made SUBMITTING durable and is starting the backend call for [attempt]. */
+    /** SUBMITTING/PREPARED is durable; backend preflight may still precede call entry. */
     data class RatingCommitStarted(val epoch: Long, val commitId: ReviewCommitId, val attempt: Int) : AnkiStudyEvent {
         val sessionId: String get() = commitId.studySessionId
         val turnId: ReviewTurnId get() = commitId.turnId

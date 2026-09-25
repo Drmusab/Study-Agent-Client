@@ -147,12 +147,16 @@ object StudyReducer {
         }
         val local = state.anki ?: return reject("no-anki-session")
         if (state.isFinished) return reject("terminal-finished")
-        fun failed(error: AnkiError): Transition = moved(state.copy(
-            phase = SessionPhase.Error(SessionProblem.ANKI_UNAVAILABLE),
-            anki = local.copy(failure = error),
-            error = SessionProblemHolder(SessionProblem.ANKI_UNAVAILABLE, error.message, false, now),
-            activeSpeechEffectId = null, activeRecognitionEffectId = null
-        ), cancelVoice + AnkiStudyEffect.CancelReads)
+        fun failed(error: AnkiError): Transition {
+            val problem = if (error is AnkiError.CommitLedgerUnavailable)
+                SessionProblem.ANKI_COMMIT_INTEGRITY else SessionProblem.ANKI_UNAVAILABLE
+            return moved(state.copy(
+                phase = SessionPhase.Error(problem),
+                anki = local.copy(failure = error),
+                error = SessionProblemHolder(problem, error.message, false, now),
+                activeSpeechEffectId = null, activeRecognitionEffectId = null
+            ), cancelVoice + AnkiStudyEffect.CancelReads)
+        }
         fun reveal(transcript: String? = local.transcript): Transition {
             if (local.turn?.renderedCard == null || state.phase !in setOf(
                     SessionPhase.SpeakingQuestion, SessionPhase.WaitingForAnswer,
@@ -193,6 +197,40 @@ object StudyReducer {
                         ), listOf(AnkiStudyEffect.Next(state.epoch, result.value)))
                     }
                 }
+            }
+            is AnkiStudyEvent.RecoveryBlocked -> {
+                val record = event.record
+                if (event.epoch != state.epoch || state.phase != SessionPhase.Starting ||
+                    record.backendId != local.request.deck.backendId ||
+                    record.state == ReviewCommitState.COMMITTED) return reject("stale-anki-recovery")
+                val unresolved = record.state == ReviewCommitState.AMBIGUOUS
+                val pendingWrite = record.state == ReviewCommitState.SUBMITTING
+                val phase = when {
+                    pendingWrite -> SessionPhase.CommitPersistenceFailure
+                    unresolved -> SessionPhase.ReconciliationRequired
+                    else -> SessionPhase.RatingCommitFailed
+                }
+                moved(state.copy(
+                    phase = phase,
+                    session = StudySessionSnapshot(local.request.studySessionId, "Anki review", startedAtEpochMs = now),
+                    anki = local.copy(commit = AnkiRatingCommit(record.toRequest(), record.state,
+                        attempt = record.attemptCount.coerceAtLeast(1), safeToRetry = false,
+                        failureCategory = record.failure?.category),
+                        restoredCommit = true,
+                        blockedByPriorCommit = record.sessionId != local.request.studySessionId),
+                    error = SessionProblemHolder(when {
+                        pendingWrite -> SessionProblem.ANKI_COMMIT_PERSISTENCE_FAILURE
+                        unresolved -> SessionProblem.ANKI_RATING_UNCONFIRMED
+                        else -> SessionProblem.ANKI_RATING_NOT_SAVED
+                    }, when {
+                        pendingWrite -> "The rating transaction has not been durably resolved. " +
+                            "Check the record again or end this session; do not re-submit the rating."
+                        unresolved -> "The rating may already have been saved in Anki. " +
+                            "Study-Agent will not submit it again until the review state can be verified."
+                        else -> "The interrupted review cannot be resumed safely. End this session to start a new review."
+                    },
+                        true, now)
+                )) // Critically: no Begin/Next/Commit effect while recovery is unresolved.
             }
             is AnkiStudyEvent.Scheduled -> {
                 if (event.epoch != state.epoch || state.phase != SessionPhase.WaitingForFirstCard ||
@@ -297,7 +335,7 @@ object StudyReducer {
                     state.phase != SessionPhase.RatingCommitFailed || commit.state != ReviewCommitState.FAILED ->
                         reject("illegal-phase-for-anki-retry")
                     // Explicit and only when proven safe: never after AMBIGUOUS, never automatic.
-                    !commit.safeToRetry -> reject("anki-retry-not-safe")
+                    !commit.safeToRetry || local.restoredCommit || local.turn == null -> reject("anki-retry-not-safe")
                     else -> moved(state.copy(
                         phase = SessionPhase.SubmittingRating,
                         anki = local.copy(commit = commit.copy(state = ReviewCommitState.NOT_STARTED,
@@ -311,7 +349,8 @@ object StudyReducer {
                 when {
                     event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ->
                         reject("stale-anki-reconcile")
-                    state.phase != SessionPhase.ReconciliationRequired || commit.state != ReviewCommitState.AMBIGUOUS ->
+                    !(state.phase == SessionPhase.ReconciliationRequired && commit.state == ReviewCommitState.AMBIGUOUS ||
+                        state.phase == SessionPhase.CommitPersistenceFailure) ->
                         reject("illegal-phase-for-anki-reconcile")
                     commit.reconciling -> reject("anki-reconcile-in-flight")
                     else -> moved(state.copy(anki = local.copy(commit = commit.copy(reconciling = true))),
@@ -407,7 +446,8 @@ object StudyReducer {
             rating = event.rating,
             ratedAtEpochMs = now.coerceAtLeast(0L),
             // Question presentation → rating selection, on the machine clock (never fabricated).
-            answerDurationMs = local.turnPresentedAtMs?.let { (now - it).coerceAtLeast(0L) }
+            answerDurationMs = local.turnPresentedAtMs?.let { (now - it).coerceAtLeast(0L) },
+            deckRef = turn.scheduledCard.deckRef
         )
         val next = state.copy(
             phase = SessionPhase.SubmittingRating,
@@ -438,13 +478,37 @@ object StudyReducer {
         val commit = local.commit
         val turn = local.turn
         val session = local.reviewSession
-        if (epoch != state.epoch || commit == null || commit.commitId != commitId || session == null ||
-            commitId.studySessionId != session.context.studySessionId
+        if (epoch != state.epoch || commit == null || commit.commitId != commitId ||
+            (!local.restoredCommit && (session == null || commitId.studySessionId != session.context.studySessionId))
         ) return Transition.reject(state, event, "stale-anki-commit-result")
         if (commit.state == ReviewCommitState.COMMITTED) return Transition.reject(state, event, "duplicate-anki-commit-result")
-        if (turn == null || turn.turnId != commitId.turnId) return Transition.reject(state, event, "stale-anki-commit-result")
-        val expected = if (reconciliation) SessionPhase.ReconciliationRequired else SessionPhase.SubmittingRating
-        if (state.phase != expected) return Transition.reject(state, event, "illegal-phase-for-anki-commit-result")
+        if (local.restoredCommit) {
+            // A process cannot resurrect an AnkiDroid turn handle. Never create a fresh turn or
+            // retry the old rating before resolving the durable transaction. Once resolved, begin
+            // a *read-only* new scheduler session; never reissue the old CommitRating effect.
+            if (!reconciliation || !commit.reconciling || state.phase !in setOf(
+                    SessionPhase.ReconciliationRequired, SessionPhase.CommitPersistenceFailure)) {
+                return Transition.reject(state, event, "unrequested-anki-recovery")
+            }
+            return when (outcome) {
+                is AnkiCommitOutcome.Committed -> movedRecovery(state, event, local, now)
+                is AnkiCommitOutcome.Failed -> if (local.blockedByPriorCommit) movedRecovery(state, event, local, now)
+                    else Transition(state.copy(phase = SessionPhase.RatingCommitFailed,
+                        anki = local.copy(commit = commit.copy(state = ReviewCommitState.FAILED,
+                            safeToRetry = false, reconciling = false))), emptyList())
+                is AnkiCommitOutcome.Ambiguous -> Transition(state.copy(phase = SessionPhase.ReconciliationRequired,
+                    anki = local.copy(commit = commit.copy(state = ReviewCommitState.AMBIGUOUS,
+                        safeToRetry = false, reconciling = false))), emptyList())
+                is AnkiCommitOutcome.PersistenceFailure -> Transition(state.copy(phase = SessionPhase.CommitPersistenceFailure,
+                    anki = local.copy(commit = commit.copy(reconciling = false))), emptyList())
+            }
+        }
+        if (session == null || turn == null || turn.turnId != commitId.turnId) {
+            return Transition.reject(state, event, "stale-anki-commit-result")
+        }
+        val expected = if (reconciliation) setOf(SessionPhase.ReconciliationRequired, SessionPhase.CommitPersistenceFailure)
+            else setOf(SessionPhase.SubmittingRating)
+        if (state.phase !in expected) return Transition.reject(state, event, "illegal-phase-for-anki-commit-result")
         if (reconciliation && !commit.reconciling) return Transition.reject(state, event, "unrequested-anki-reconciliation")
 
         val next = when (outcome) {
@@ -477,19 +541,39 @@ object StudyReducer {
                     safeToRetry = false, failureCategory = outcome.category)),
                 error = SessionProblemHolder(
                     SessionProblem.ANKI_RATING_UNCONFIRMED,
-                    "Study-Agent cannot confirm whether Anki saved this rating, so it will not send it again. " +
-                        "Check again, or end the session — a new session asks Anki's scheduler what is next.",
+                    "The rating may already have been saved in Anki. Study-Agent will not submit it " +
+                        "again until the review state can be verified.",
                     true, now
                 )
+            )
+            is AnkiCommitOutcome.PersistenceFailure -> state.copy(
+                phase = SessionPhase.CommitPersistenceFailure,
+                anki = local.copy(commit = commit.copy(reconciling = false, safeToRetry = false,
+                    failureCategory = outcome.category)),
+                error = SessionProblemHolder(SessionProblem.ANKI_COMMIT_PERSISTENCE_FAILURE,
+                    "Study-Agent could not safely record the review result. It will not retry or " +
+                        "load another card until the record is saved.", true, now)
             )
         }.recordTransition(event, state.phase, when (outcome) {
             is AnkiCommitOutcome.Committed -> SessionPhase.WaitingForFirstCard
             is AnkiCommitOutcome.Failed -> SessionPhase.RatingCommitFailed
             is AnkiCommitOutcome.Ambiguous -> SessionPhase.ReconciliationRequired
+            is AnkiCommitOutcome.PersistenceFailure -> SessionPhase.CommitPersistenceFailure
         })
         val effects = if (outcome is AnkiCommitOutcome.Committed) listOf(AnkiStudyEffect.Next(state.epoch, session)) else emptyList()
         return Transition(next, effects)
     }
+
+    /** Re-enter the scheduler only after a restored blocker has been durably resolved. */
+    private fun movedRecovery(
+        state: SessionMachineState, event: StudyEvent, local: AnkiStudyInteraction, now: Long
+    ): Transition = Transition(state.copy(
+        phase = SessionPhase.Starting,
+        anki = local.copy(commit = null, restoredCommit = false, blockedByPriorCommit = false,
+            failure = null, priorUnresolvedCommits = 0),
+        error = null
+    ).recordTransition(event, state.phase, SessionPhase.Starting),
+        listOf(AnkiStudyEffect.Begin(state.epoch, local.request, now)))
 
     // ------------------------------------------------------------------ helpers
 
@@ -601,6 +685,10 @@ object StudyReducer {
     // ------------------------------------------------------------------ QUESTION
 
     private fun handleQuestion(state: SessionMachineState, event: StudyEvent.ServerQuestionReceived, clockMs: Long): Transition {
+        // A pushed next card / changed revision is not a transaction-correlated rating receipt.
+        if (state.anki == null && state.cardTurn?.let { state.ledger.hasRatingInFlight(it.turnId) } == true) {
+            return Transition.reject(state, event, "pc-rating-unconfirmed")
+        }
         // SessionId validation §18
         if (event.sessionId != null && state.session?.sessionId != null && event.sessionId != state.session?.sessionId) {
             return Transition.reject(state, event, "stale-session")
@@ -877,17 +965,23 @@ object StudyReducer {
         if (state.isDuplicateServerMessage(event.messageId)) {
             return Transition.reject(state, event, "duplicate-messageId")
         }
-        // Pending validation
+        // Only an ACK correlated to the original delivery can move the turn. A changed card,
+        // next question, revision or unrequested server message is not proof of this rating.
         val pending = state.pendingAction
-        if (pending?.type == PendingAction.ActionType.RATE_CARD && pending.cardId != event.cardId) {
-            return Transition.reject(state, event, "stale-pending")
+        if (pending?.type != PendingAction.ActionType.RATE_CARD || state.phase !in setOf(
+                SessionPhase.SubmittingRating, SessionPhase.Error(SessionProblem.RATING_TIMEOUT))) {
+            return Transition.reject(state, event, "unrequested-rating-ack")
         }
-        if (pending?.type == PendingAction.ActionType.RATE_CARD &&
-            pending.expectedRating != null && pending.expectedRating != event.rating
-        ) {
+        if (pending.cardId != event.cardId) return Transition.reject(state, event, "stale-pending")
+        if (pending.expectedRating != null && pending.expectedRating != event.rating) {
             return Transition.reject(state, event, "unexpected-rating-ack")
         }
         val turn = state.cardTurn ?: return Transition.reject(state, event, "no-card")
+        if (pending.cardTurnId != turn.turnId ||
+            (event.inReplyTo ?: event.messageId) != pending.messageId ||
+            (event.reviewTurnId != null && event.reviewTurnId != turn.turnId)) {
+            return Transition.reject(state, event, "unmatched-rating-ack")
+        }
         val ledger2 = state.ledger.markRatingAck(turn.turnId)
         val newState = state.copy(
             phase = SessionPhase.WaitingForFirstCard, // waiting for next card; next question will bring SpeakingQuestion
@@ -1184,6 +1278,10 @@ object StudyReducer {
     }
 
     private fun handleSessionFinished(state: SessionMachineState, event: StudyEvent.ServerSessionFinished): Transition {
+        if (state.anki == null && state.phase !is SessionPhase.Finishing &&
+            state.cardTurn?.let { state.ledger.hasRatingInFlight(it.turnId) } == true) {
+            return Transition.reject(state, event, "pc-rating-unconfirmed")
+        }
         // Terminal guard already handled, but allow idempotent duplicate
         if (state.phase is SessionPhase.Finished && state.session?.sessionId == event.sessionId) {
             return Transition.reject(state, event, "duplicate-finished")
@@ -1405,14 +1503,14 @@ object StudyReducer {
                 return Transition(newState, listOf(StudyEffect.LogRejected(event.debugName, "submit-timeout", state.phase, pending.cardId)))
             }
             PendingAction.ActionType.RATE_CARD -> {
-                val turnId = pending.cardTurnId ?: return Transition.reject(state, event, "no-turn")
-                val ledger2 = state.ledger.markRatingFailed(turnId, true)
+                // The server may have applied the rating even if its ACK was lost. Preserve the
+                // original message correlation, do NOT mark it retryable or reopen rating/skip.
                 val newState = state.copy(
-                    phase = SessionPhase.WaitingForRating,
-                    ledger = ledger2,
-                    pendingAction = null,
-                    error = SessionProblemHolder(SessionProblem.RATING_TIMEOUT, "Rating timed out", true)
-                ).recordTransition(event, state.phase, SessionPhase.WaitingForRating)
+                    phase = SessionPhase.Error(SessionProblem.RATING_TIMEOUT),
+                    error = SessionProblemHolder(SessionProblem.RATING_TIMEOUT,
+                        "PC rating is unconfirmed. Do not retry or advance without a correlated receipt.",
+                        false, clockMs)
+                ).recordTransition(event, state.phase, SessionPhase.Error(SessionProblem.RATING_TIMEOUT))
                 return Transition(newState, emptyList())
             }
             PendingAction.ActionType.PAUSE_SESSION -> {

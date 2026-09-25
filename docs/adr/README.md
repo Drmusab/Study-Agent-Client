@@ -15,4 +15,5 @@ The normative contract these ADRs support is
 | [0004](0004-study-agent-owns-review-interaction.md) | Study-Agent owns the review interaction layer; the study machine stays UI-flow authority | Accepted |
 | [0005](0005-no-ankidroid-fork.md) | Integrate via the public AnkiDroid integration API; no source fork | Accepted |
 | [0006](0006-backend-provider-independence.md) | Anki backend selection is independent of AI/TTS/STT provider selection | Accepted |
-| [0007](0007-rating-authority-and-exactly-once.md) | Suggested ≠ selected ≠ committed rating; exactly-once scheduling mutation per review turn | Accepted |
+| [0007](0007-rating-authority-and-exactly-once.md) | Rating authority/turn identity; exactly-once and reconciliation claims corrected by ADR 0008 | Superseded in part |
+| [0008](0008-durable-review-attempts-and-exactly-once-limits.md) | Durable call boundary, fail-closed recovery, and per-backend guarantee limits | Accepted |

@@ -88,6 +88,8 @@ class AnkiDroidBackend(
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
+    // The public provider has neither a ReviewCommitId key nor a durable commit receipt.
+    override val commitSemantics = com.studyagent.client.core.anki.CommitSemantics.ANKIDROID
 
     /** Distinguishes handles this instance issued from handles issued by a previous process. */
     private val instanceId: String = UUID.randomUUID().toString()
@@ -587,9 +589,14 @@ class AnkiDroidBackend(
      * [AnkiDroidRatingCommitter]. Only `Committed` releases the turn, so the next `nextCard` asks
      * the scheduler; anything escaping after the lock is AMBIGUOUS, never a failure.
      */
-    override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
+    override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult =
+        commitRating(request) { true }
+
+    override suspend fun commitRating(
+        request: CommitRatingRequest, mutationEntry: suspend () -> Boolean
+    ): CommitRatingResult {
         try {
-            return reviewMutex.withLock { commitLocked(request) }
+            return reviewMutex.withLock { commitLocked(request, mutationEntry) }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (throwable: Throwable) {
@@ -598,12 +605,17 @@ class AnkiDroidBackend(
         }
     }
 
-    private suspend fun commitLocked(request: CommitRatingRequest): CommitRatingResult {
+    private suspend fun commitLocked(
+        request: CommitRatingRequest, mutationEntry: suspend () -> Boolean
+    ): CommitRatingResult {
         if (request.commitId.backendId != id || request.card.backendId != id) {
             return CommitRatingResult.Rejected(AnkiError.SessionInvalid())
         }
         val record = sessionRecordFor(request.commitId.studySessionId)
             ?: return CommitRatingResult.Rejected(AnkiError.SessionInvalid())
+        if (request.deckRef != null && request.deckRef != record.deckRef) {
+            return CommitRatingResult.Rejected(AnkiError.SessionInvalid())
+        }
         record.commits[request.commitId]?.let { previous ->
             if (!previous.samePayload(request)) return CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card))
             // Known outcomes are final here; only a proven-not-applied attempt may be sent again.
@@ -618,7 +630,7 @@ class AnkiDroidBackend(
         val deckId = record.deckRef.deckId.toLongOrNull()
             ?: return CommitRatingResult.Rejected(AnkiError.InvalidRequest("deck_id_unmappable"))
 
-        val result = committer.commit(authority, deckId, request)
+        val result = committer.commit(authority, deckId, request, mutationEntry)
         record.rememberCommit(request.commitId, BackendCommitRecord(request.card, request.rating, result))
         if (result is CommitRatingResult.Committed) {
             record.activeTurn = null // resolved: the next nextCard() asks the scheduler again
@@ -640,27 +652,9 @@ class AnkiDroidBackend(
                 usabilityError()?.let { return@withLock ReconcileCommitResult.Unavailable(it) }
                 val authority = currentAuthority()
                     ?: return@withLock ReconcileCommitResult.Unavailable(AnkiError.QueryFailure("authority-unknown"))
-                val result = committer.reconcile(authority, request)
-                sessionRecordFor(request.commitId.studySessionId)?.let { record ->
-                    val turn = record.activeTurn
-                    if (turn != null && turn.commitId == request.commitId) {
-                        val decided: CommitRatingResult? = when (result) {
-                            is ReconcileCommitResult.Applied -> CommitRatingResult.Committed()
-                            is ReconcileCommitResult.NotApplied ->
-                                if (result.safeToRetry) CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("reconciled_not_applied"))
-                                else CommitRatingResult.Rejected(AnkiError.CommitConflict(turn.cardRef))
-                            else -> null
-                        }
-                        if (decided != null) {
-                            record.rememberCommit(request.commitId, BackendCommitRecord(request.card, request.rating, decided))
-                            if (decided is CommitRatingResult.Committed) {
-                                record.activeTurn = null
-                                hydrationMemo = null
-                            }
-                        }
-                    }
-                }
-                result
+                // No provider receipt or ReviewCommitId lookup exists. Card counters and timestamp
+                // are diagnostic observations only, never authoritative reconciliation evidence.
+                committer.reconcile(authority, request)
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -673,6 +667,7 @@ class AnkiDroidBackend(
     private fun validateCommit(request: CommitRatingRequest): AnkiError? {
         if (request.commitId.backendId != id || request.card.backendId != id) return AnkiError.SessionInvalid()
         val record = sessionRecordFor(request.commitId.studySessionId) ?: return AnkiError.SessionInvalid()
+        if (request.deckRef != null && request.deckRef != record.deckRef) return AnkiError.SessionInvalid()
         val turn = record.activeTurn
         if (turn == null || turn.turnId != request.commitId.turnId || turn.cardRef != request.card) {
             return AnkiError.StaleTurn()

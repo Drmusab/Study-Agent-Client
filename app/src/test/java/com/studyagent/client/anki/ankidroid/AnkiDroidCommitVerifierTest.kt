@@ -9,7 +9,7 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidRatingContract
 import org.junit.Assert.*
 import org.junit.Test
 
-/** GATE 11 — the one ease mapping, the evidence codec and the applied/not-applied verifier. */
+/** GATE 11 — the one ease mapping, the evidence codec and an advisory immediate observation. */
 class AnkiDroidCommitVerifierTest {
 
     @Test fun `the ease mapping is the verified v2_24_1 provider contract`() {
@@ -43,19 +43,19 @@ class AnkiDroidCommitVerifierTest {
         assertEquals(noReview, AnkiDroidCardState.fromEvidence(noReview.toEvidence(1)))
     }
 
-    @Test fun `exactly one answer inside the window is applied`() {
+    @Test fun `a single review in the window is consistent but not a transaction receipt`() {
         val verdict = AnkiDroidCommitVerifier.classify(base, answered(), windowStart, windowEnd, tightWindow = true)
-        assertTrue(verdict is Verdict.Applied)
+        assertTrue(verdict is Verdict.ConsistentWithAnswer)
     }
 
-    @Test fun `no change on a normal card is proven not applied and safe to retry`() {
+    @Test fun `no change on a normal card is not proof a lost call will not land`() {
         val verdict = AnkiDroidCommitVerifier.classify(base, base, windowStart, windowEnd, tightWindow = true)
-        assertEquals(Verdict.NotApplied("no_state_change", safeToRetry = true), verdict)
+        assertEquals(Verdict.Unchanged("no_state_change_observed"), verdict)
     }
 
-    @Test fun `one answer outside the window belongs to someone else and blocks retry`() {
+    @Test fun `a timestamp outside the window cannot attribute the answer`() {
         val later = answered(at = windowEnd / 1000 + 600)
-        assertEquals(Verdict.NotApplied("superseded_by_other_review", safeToRetry = false),
+        assertEquals(Verdict.Unattributable("review_time_outside_window"),
             AnkiDroidCommitVerifier.classify(base, later, windowStart, windowEnd, tightWindow = false))
     }
 
@@ -75,12 +75,12 @@ class AnkiDroidCommitVerifierTest {
         // Preview answer: queue/due/deck change without reps (rslib preview.rs).
         val previewed = filtered.copy(due = 1_700_000_600)
         assertTrue(AnkiDroidCommitVerifier.classify(filtered, previewed, windowStart, windowEnd, tightWindow = true)
-            is Verdict.Applied)
+            is Verdict.Unattributable)
         assertTrue("never attributed after the fact",
             AnkiDroidCommitVerifier.classify(filtered, previewed, windowStart, windowEnd, tightWindow = false) is Verdict.Unattributable)
         assertTrue("no change is not proof for a possible preview card",
             AnkiDroidCommitVerifier.classify(filtered, filtered, windowStart, windowEnd, true) is Verdict.Unattributable)
         // A rescheduling filtered deck still moves reps normally.
-        assertTrue(AnkiDroidCommitVerifier.classify(filtered, answered(filtered), windowStart, windowEnd, true) is Verdict.Applied)
+        assertTrue(AnkiDroidCommitVerifier.classify(filtered, answered(filtered), windowStart, windowEnd, true) is Verdict.ConsistentWithAnswer)
     }
 }

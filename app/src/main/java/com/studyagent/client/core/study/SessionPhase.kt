@@ -56,6 +56,9 @@ sealed interface SessionPhase {
      */
     data object ReconciliationRequired : SessionPhase
 
+    /** Backend may have succeeded but its result/intent could not be made durable. Never retry. */
+    data object CommitPersistenceFailure : SessionPhase
+
     /** A hint TTS is playing / hint overlay visible. */
     data object SpeakingHint : SessionPhase
 
@@ -110,6 +113,7 @@ sealed interface SessionPhase {
             SubmittingRating -> "SubmittingRating"
             RatingCommitFailed -> "RatingCommitFailed"
             ReconciliationRequired -> "ReconciliationRequired"
+            CommitPersistenceFailure -> "CommitPersistenceFailure"
             SpeakingHint -> "Hint"
             SpeakingExplanation -> "Explanation"
             ShowingAnswer -> "AnswerReveal"

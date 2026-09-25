@@ -1,5 +1,6 @@
 package com.studyagent.client.data.repository
 
+import com.studyagent.client.core.anki.ReviewCommitLedger
 import com.studyagent.client.core.anki.statusCode
 import com.studyagent.client.core.audio.AudioDeviceInfoModel
 import com.studyagent.client.core.audio.AudioRouteManager
@@ -178,7 +179,8 @@ class DefaultDiagnosticsRepository(
     // ---- GATE 04: gateway + backend for capability matrix (§64/§65/§121) ----
     private val ankiDroidGateway: AnkiDroidGateway? = null,
     private val ankiDroidBackend: AnkiDroidBackend? = null,
-    private val ankiLibraryRepository: AnkiLibraryRepository? = null
+    private val ankiLibraryRepository: AnkiLibraryRepository? = null,
+    private val reviewCommitLedger: ReviewCommitLedger? = null
 ) : DiagnosticsRepository {
 
     override val logs: StateFlow<List<LogEntry>> = AppLogger.logsFlow
@@ -201,6 +203,10 @@ class DefaultDiagnosticsRepository(
         val collectorScope = scope
         if (source != null && collectorScope != null) {
             collectorScope.launch { source.collect { latestSettings.value = it } }
+        }
+        // Warm the durable health check off the UI thread; row rendering never blocks on disk.
+        if (collectorScope != null) {
+            reviewCommitLedger?.let { ledger -> collectorScope.launch { ledger.health() } }
         }
     }
 
@@ -537,6 +543,19 @@ class DefaultDiagnosticsRepository(
      * - backend id, gateway state, capability matrix
      * - API support vs Study-Agent implementation status (§64/§65/§121)
      */
+    private fun commitLedgerRows(): List<Pair<String, String>> = reviewCommitLedger?.diagnosticsSnapshot()?.let { data ->
+        listOf(
+            "Ledger health" to data.health,
+            "Ledger records" to (data.records?.toString() ?: "Not checked"),
+            "Ledger submitting" to (data.submitting?.toString() ?: "Not checked"),
+            "Ledger ambiguous" to (data.ambiguous?.toString() ?: "Not checked"),
+            "Ledger committed" to (data.committed?.toString() ?: "Not checked"),
+            "Ledger safe failures" to (data.safeFailures?.toString() ?: "Not checked"),
+            "Ledger interrupted on restore" to (data.interruptedOnRestore?.toString() ?: "Not checked"),
+            "Ledger last write failed" to if (data.lastWriteFailed) "Yes" else "No"
+        )
+    } ?: emptyList()
+
     override fun ankiDroidDiagnosticsRows(): List<Pair<String, String>> {
         val repository = ankiDroidHealthRepository
         val gateway = ankiDroidGateway
@@ -544,7 +563,7 @@ class DefaultDiagnosticsRepository(
 
         // If neither is wired, report not wired
         if (repository == null && gateway == null) {
-            return listOf("Integration" to "not wired in this build")
+            return listOf("Integration" to "not wired in this build") + commitLedgerRows()
         }
 
         // Prefer gateway state when available (GATE 04 single source of truth, §45)
@@ -553,7 +572,11 @@ class DefaultDiagnosticsRepository(
         val detection = integrationState?.healthSnapshot?.detection ?: snapshot?.detection
 
         if (detection == null && integrationState == null) {
-            return listOf("Integration" to "no data yet")
+            return listOf("Integration" to "no data yet",
+                "Commit guarantee" to (backend?.commitSemantics?.guaranteeLevel?.name ?: "Not wired / unverified"),
+                "Idempotent replay" to if (backend?.commitSemantics?.supportsIdempotentReplay == true) "Verified" else "No / unverified",
+                "Authoritative reconciliation" to if (backend?.commitSemantics?.supportsAuthoritativeReconciliation == true)
+                    "Verified" else "No commit-correlated evidence") + commitLedgerRows()
         }
 
         val facts = detection?.providerFacts
@@ -585,6 +608,19 @@ class DefaultDiagnosticsRepository(
         // Basic health (GATE 02)
         rows.add("Status" to (detection?.availability?.statusCode ?: integrationState?.availability?.statusCode ?: DiagnosticsFormatting.UNKNOWN))
         rows.add("Backend" to (backend?.id?.stableId ?: "ankidroid_local"))
+        val semantics = backend?.commitSemantics
+        rows.add("Commit guarantee" to when (semantics?.guaranteeLevel) {
+            com.studyagent.client.core.anki.CommitGuaranteeLevel.AT_MOST_ONCE_FAIL_CLOSED -> "At-most-once / fail-closed"
+            com.studyagent.client.core.anki.CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED -> "Idempotent replay"
+            com.studyagent.client.core.anki.CommitGuaranteeLevel.END_TO_END_EXACTLY_ONCE -> "End-to-end exactly-once"
+            com.studyagent.client.core.anki.CommitGuaranteeLevel.LOCAL_DEDUP_ONLY -> "Local dedup only"
+            null -> "Not wired / unverified"
+        })
+        rows.add("Idempotent replay" to if (semantics?.supportsIdempotentReplay == true) "Verified" else "No / unverified")
+        rows.add("Authoritative reconciliation" to if (semantics?.supportsAuthoritativeReconciliation == true)
+            "Verified" else "No commit-correlated evidence")
+        rows.add("Commit receipt" to (semantics?.commitReceiptKind?.name ?: "Not wired"))
+        rows.addAll(commitLedgerRows())
         rows.add("Endpoint" to (detection?.endpointLabel ?: integrationState?.metadata?.endpointLabel ?: DiagnosticsFormatting.NOT_MEASURED))
         rows.add("Authority" to (detection?.authority ?: integrationState?.metadata?.authority ?: DiagnosticsFormatting.NOT_MEASURED))
         rows.add("Authorities checked" to if (detection?.checkedAuthorities?.isEmpty() == false) detection.checkedAuthorities.joinToString(", ") else integrationState?.metadata?.checkedAuthorities?.joinToString(", ") ?: DiagnosticsFormatting.NOT_MEASURED)

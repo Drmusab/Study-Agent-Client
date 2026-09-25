@@ -24,7 +24,11 @@ sealed interface NextCardResult {
  * | [Ambiguous] | unknown | AMBIGUOUS | blocked | never blind; reconcile first |
  */
 sealed interface CommitRatingResult {
-    data class Committed(val scheduling: AnkiSchedulingInfo? = null) : CommitRatingResult
+    data class Committed(
+        val scheduling: AnkiSchedulingInfo? = null,
+        /** Only a backend can issue a backend receipt; this is null for AnkiDroid. */
+        val receipt: CommitReceipt? = null
+    ) : CommitRatingResult
     /** Refused before mutation. Surface/reconcile, do not automatically retry. */
     data class Rejected(val error: AnkiError) : CommitRatingResult
     /** Proven not applied. Retry exactly the same identity and payload. */

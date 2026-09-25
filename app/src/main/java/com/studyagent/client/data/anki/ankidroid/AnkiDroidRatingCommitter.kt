@@ -22,12 +22,13 @@ import kotlinx.coroutines.withContext
  *                 3. queue front == this card?                    (no → Rejected, nothing sent)
  *  boundary       4. ONE provider update (answer_ease, time_taken)
  *  post-mutation  5. restore the user's selected deck (always, NonCancellable)
- *                 6. read card state again → verifier → Committed | not applied | Ambiguous
+ *                 6. synchronous response + immediate read → Committed | Ambiguous
  * ```
  *
  * Why step 6 exists: at the pinned v2.24.1 the provider swallows scheduler exceptions and still
  * answers `1` (see `AnkiDroidApiContract`), so "no exception, one row" is never treated as success.
- * Every outcome after dispatch is decided by evidence; when evidence cannot decide, it is AMBIGUOUS.
+ * A lost response is always AMBIGUOUS; later card-state reads cannot attribute a ReviewCommitId.
+ * A synchronous `1` plus a single normal review transition is the limited immediate success path.
  * Callers serialize commits (the backend holds one lock per commit), and the gateway serializes
  * physical writes, so this class never issues two answers at once.
  */
@@ -42,7 +43,10 @@ internal class AnkiDroidRatingCommitter(
             is AnkiResult.Failure -> CommitPreparation.Refused(state.error, retryable = state.error.isTransient())
         }
 
-    suspend fun commit(authority: String, sessionDeckId: Long, request: CommitRatingRequest): CommitRatingResult {
+    suspend fun commit(
+        authority: String, sessionDeckId: Long, request: CommitRatingRequest,
+        mutationEntry: suspend () -> Boolean = { true }
+    ): CommitRatingResult {
         val card = request.card
         val noteId = card.noteId?.toLongOrNull()
         val cardOrd = card.cardOrd
@@ -100,6 +104,9 @@ internal class AnkiDroidRatingCommitter(
                 log("ANKI_COMMIT_PRECONDITION_FAILED reason=card_not_next_in_queue")
                 return CommitRatingResult.Rejected(AnkiError.CommitConflict(card))
             }
+            // The callback durably records CALL_ENTERED just before the only scheduler update.
+            // If it fails, the provider is NEVER called; finally still restores selected_deck.
+            if (!mutationEntry()) return CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable())
             val windowStart = clock.nowMillis()
             gateway.submitAnswer(authority, AnkiDroidAnswer(noteId, cardOrd, request.rating, request.answerDurationMs)) to windowStart
         } finally {
@@ -109,23 +116,22 @@ internal class AnkiDroidRatingCommitter(
         return classify(authority, card, baseline, dispatch, windowStart, clock.nowMillis())
     }
 
-    /** Read-only reconciliation from the durable baseline (works after process death). */
+    /**
+     * Evidence gathering is read-only, but AnkiDroid exposes no ReviewCommitId / durable receipt.
+     * A changed card, unchanged card, time, revlog or next card cannot prove which caller caused
+     * the effect, nor that a timed-out write will never land. Never resolve either way here.
+     */
     suspend fun reconcile(authority: String, request: ReconcileCommitRequest): ReconcileCommitResult {
         val baseline = AnkiDroidCardState.fromEvidence(request.evidence)
             ?: return ReconcileCommitResult.StillAmbiguous("baseline_evidence_unavailable")
         if (gateway.writeInFlight) return ReconcileCommitResult.StillAmbiguous("provider_call_in_flight")
-        val after = when (val read = gateway.readCardState(authority, request.card)) {
-            is AnkiResult.Success -> read.value
-            is AnkiResult.Failure -> return if (read.error is AnkiError.CardNotFound) {
+        return when (val read = gateway.readCardState(authority, request.card)) {
+            is AnkiResult.Failure -> if (read.error is AnkiError.CardNotFound)
                 ReconcileCommitResult.StillAmbiguous("card_not_found")
-            } else ReconcileCommitResult.Unavailable(read.error)
-        }
-        return when (val verdict = AnkiDroidCommitVerifier.classify(
-            baseline, after, request.submittedAtEpochMs, request.windowEndEpochMs, tightWindow = false
-        )) {
-            is AnkiDroidCommitVerifier.Verdict.Applied -> ReconcileCommitResult.Applied(verdict.detail)
-            is AnkiDroidCommitVerifier.Verdict.NotApplied -> ReconcileCommitResult.NotApplied(verdict.detail, verdict.safeToRetry)
-            is AnkiDroidCommitVerifier.Verdict.Unattributable -> ReconcileCommitResult.StillAmbiguous(verdict.detail)
+                else ReconcileCommitResult.Unavailable(read.error)
+            is AnkiResult.Success -> if (!read.value.sameIdentity(baseline))
+                ReconcileCommitResult.StillAmbiguous("card_identity_changed")
+                else ReconcileCommitResult.StillAmbiguous("no_transaction_correlated_receipt")
         }
     }
 
@@ -140,54 +146,32 @@ internal class AnkiDroidRatingCommitter(
         if (dispatch is AnkiDroidAnswerDispatch.NotDispatched) {
             return CommitRatingResult.RetryableFailure(dispatch.error) // no IPC happened at all
         }
+        // A timeout, exception, or -1 is a lost response, NOT a transaction result. Even if a
+        // later card read shows reps+1 (or no change), that observation cannot attribute the
+        // mutation to this ReviewCommitId. The only immediate happy path is a synchronous return
+        // from this answer call *and* a consistent single review transition.
+        if (dispatch !is AnkiDroidAnswerDispatch.Returned ||
+            dispatch.rowCount != AnkiDroidApiContract.REVIEW_ANSWER_REACHED_ROWS) {
+            return CommitRatingResult.Ambiguous(AnkiError.Unknown("answer_outcome_unavailable"))
+        }
         val after = when (val read = gateway.readCardState(authority, card)) {
             is AnkiResult.Success -> read.value
-            // After dispatch, missing evidence never becomes a failure — it is AMBIGUOUS.
             is AnkiResult.Failure -> {
                 log("ANKI_COMMIT_VERIFICATION_UNAVAILABLE error=${read.error::class.simpleName}")
-                return if (dispatch is AnkiDroidAnswerDispatch.RejectedBeforeMutation) {
-                    rejectedBeforeMutation(dispatch)
-                } else CommitRatingResult.Ambiguous(AnkiError.Unknown("verification_read_failed"))
+                return CommitRatingResult.Ambiguous(AnkiError.Unknown("verification_read_failed"))
             }
         }
         val verdict = AnkiDroidCommitVerifier.classify(baseline, after, windowStart, windowEnd, tightWindow = true)
         log("ANKI_COMMIT_VERIFIED dispatch=${dispatch.token()} verdict=${verdict::class.simpleName}:${verdict.detail}")
         return when (verdict) {
-            is AnkiDroidCommitVerifier.Verdict.Applied -> when (dispatch) {
-                // A pre-mutation exception with an applied answer is a contradiction: never guess.
-                is AnkiDroidAnswerDispatch.RejectedBeforeMutation ->
-                    CommitRatingResult.Ambiguous(AnkiError.Unknown("rejected_but_applied"))
-                else -> CommitRatingResult.Committed()
-            }
+            is AnkiDroidCommitVerifier.Verdict.ConsistentWithAnswer -> if (baseline.inFilteredDeck)
+                CommitRatingResult.Ambiguous(AnkiError.Unknown("filtered_deck_result_unverified"))
+                else CommitRatingResult.Committed()
+            is AnkiDroidCommitVerifier.Verdict.Unchanged,
             is AnkiDroidCommitVerifier.Verdict.Unattributable ->
-                CommitRatingResult.Ambiguous(AnkiError.Unknown("unattributable:${verdict.detail}"))
-            is AnkiDroidCommitVerifier.Verdict.NotApplied -> when (dispatch) {
-                is AnkiDroidAnswerDispatch.RejectedBeforeMutation -> rejectedBeforeMutation(dispatch)
-                // A timed-out call may still apply after this read: unknown, not "failed".
-                is AnkiDroidAnswerDispatch.Unknown -> if (dispatch.callMayStillBeRunning || !verdict.safeToRetry) {
-                    CommitRatingResult.Ambiguous(AnkiError.Unknown(dispatch.detail))
-                } else CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("answer_not_applied"))
-                is AnkiDroidAnswerDispatch.Returned -> when {
-                    !verdict.safeToRetry -> CommitRatingResult.Rejected(AnkiError.CommitConflict(card))
-                    // v2.24.1: the provider swallowed a scheduler exception and still answered 1.
-                    dispatch.rowCount == AnkiDroidApiContract.REVIEW_ANSWER_REACHED_ROWS ->
-                        CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("answer_not_applied"))
-                    // The provider process died; its transaction never committed.
-                    dispatch.rowCount == AnkiDroidApiContract.UPDATE_REMOTE_FAILURE_ROWS ->
-                        CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("provider_died_before_applying"))
-                    // 0 rows: the provider did not recognise the answer request at all.
-                    dispatch.rowCount == 0 ->
-                        CommitRatingResult.Rejected(AnkiError.MalformedResponse("answer_update_no_rows"))
-                    else -> CommitRatingResult.Ambiguous(AnkiError.Unknown("answer_rows_${dispatch.rowCount}"))
-                }
-                is AnkiDroidAnswerDispatch.NotDispatched -> CommitRatingResult.RetryableFailure(dispatch.error)
-            }
+                CommitRatingResult.Ambiguous(AnkiError.Unknown("answer_not_confirmed"))
         }
     }
-
-    private fun rejectedBeforeMutation(dispatch: AnkiDroidAnswerDispatch.RejectedBeforeMutation): CommitRatingResult =
-        if (dispatch.error.isTransient()) CommitRatingResult.RetryableFailure(dispatch.error)
-        else CommitRatingResult.Rejected(dispatch.error)
 
     private fun preDispatch(error: AnkiError): CommitRatingResult =
         if (error.isTransient()) CommitRatingResult.RetryableFailure(error) else CommitRatingResult.Rejected(error)
@@ -202,7 +186,6 @@ internal class AnkiDroidRatingCommitter(
 
     private fun AnkiDroidAnswerDispatch.token(): String = when (this) {
         is AnkiDroidAnswerDispatch.NotDispatched -> "not_dispatched"
-        is AnkiDroidAnswerDispatch.RejectedBeforeMutation -> "rejected_before_mutation:$exceptionClass"
         is AnkiDroidAnswerDispatch.Returned -> "returned:$rowCount"
         is AnkiDroidAnswerDispatch.Unknown -> "unknown:$detail"
     }

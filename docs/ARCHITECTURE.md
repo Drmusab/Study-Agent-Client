@@ -418,7 +418,7 @@ Key points:
 - Handshake timeout, auth timeout
 - Ping: normal, late, duplicate, missing, correlation via in_reply_to
 - Network loss during idle, question, answer submission, evaluation wait, rating -> recovery via snapshot
-- Exactly-once: rating sent, server applies, ACK lost, reconnect, same request resent -> Anki rating applied once
+- GATE 11 guarantee audit: an ACK-lost PC rating is not blindly resent. Durable backend dedup by logical commit ID, across cache eviction and restart, remains unverified (see ADR 0008).
 - Large payloads, malformed frames (no crash), unknown message type (no destroy)
 - Buffer stress: many progress/dashboard updates, critical preserved
 - Endurance: 24h virtual, many pings, reconnects, 1000+ turns, no socket leak, no request-tracker leak, no coroutine leak, no duplicate heartbeat
