@@ -1,6 +1,7 @@
 package com.studyagent.client.core.models
 
 import com.studyagent.client.core.network.ClientInfoProvider
+import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -81,7 +82,10 @@ sealed interface ClientMessage {
         /** Protocol versions this client understands. v1 servers ignore this field. */
         @SerialName("supported_versions") val supportedVersions: List<String> = listOf("1", "2"),
         /** Optional client-side capabilities advertised to the agent. */
-        @SerialName("client_capabilities") val clientCapabilities: List<String> = listOf("dashboard", "study_control", "session_recovery")
+        @SerialName("client_capabilities") val clientCapabilities: List<String> = listOf(
+            "dashboard", "study_control", "session_recovery",
+            "review_commit_idempotency", "commit_reconciliation"
+        )
     ) : ClientMessage
 
     @Serializable
@@ -162,7 +166,14 @@ sealed interface ClientMessage {
         @SerialName("rating") val rating: Rating,
         @SerialName("review_turn_id") val reviewTurnId: String? = null,
         @SerialName("session_revision") val sessionRevision: Long? = null,
-        @SerialName("in_reply_to") val inReplyTo: String? = null
+        @SerialName("in_reply_to") val inReplyTo: String? = null,
+        /**
+         * Logical rating transaction id. Omitted when null so older agents keep the previous frame.
+         * Not an auth token and not derived from the rating. Ignored by servers that do not
+         * advertise review_commit_idempotency.
+         */
+        @EncodeDefault(EncodeDefault.Mode.NEVER)
+        @SerialName("review_commit_id") val reviewCommitId: String? = null
     ) : ClientMessage
 
     @Serializable

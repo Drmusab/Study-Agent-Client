@@ -88,6 +88,8 @@ internal object AnkiDroidDeckMapper {
         val filtered = parseFiltered(filteredText)
 
         val deck = AnkiDeck(
+            // Public AnkiDroid rows do not expose a stable collection id. Null is unknown, not a
+            // hash of the deck name or card count. Reconciliation must not pretend otherwise.
             ref = AnkiDeckRef(backendId = backendId, deckId = deckId.toString(), collectionKey = null),
             name = name,
             parentRef = null,

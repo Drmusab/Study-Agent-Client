@@ -14,7 +14,11 @@ data class RatingCommitRecoveryUi(
     /** Evidence gathering / retrying a *ledger write*, never re-rating the card. */
     val canCheckAgain: Boolean,
     val canEndSession: Boolean,
-    val ratingControlsEnabled: Boolean = false
+    val ratingControlsEnabled: Boolean = false,
+    /** Navigational only. Opening AnkiDroid does not resolve the transaction. */
+    val canOpenAnkiDroid: Boolean = false,
+    /** Navigational only. Diagnostics do not resubmit the rating. */
+    val canViewDiagnostics: Boolean = false
 ) {
     enum class Status { SAVING, NOT_SAVED, UNCONFIRMED, CHECKING, PERSISTENCE_FAULT, SAVED, EARLIER_UNCONFIRMED }
 
@@ -29,13 +33,15 @@ data class RatingCommitRecoveryUi(
                     RatingCommitRecoveryUi(Status.PERSISTENCE_FAULT, rating, "Review record could not be saved",
                         "Study-Agent could not safely record the review result. It will not submit the rating " +
                             "again or load another card. Check the record again or end the session.",
-                        canRetry = false, canCheckAgain = !commit.reconciling, canEndSession = true)
+                        canRetry = false, canCheckAgain = !commit.reconciling, canEndSession = true,
+                        canOpenAnkiDroid = true, canViewDiagnostics = true)
 
                 commit != null && local.restoredCommit && machine.phase is SessionPhase.RatingCommitFailed ->
                     RatingCommitRecoveryUi(Status.NOT_SAVED, rating, "Review interrupted",
                         "The original review turn cannot be resumed after restart. Study-Agent will not " +
                             "send this rating again. End this session, then start a new review if needed.",
-                        canRetry = false, canCheckAgain = false, canEndSession = true)
+                        canRetry = false, canCheckAgain = false, canEndSession = true,
+                        canOpenAnkiDroid = true, canViewDiagnostics = true)
 
                 commit != null && commit.isPending && machine.phase is SessionPhase.SubmittingRating ->
                     RatingCommitRecoveryUi(Status.SAVING, rating, "Saving rating",
@@ -46,10 +52,11 @@ data class RatingCommitRecoveryUi(
                     machine.phase is SessionPhase.RatingCommitFailed -> {
                     val retryable = commit.safeToRetry && local.turn != null && !local.restoredCommit
                     RatingCommitRecoveryUi(Status.NOT_SAVED, rating, "Rating not saved",
-                        if (retryable) "Anki did not save \u201c$label\u201d. Nothing was changed. " +
-                            "You can retry the same rating or end the session."
+                        if (retryable) "Could not save the rating. Nothing was changed in Anki. " +
+                            "Retry is safe for \u201c$label\u201d."
                         else "Anki did not accept \u201c$label\u201d. Nothing was changed. End the session.",
-                        canRetry = retryable, canCheckAgain = false, canEndSession = true)
+                        canRetry = retryable, canCheckAgain = false, canEndSession = true,
+                        canViewDiagnostics = !retryable)
                 }
 
                 commit != null && commit.state == ReviewCommitState.AMBIGUOUS &&
@@ -60,14 +67,19 @@ data class RatingCommitRecoveryUi(
                         canRetry = false, canCheckAgain = false, canEndSession = true
                     ) else RatingCommitRecoveryUi(
                         Status.UNCONFIRMED, rating, "Review status uncertain",
-                        "The rating may already have been saved in Anki. Study-Agent will not " +
-                            "submit it again until the review state can be verified.",
-                        canRetry = false, canCheckAgain = true, canEndSession = true
+                        "The rating may already have been saved. Study-Agent will not " +
+                            "submit it again until the review state is verified.",
+                        canRetry = false, canCheckAgain = true, canEndSession = true,
+                        canOpenAnkiDroid = true, canViewDiagnostics = true
                     )
 
                 commit != null && commit.state == ReviewCommitState.COMMITTED &&
                     machine.phase is SessionPhase.WaitingForFirstCard ->
-                    RatingCommitRecoveryUi(Status.SAVED, rating, "Rating saved",
+                    if (commit.verifiedByReconciliation) RatingCommitRecoveryUi(
+                        Status.SAVED, rating, "Rating verified as saved",
+                        "Rating verified as saved. Loading the next scheduled card\u2026",
+                        canRetry = false, canCheckAgain = false, canEndSession = true
+                    ) else RatingCommitRecoveryUi(Status.SAVED, rating, "Rating saved",
                         "Loading the next scheduled card\u2026",
                         canRetry = false, canCheckAgain = false, canEndSession = true)
 
@@ -76,7 +88,7 @@ data class RatingCommitRecoveryUi(
                         "${local.priorUnresolvedCommits} earlier rating(s) remain unresolved in another " +
                             "session or collection. They will not be re-sent.",
                         canRetry = false, canCheckAgain = false, canEndSession = false,
-                        ratingControlsEnabled = true)
+                        ratingControlsEnabled = true, canOpenAnkiDroid = true, canViewDiagnostics = true)
                 else -> null
             }
         }

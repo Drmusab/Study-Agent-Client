@@ -869,7 +869,9 @@ class StudySessionMachine(
         }
         // Also cancel timeout job
         timeoutJobs.remove(effect.messageId)?.cancel()
-        AppLogger.w(tag, "Send failed for ${effect.message.type} id=${effect.messageId}; marked retryable")
+        val replay = effect.message is com.studyagent.client.core.models.ClientMessage.RateCard &&
+            com.studyagent.client.core.anki.PcRatingReplayPolicy.automaticReplayAllowed(null)
+        AppLogger.w(tag, "Send failed for ${effect.message.type} id=${effect.messageId}; replay=$replay")
     }
 
     private fun observeServerMessages() {

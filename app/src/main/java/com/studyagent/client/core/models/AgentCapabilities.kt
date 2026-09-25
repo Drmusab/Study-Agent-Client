@@ -17,6 +17,15 @@ object AgentCapability {
     const val LEARNING_INSIGHTS = "learning_insights"
     const val COMPONENT_HEALTH = "component_health"
     const val SESSION_PROGRESS = "session_progress"
+
+    /**
+     * Server can durably deduplicate one logical review commit id. Absence means the client must
+     * not replay a rating mutation. This is not implied by a version string.
+     */
+    const val REVIEW_COMMIT_IDEMPOTENCY = "review_commit_idempotency"
+
+    /** Server can answer a read-only status query for one logical review commit id. */
+    const val COMMIT_RECONCILIATION = "commit_reconciliation"
 }
 
 /**

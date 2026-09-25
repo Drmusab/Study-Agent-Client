@@ -47,7 +47,9 @@ data class AnkiRatingCommit(
     val safeToRetry: Boolean = false,
     val failureCategory: String? = null,
     /** A reconciliation read is in flight (AMBIGUOUS only). */
-    val reconciling: Boolean = false
+    val reconciling: Boolean = false,
+    /** True only when reconciliation evidence, not the original response, proved COMMITTED. */
+    val verifiedByReconciliation: Boolean = false
 ) {
     val commitId: ReviewCommitId get() = request.commitId
     val rating: Rating get() = request.rating

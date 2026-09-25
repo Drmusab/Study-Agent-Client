@@ -106,7 +106,11 @@ fun StudyScreen(
     viewModel: StudyViewModel,
     onNavigateBack: () -> Unit,
     onNavigateToConnection: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** Navigation only. Does not resolve or resubmit a rating. */
+    onOpenAnkiDroid: () -> Unit = {},
+    /** Navigation only. Does not resolve or resubmit a rating. */
+    onViewCommitDiagnostics: () -> Unit = {}
 ) {
     val studyState by viewModel.studyState.collectAsStateWithLifecycle()
     val session by viewModel.currentSession.collectAsStateWithLifecycle()
@@ -259,10 +263,25 @@ fun StudyScreen(
                             actionLabel = when {
                                 recovery.canRetry -> "Retry same rating"
                                 recovery.canCheckAgain -> "Check again"
+                                recovery.canViewDiagnostics -> "View diagnostics"
                                 else -> null
                             },
-                            onAction = recoveryAction
+                            onAction = when {
+                                recovery.canRetry || recovery.canCheckAgain -> recoveryAction
+                                recovery.canViewDiagnostics -> onViewCommitDiagnostics
+                                else -> null
+                            }
                         )
+                        if (recovery.canOpenAnkiDroid || recovery.canViewDiagnostics) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.SM)) {
+                                if (recovery.canOpenAnkiDroid) {
+                                    TextButton(onClick = onOpenAnkiDroid) { Text("Open AnkiDroid") }
+                                }
+                                if (recovery.canViewDiagnostics && (recovery.canRetry || recovery.canCheckAgain)) {
+                                    TextButton(onClick = onViewCommitDiagnostics) { Text("View diagnostics") }
+                                }
+                            }
+                        }
                     }
 
                     // Error surface (§30): plain language here; details live in Diagnostics.

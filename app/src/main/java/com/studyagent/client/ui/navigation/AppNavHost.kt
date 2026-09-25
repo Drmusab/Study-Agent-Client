@@ -1,7 +1,9 @@
 package com.studyagent.client.ui.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import kotlinx.coroutines.launch
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -82,10 +84,13 @@ fun AppNavHost(
                     studyAudioRouteCoordinator = container.studyAudioRouteCoordinator
                 )
             }
+            val studyScope = rememberCoroutineScope()
             StudyScreen(
                 viewModel = studyViewModel,
                 onNavigateBack = { navController.popBackStack() },
-                onNavigateToConnection = { navController.navigate(Screen.Connection.route) }
+                onNavigateToConnection = { navController.navigate(Screen.Connection.route) },
+                onOpenAnkiDroid = { studyScope.launch { container.ankiDroidLauncher.open() } },
+                onViewCommitDiagnostics = { navController.navigate(Screen.Diagnostics.route) }
             )
         }
 

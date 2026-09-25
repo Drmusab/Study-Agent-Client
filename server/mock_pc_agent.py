@@ -630,6 +630,9 @@ async def handler(websocket, chaos_opts=None, server_opts=None):
                 await send_with_chaos(response)
 
             elif msg_type == "rate_card":
+                # review_commit_id is ignored. The message_id cache below is process memory only
+                # and is not advertised as review_commit_idempotency or commit_reconciliation.
+                _ = data.get("review_commit_id")
                 card_id = data.get("card_id")
                 rating = data.get("rating")
                 print(f"[★] Card {card_id} rated: {rating.upper()}")

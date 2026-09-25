@@ -18,7 +18,8 @@ class AnkiCommitHarness(
     cards: List<AnkiRenderedCard> = listOf(card("A"), card("B")),
     val store: InMemoryReviewCommitStore = InMemoryReviewCommitStore(),
     commitSteps: List<FakeAnkiBackend.CommitStep> = emptyList(),
-    nextErrors: List<AnkiError> = emptyList()
+    nextErrors: List<AnkiError> = emptyList(),
+    private val faults: CommitFaultInjector = NoCommitFaults
 ) {
     var now: Long = 10_000L
     val clock: () -> Long = { now }
@@ -26,7 +27,7 @@ class AnkiCommitHarness(
         commitSteps = commitSteps, nextErrors = nextErrors, instanceId = "gate11")
     var ledger = ReviewCommitLedger(store, clock)
         private set
-    var executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(fake)), ledger, clock)
+    var executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(fake)), ledger, clock, faults)
         private set
 
     var state = SessionMachineState.initial()
@@ -35,7 +36,7 @@ class AnkiCommitHarness(
 
     fun restartLedger() {
         ledger = store.restart(clock)
-        executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(fake)), ledger, clock)
+        executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(fake)), ledger, clock, faults)
     }
 
     fun send(event: StudyEvent): Transition = StudyReducer.reduce(state, event, now).also { t ->

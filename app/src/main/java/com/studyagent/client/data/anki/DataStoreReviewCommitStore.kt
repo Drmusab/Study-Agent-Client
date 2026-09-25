@@ -21,7 +21,7 @@ import kotlinx.coroutines.flow.first
  * is written, synced and atomically renamed before `edit` returns, so after process death the
  * snapshot is either the old one or the new one — never half of each.
  *
- * It is a dedicated file, and deliberately *without* a replace-on-corruption handler: the settings
+ * The file is excluded from backup and device transfer. It is deliberately *without* a replace-on-corruption handler: the settings
  * store resets to defaults when its file is corrupt, which here would silently forget AMBIGUOUS
  * commits. A corrupt ledger file surfaces as [ReviewCommitStoreRead.Unreadable], and the ledger fails closed
  * (commits refused before dispatch) instead of starting empty.

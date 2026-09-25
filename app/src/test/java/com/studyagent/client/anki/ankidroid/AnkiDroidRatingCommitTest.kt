@@ -6,8 +6,10 @@ import com.studyagent.client.core.models.Rating
 import com.studyagent.client.data.anki.ankidroid.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -258,6 +260,26 @@ class AnkiDroidRatingCommitTest {
         notApplied.onAnswer = { ProviderUpdateResult.Returned(-1) }
         assertTrue(notApplied.commit(notApplied.openTurn()).second is CommitRatingResult.Ambiguous)
         assertEquals(5, notApplied.model.reps)
+    }
+
+    @Test fun `a provider write already in flight is ambiguous and is not classified as safe to retry`() = runTest {
+        val r = rig()
+        val turn = r.openTurn()
+        val callsBefore = r.answerCalls
+        r.provider.updateHandlers["selected_deck"] = { delay(60_000); ProviderUpdateResult.Returned(1) }
+        val holder = backgroundScope.launch { r.gateway.selectDeck(authority, 99L) }
+        var spins = 0
+        while (!r.gateway.writeInFlight) {
+            check(spins++ < 100) { "write permit was never acquired" }
+            yield()
+        }
+        val (request, result) = r.commit(turn)
+        assertTrue(result is CommitRatingResult.Ambiguous)
+        assertFalse(result is CommitRatingResult.RetryableFailure)
+        assertEquals(callsBefore, r.answerCalls)
+        assertEquals(result, r.backend.commitRating(request))
+        assertEquals(callsBefore, r.answerCalls)
+        holder.cancel()
     }
 
     @Test fun `a hung provider call is AMBIGUOUS and blocks both a retry and reconciliation while in flight`() = runTest {

@@ -5,6 +5,7 @@ import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.ServerMessage
 import com.studyagent.client.core.network.ProtocolJson
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -46,6 +47,22 @@ class ProtocolJsonTest {
         val json = ProtocolJson.encodeClientMessage(msg)
         assertTrue(json.contains("\"type\":\"rate_card\""))
         assertTrue(json.contains("\"rating\":\"good\""))
+        assertFalse(json.contains("review_commit_id"))
+    }
+
+    @Test
+    fun testRateCardOmitsAbsentCommitIdAndKeepsItWhenSet() {
+        val absent = ProtocolJson.encodeClientMessage(
+            ClientMessage.RateCard(sessionId = "sess-123", cardId = "card-456", rating = Rating.GOOD)
+        )
+        assertFalse(absent.contains("review_commit_id"))
+        val present = ProtocolJson.encodeClientMessage(
+            ClientMessage.RateCard(
+                sessionId = "sess-123", cardId = "card-456", rating = Rating.GOOD,
+                reviewCommitId = "pc-review-commit:3:abc:4:turn"
+            )
+        )
+        assertTrue(present.contains("\"review_commit_id\":\"pc-review-commit:3:abc:4:turn\""))
     }
 
     @Test

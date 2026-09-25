@@ -516,7 +516,8 @@ object StudyReducer {
                 phase = SessionPhase.WaitingForFirstCard,
                 anki = local.copy(turn = null, transcript = null, turnPresentedAtMs = null,
                     commit = commit.copy(state = ReviewCommitState.COMMITTED, reconciling = false,
-                        safeToRetry = false, failureCategory = null)),
+                        safeToRetry = false, failureCategory = null,
+                        verifiedByReconciliation = reconciliation)),
                 cardTurn = null,
                 // Counters move only after COMMITTED (never on selection, failure or ambiguity).
                 session = state.session?.copy(totalReviewedInSession = state.session.totalReviewedInSession + 1),
@@ -939,7 +940,8 @@ object StudyReducer {
                 rating = event.rating,
                 messageId = msgId,
                 reviewTurnId = turn.turnId,
-                sessionRevision = turn.serverRevision
+                sessionRevision = turn.serverRevision,
+                reviewCommitId = state.session?.sessionId?.let { PcRatingReplayPolicy.logicalCommitId(it, turn.turnId) }
             )
         )
 

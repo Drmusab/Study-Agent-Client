@@ -306,4 +306,68 @@ class ReviewCommitLedgerTest {
             assertFalse(text, raw.contains(text, ignoreCase = true))
         }
     }
+
+    @Test fun `illegal transition is rejected before the snapshot changes`() = runTest {
+        val store = InMemoryReviewCommitStore()
+        val ledger = ReviewCommitLedger(store, clock)
+        val r = request()
+        val prepared = ledger.prepare(r) as ReviewCommitLedger.PrepareResult.Prepared
+        val before = store.snapshot
+        val rejected = ledger.transition(
+            r.commitId, ReviewCommitState.NOT_STARTED, prepared.record.version,
+            ReviewCommitTransition.MarkCommitted(CommitRatingResult.Committed(), "forged")
+        )
+        assertTrue(rejected is ReviewCommitLedger.TransitionResult.Rejected)
+        assertEquals(before, store.snapshot)
+        assertEquals(ReviewCommitState.NOT_STARTED, ledger.get(r.commitId)?.state)
+        assertEquals(0, ledger.diagnosticsSnapshot().successTotal)
+    }
+
+    @Test fun `stale version is not written`() = runTest {
+        val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), clock)
+        val r = request()
+        val prepared = ledger.prepare(r) as ReviewCommitLedger.PrepareResult.Prepared
+        val first = ledger.transition(
+            r.commitId, ReviewCommitState.NOT_STARTED, prepared.record.version,
+            ReviewCommitTransition.NoteAbandoned(abandonedAtEpochMs = 50L)
+        ) as ReviewCommitLedger.TransitionResult.Applied
+        val stale = ledger.transition(
+            r.commitId, ReviewCommitState.NOT_STARTED, prepared.record.version,
+            ReviewCommitTransition.NoteAbandoned(abandonedAtEpochMs = 99L)
+        )
+        assertTrue(stale is ReviewCommitLedger.TransitionResult.VersionMismatch ||
+            stale is ReviewCommitLedger.TransitionResult.StateMismatch)
+        assertEquals(50L, first.record.abandonedAtEpochMs)
+        assertEquals(ReviewCommitState.NOT_STARTED, ledger.get(r.commitId)?.state)
+        assertEquals(50L, ledger.get(r.commitId)?.abandonedAtEpochMs)
+    }
+
+    @Test fun `abandoning a commit does not change its state or make it retryable`() = runTest {
+        val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), clock)
+        val r = request()
+        enter(ledger, r)
+        ledger.markAmbiguous(r.commitId, "lost")
+        val noted = ledger.noteAbandoned(r.commitId, 80L)
+        assertEquals(ReviewCommitState.AMBIGUOUS, noted?.state)
+        assertFalse(noted!!.safeToRetry)
+        assertEquals(80L, noted.abandonedAtEpochMs)
+        assertTrue(ledger.claim(r.commitId, evidence, allowRetry = true) is ReviewCommitLedger.ClaimResult.NotClaimable)
+    }
+
+    @Test fun `pruned committed identity cannot be prepared again and unresolved rows stay`() = runTest {
+        val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), clock)
+        val committed = request(turn = "done", session = "s-done")
+        enter(ledger, committed)
+        finish(ledger, committed, CommitRatingResult.Committed())
+        val ambiguous = request(turn = "open", session = "s-open")
+        enter(ledger, ambiguous)
+        ledger.markAmbiguous(ambiguous.commitId, "lost")
+        now = 10_000L
+        assertEquals(1, ledger.pruneCommitted(olderThanEpochMs = 9_000L))
+        assertTrue(ledger.get(committed.commitId) == null)
+        assertEquals(ReviewCommitState.AMBIGUOUS, ledger.get(ambiguous.commitId)?.state)
+        assertTrue(ledger.prepare(committed) is ReviewCommitLedger.PrepareResult.Tombstoned)
+        assertEquals(1, ledger.unresolved().size)
+    }
+
 }
