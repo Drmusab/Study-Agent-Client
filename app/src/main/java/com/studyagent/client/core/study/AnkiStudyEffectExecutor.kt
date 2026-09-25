@@ -4,6 +4,7 @@ import com.studyagent.client.core.anki.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Performs Anki effects in the caller's owned coroutine and reports them as events. It never writes
@@ -13,10 +14,11 @@ import kotlinx.coroutines.withContext
  *
  * 1. `ledger.prepare` — NOT_STARTED durable (or the existing record for this commit id);
  * 2. `backend.prepareCommit` — read-only baseline evidence (first attempt only);
- * 3. `ledger.claim` — compare-and-set to SUBMITTING, durable *before* the backend is called;
- * 4. `backend.commitRating` — the only mutation;
- * 5. `ledger.complete` — the classified outcome, durable;
- * 6. emit [AnkiStudyEvent.RatingCommitResolved] correlated by epoch + commit id.
+ * 3. `ledger.claim` → SUBMITTING/PREPARED (durable, CAS);
+ * 4. backend preflight → `ledger.markMutationEntered` callback (durable) immediately before
+ *    the real scheduler mutation; adapters without preflight mark before `backend.commitRating`;
+ * 5. persist the classified response, then terminal state/LOCAL_RESULT_PERSISTED;
+ * 6. emit a success only after that final write is durable. A write failure blocks progression.
  *
  * Without a [ledger] there is no exactly-once guarantee across process death, so commits are
  * refused before dispatch (fail closed). A COMMITTED or AMBIGUOUS ledger record is answered from
@@ -27,6 +29,9 @@ class AnkiStudyEffectExecutor(
     private val ledger: ReviewCommitLedger? = null,
     private val clock: () -> Long = System::currentTimeMillis
 ) {
+    /** Known only while this process lives. A lost durable response never authorizes replay. */
+    private val unpersistedResponses = ConcurrentHashMap<ReviewCommitId, CommitRatingResult>()
+
     /**
      * Executes [effect]. [emit] receives intermediate events (commit started); the return value is
      * the final event, or `null` when there is nothing to report (for example a duplicate commit
@@ -53,11 +58,7 @@ class AnkiStudyEffectExecutor(
     private suspend fun read(effect: AnkiStudyEffect): AnkiStudyEvent? {
         return try {
             when (effect) {
-                is AnkiStudyEffect.Begin -> {
-                    val result = begin(effect)
-                    val prior = if (result is AnkiResult.Success) priorUnresolved(result.value.context.backendId) else 0
-                    AnkiStudyEvent.Begun(effect.epoch, result, prior)
-                }
+                is AnkiStudyEffect.Begin -> begin(effect)
                 is AnkiStudyEffect.Next -> AnkiStudyEvent.Scheduled(
                     effect.epoch,
                     registry.find(effect.session.context.backendId)?.nextCard(effect.session)
@@ -92,30 +93,40 @@ class AnkiStudyEffectExecutor(
         0
     }
 
-    private suspend fun begin(effect: AnkiStudyEffect.Begin): AnkiResult<AnkiReviewSession> {
+    private suspend fun begin(effect: AnkiStudyEffect.Begin): AnkiStudyEvent {
         val request = effect.request
-        // Only startup probes candidates. All subsequent reads use the locked logical identity.
+        fun failed(error: AnkiError) = AnkiStudyEvent.Begun(effect.epoch, AnkiResult.Failure(error))
+        // Only startup probes candidates. No scheduler query is issued before the recovery scan.
         registry.ids.filter(request.preference::accepts).forEach { registry.find(it)?.refreshAvailability() }
         val resolution = AnkiBackendSelector(registry).resolve(request.preference)
         val id = when (resolution) {
             is AnkiBackendSelector.Resolution.Resolved -> resolution.backendId
-            is AnkiBackendSelector.Resolution.Unavailable -> return AnkiResult.Failure(resolution.error)
-            is AnkiBackendSelector.Resolution.Ambiguous -> return AnkiResult.Failure(AnkiError.InvalidRequest("ambiguous_backend"))
+            is AnkiBackendSelector.Resolution.Unavailable -> return failed(resolution.error)
+            is AnkiBackendSelector.Resolution.Ambiguous -> return failed(AnkiError.InvalidRequest("ambiguous_backend"))
         }
-        if (request.deck.backendId != id) return AnkiResult.Failure(AnkiError.InvalidRequest("foreign_deck"))
-        val backend = registry.find(id) ?: return AnkiResult.Failure(AnkiError.BackendUnavailable())
-        // Validate before binding, even for implementations whose beginReview is less strict.
+        if (request.deck.backendId != id) return failed(AnkiError.InvalidRequest("foreign_deck"))
+        val backend = registry.find(id) ?: return failed(AnkiError.BackendUnavailable())
+        if (ledger != null) {
+            if (ledger.health() !is ReviewCommitLedger.Health.Ready) {
+                return failed(AnkiError.CommitLedgerUnavailable())
+            }
+            ledger.recoveryBlocker(id, request.deck.collectionKey, request.studySessionId)?.let {
+                return AnkiStudyEvent.RecoveryBlocked(effect.epoch, it)
+            }
+        }
         when (val decks = backend.getDecks()) {
-            is AnkiResult.Failure -> return decks
+            is AnkiResult.Failure -> return failed(decks.error)
             is AnkiResult.Success -> if (decks.value.none { it.ref == request.deck }) {
-                return AnkiResult.Failure(AnkiError.DeckNotFound(request.deck))
+                return failed(AnkiError.DeckNotFound(request.deck))
             }
         }
         val context = AnkiSessionContext(
             id, request.deck.collectionKey?.let { AnkiCollectionIdentity(id, it) }, request.deck,
             effect.startedAtMs, backend.capabilities.value, request.studySessionId
         )
-        return backend.beginReview(BeginReviewRequest(context))
+        val result = backend.beginReview(BeginReviewRequest(context))
+        val prior = if (result is AnkiResult.Success) priorUnresolved(id) else 0
+        return AnkiStudyEvent.Begun(effect.epoch, result, prior)
     }
 
     // ---------------------------------------------------------------- GATE 11 commit
@@ -129,7 +140,8 @@ class AnkiStudyEffectExecutor(
         fun resolved(outcome: AnkiCommitOutcome) = AnkiStudyEvent.RatingCommitResolved(effect.epoch, commitId, outcome)
         fun refused(category: String, safe: Boolean) = resolved(AnkiCommitOutcome.Failed(category, safe, dispatched = false))
 
-        val ledger = this.ledger ?: return refused("ledger_unavailable", safe = false)
+        val ledger = this.ledger ?: return resolved(AnkiCommitOutcome.PersistenceFailure("ledger_unavailable"))
+        fun storageFault(category: String) = resolved(AnkiCommitOutcome.PersistenceFailure(category))
 
         // 1. CommitPrepared — NOT_STARTED durable, or the existing record for this identity.
         val record = when (val prepared = ledger.prepare(request)) {
@@ -137,9 +149,9 @@ class AnkiStudyEffectExecutor(
             is ReviewCommitLedger.PrepareResult.Existing -> prepared.record
             // The recorded rating is immutable: a different payload for this id is never sent.
             is ReviewCommitLedger.PrepareResult.Conflict -> return refused("commit_payload_conflict", safe = false)
-            ReviewCommitLedger.PrepareResult.Full -> return refused("ledger_full", safe = false)
-            is ReviewCommitLedger.PrepareResult.StoreFailed -> return refused("ledger_write_failed", safe = true)
-            is ReviewCommitLedger.PrepareResult.Unavailable -> return refused("ledger_unavailable", safe = false)
+            ReviewCommitLedger.PrepareResult.Full -> return storageFault("ledger_full")
+            is ReviewCommitLedger.PrepareResult.StoreFailed -> return storageFault("commit_persistence_failure")
+            is ReviewCommitLedger.PrepareResult.Unavailable -> return storageFault("ledger_unavailable")
         }
         // Answer from the ledger whenever the record is not claimable by this effect.
         when (record.state) {
@@ -152,8 +164,8 @@ class AnkiStudyEffectExecutor(
 
         val backend = registry.find(commitId.backendId)
         if (backend == null) {
-            ledger.markRefused(commitId, "backend_missing", safeToRetry = true)
-            return refused("backend_missing", safe = true)
+            val saved = ledger.markRefused(commitId, "backend_missing", safeToRetry = true)
+            return if (saved != null) resolved(saved.toOutcome()) else storageFault("commit_persistence_failure")
         }
 
         // 2. Read-only baseline evidence, captured once and then immutable in the ledger.
@@ -169,8 +181,8 @@ class AnkiStudyEffectExecutor(
             when (preparation) {
                 is CommitPreparation.Refused -> {
                     val category = preparation.error.commitCategory()
-                    ledger.markRefused(commitId, category, preparation.retryable)
-                    return refused(category, preparation.retryable)
+                    val saved = ledger.markRefused(commitId, category, preparation.retryable)
+                    return if (saved != null) resolved(saved.toOutcome()) else storageFault("commit_persistence_failure")
                 }
                 is CommitPreparation.Ready -> evidence = preparation.evidence
             }
@@ -182,38 +194,106 @@ class AnkiStudyEffectExecutor(
             is ReviewCommitLedger.ClaimResult.InFlight -> return null
             is ReviewCommitLedger.ClaimResult.AlreadyCommitted -> return resolved(AnkiCommitOutcome.Committed("ledger_replay"))
             is ReviewCommitLedger.ClaimResult.NotClaimable -> return resolved(claim.record.toOutcome())
-            ReviewCommitLedger.ClaimResult.Missing -> return refused("ledger_record_missing", safe = false)
-            // SUBMITTING never became durable, so the backend was not called: safe to retry.
-            is ReviewCommitLedger.ClaimResult.StoreFailed -> return refused("ledger_write_failed", safe = true)
-            is ReviewCommitLedger.ClaimResult.Unavailable -> return refused("ledger_unavailable", safe = false)
+            ReviewCommitLedger.ClaimResult.Missing -> return storageFault("ledger_record_missing")
+            is ReviewCommitLedger.ClaimResult.StoreFailed -> return storageFault("commit_persistence_failure")
+            is ReviewCommitLedger.ClaimResult.Unavailable -> return storageFault("ledger_unavailable")
         }
         emit(AnkiStudyEvent.RatingCommitStarted(effect.epoch, commitId, claimed.attemptCount))
 
-        // 4. The mutation. From here on, anything that is not a classified result is AMBIGUOUS.
-        val result = try {
-            backend.commitRating(claimed.toRequest())
+        // The backend may perform preflight while PREPARED. Its boundary callback persists
+        // CALL_ENTERED immediately before the real scheduler API. A failed write prevents it.
+        var mutationEntered = false
+        var boundaryFault = false
+        val backendResult = try {
+            backend.commitRating(claimed.toRequest()) {
+                if (mutationEntered) {
+                    boundaryFault = true // a second callback is not another authorized dispatch
+                    false
+                } else {
+                    val saved = withContext(NonCancellable) { ledger.markMutationEntered(commitId) }
+                    mutationEntered = saved != null
+                    if (!mutationEntered) boundaryFault = true
+                    mutationEntered
+                }
+            }
         } catch (cancelled: CancellationException) {
-            withContext(NonCancellable) { ledger.markAmbiguous(commitId, "cancelled_after_dispatch") }
+            withContext(NonCancellable) {
+                if (mutationEntered) ledger.markAmbiguous(commitId, "cancelled_after_dispatch")
+                else ledger.markPreparedFailure(commitId)
+            }
             throw cancelled
         } catch (_: Exception) {
-            CommitRatingResult.Ambiguous(AnkiError.Unknown("commit_threw"))
+            if (mutationEntered) CommitRatingResult.Ambiguous(AnkiError.Unknown("commit_threw"))
+            else CommitRatingResult.RetryableFailure(AnkiError.Unknown("preflight_threw"))
+        }
+        if (boundaryFault && !mutationEntered) return storageFault("commit_persistence_failure")
+        val result = if (boundaryFault) CommitRatingResult.Ambiguous(AnkiError.Unknown("boundary_called_twice"))
+            else backendResult
+        if (!mutationEntered) {
+            // A result before the callback is a PREPARED-side refusal. A claimed success or
+            // unknown result without entering is a backend contract violation: NEVER advance.
+            val final = withContext(NonCancellable) {
+                when (result) {
+                    is CommitRatingResult.RetryableFailure -> ledger.markPreparedFailure(commitId,
+                        result.error.commitCategory(), safeToRetry = true)
+                    is CommitRatingResult.Rejected -> ledger.markPreparedFailure(commitId,
+                        result.error.commitCategory(), safeToRetry = false)
+                    is CommitRatingResult.Committed, is CommitRatingResult.Ambiguous ->
+                        ledger.markBoundaryViolation(commitId)
+                }
+            } ?: return storageFault("commit_persistence_failure")
+            return resolved(final.toOutcome())
         }
 
-        // 5. Persist the outcome before anyone can act on it.
+        // A backend result in memory alone is not authority to move to the next card.
+        unpersistedResponses[commitId] = result
+        withContext(NonCancellable) { ledger.markResponseReceived(commitId, result) }
+            ?: return storageFault("commit_persistence_failure")
         val final = withContext(NonCancellable) { ledger.complete(commitId, result) }
-            ?: return resolved(AnkiCommitOutcome.Ambiguous("ledger_unavailable_after_dispatch"))
+            ?: return storageFault("commit_persistence_failure")
+        unpersistedResponses.remove(commitId)
         return resolved(final.toOutcome(committedSource = "backend_confirmed"))
     }
 
     private suspend fun reconcile(effect: AnkiStudyEffect.ReconcileCommit): AnkiStudyEvent {
         val commitId = effect.commitId
         fun done(outcome: AnkiCommitOutcome) = AnkiStudyEvent.RatingCommitReconciled(effect.epoch, commitId, outcome)
-        val ledger = this.ledger ?: return done(AnkiCommitOutcome.Ambiguous("ledger_unavailable"))
-        val record = ledger.get(commitId) ?: return done(AnkiCommitOutcome.Ambiguous("ledger_record_missing"))
-        // Already decided (for example by a concurrent attempt): report the durable truth.
+        fun storageFault() = done(AnkiCommitOutcome.PersistenceFailure("commit_persistence_failure"))
+        val ledger = this.ledger ?: return storageFault()
+        var record = ledger.get(commitId) ?: return storageFault()
+
+        // First recover a *known* in-process response without calling the backend. If only a
+        // durable RESPONSE_RECEIVED marker survived, finalize that instead. A failed write blocks.
+        if (record.state == ReviewCommitState.SUBMITTING) {
+            val result = unpersistedResponses[commitId]
+            if (result != null && record.phase == CommitAttemptPhase.MUTATION_CALL_ENTERED) {
+                record = withContext(NonCancellable) { ledger.markResponseReceived(commitId, result) }
+                    ?: return storageFault()
+            }
+            if (record.phase == CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED) {
+                record = withContext(NonCancellable) {
+                    if (result != null) ledger.complete(commitId, result)
+                    else ledger.finalizeRecordedResponse(commitId)
+                } ?: return storageFault()
+                unpersistedResponses.remove(commitId)
+            } else if (record.phase == CommitAttemptPhase.PREPARED) {
+                record = withContext(NonCancellable) { ledger.markPreparedFailure(commitId) }
+                    ?: return storageFault()
+            } else if (record.phase == CommitAttemptPhase.MUTATION_CALL_ENTERED) {
+                record = withContext(NonCancellable) { ledger.markAmbiguous(commitId, "outcome_not_durable") }
+                    ?: return storageFault()
+            }
+        }
         if (record.state != ReviewCommitState.AMBIGUOUS) return done(record.toOutcome(committedSource = "reconciled"))
         val backend = registry.find(commitId.backendId)
             ?: return done(AnkiCommitOutcome.Ambiguous("backend_missing"))
+        if (record.card.backendId != backend.id || record.deckRef?.backendId?.let { it != backend.id } == true) {
+            return done(AnkiCommitOutcome.Ambiguous("backend_identity_mismatch"))
+        }
+        // A backend that only observes counters/time cannot turn them into transaction truth.
+        if (!backend.commitSemantics.supportsAuthoritativeReconciliation) {
+            return done(AnkiCommitOutcome.Ambiguous("authoritative_reconciliation_unavailable"))
+        }
         val submittedAt = record.submittedAtEpochMs ?: record.createdAtEpochMs
         val windowEnd = maxOf(submittedAt, record.resolvedAtEpochMs ?: clock())
         val result = try {
@@ -225,7 +305,8 @@ class AnkiStudyEffectExecutor(
         } catch (_: Exception) {
             ReconcileCommitResult.StillAmbiguous("reconcile_threw")
         }
-        val updated = withContext(NonCancellable) { ledger.reconcile(commitId, result) } ?: record
+        val updated = withContext(NonCancellable) { ledger.reconcile(commitId, result) }
+            ?: return storageFault()
         return done(updated.toOutcome(committedSource = "reconciled"))
     }
 

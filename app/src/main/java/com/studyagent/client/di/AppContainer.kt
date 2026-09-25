@@ -452,7 +452,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             ankiDroidHealthRepository = ankiDroidHealthRepository,
             // GATE 04: gateway + backend for capability matrix (§64/§121)
             ankiDroidGateway = ankiDroidGateway,
-            ankiDroidBackend = ankiDroidBackend as? AnkiDroidBackend
+            ankiDroidBackend = ankiDroidBackend as? AnkiDroidBackend,
+            reviewCommitLedger = reviewCommitLedger
         )
     }
 

@@ -117,6 +117,11 @@ sealed interface AnkiError {
         override val message: String = "The review session is invalid or no longer owned by this backend."
     ) : AnkiError
 
+    /** The transaction record cannot be trusted or persisted; never enter the mutation boundary. */
+    data class CommitLedgerUnavailable(
+        override val message: String = "Review history could not be verified. No rating was submitted."
+    ) : AnkiError
+
     data class StaleTurn(
         override val message: String = "The rating does not belong to the active review turn."
     ) : AnkiError

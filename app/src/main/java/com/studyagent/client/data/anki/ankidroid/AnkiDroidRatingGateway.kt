@@ -70,12 +70,6 @@ sealed interface AnkiDroidAnswerDispatch {
     /** Refused before any IPC: provably not dispatched, provably not applied. */
     data class NotDispatched(val error: AnkiError) : AnkiDroidAnswerDispatch
 
-    /**
-     * The provider refused before touching the scheduler — the exception classes the pinned
-     * provider raises only *before* `answerCard` (`SecurityException`, `IllegalArgumentException`).
-     */
-    data class RejectedBeforeMutation(val error: AnkiError, val exceptionClass: String) : AnkiDroidAnswerDispatch
-
     /** The provider returned. `1` is NOT proof of mutation at v2.24.1 (swallowed exceptions). */
     data class Returned(val rowCount: Int) : AnkiDroidAnswerDispatch
 
@@ -224,13 +218,11 @@ class DefaultAnkiDroidRatingGateway(
             is ProviderUpdateResult.Returned -> AnkiDroidAnswerDispatch.Returned(result.rowCount)
             is ProviderUpdateResult.NotDispatched ->
                 AnkiDroidAnswerDispatch.NotDispatched(AnkiError.QueryFailure(result.reason))
-            is ProviderUpdateResult.Threw -> when (result.exceptionClass) {
-                // Raised by the pinned provider only before the scheduler is touched: the permission
-                // check is its first statement; unknown URI / note / ord fail in lookup before answering.
-                "SecurityException" -> AnkiDroidAnswerDispatch.RejectedBeforeMutation(AnkiError.PermissionRequired(), result.exceptionClass)
-                "IllegalArgumentException" -> AnkiDroidAnswerDispatch.RejectedBeforeMutation(
-                    AnkiDroidErrorMapper.mapFailure(result.failure, "answer"), result.exceptionClass)
-                else -> AnkiDroidAnswerDispatch.Unknown("answer_threw_${result.exceptionClass}", callMayStillBeRunning = false)
+            is ProviderUpdateResult.Threw -> {
+                // The exception *class* is not a transaction receipt. Even a permission error may
+                // be delivered after a partial provider operation on an unverified version. Only
+                // NotDispatched (before IPC) can claim safe retry here.
+                AnkiDroidAnswerDispatch.Unknown("answer_threw_${result.exceptionClass}", callMayStillBeRunning = false)
             }
         }
     }

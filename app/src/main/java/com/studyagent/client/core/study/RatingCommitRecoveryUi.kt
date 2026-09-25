@@ -3,28 +3,20 @@ package com.studyagent.client.core.study
 import com.studyagent.client.core.anki.ReviewCommitState
 import com.studyagent.client.core.models.Rating
 
-/**
- * GATE 11 — backend-neutral presentation model for the current rating transaction (STEP 60-§62,
- * §91-§94). Derived purely from [SessionMachineState]; the UI renders it and dispatches intents. It
- * never inspects which backend is active and never offers a blind re-rate: while a rating is being
- * saved, not saved, or unconfirmed, the rating controls stay disabled.
- */
+/** Pure presentation model. Buttons are never the transaction safety mechanism. */
 data class RatingCommitRecoveryUi(
     val status: Status,
-    /** The rating being saved / not saved / unconfirmed; `null` only for [Status.EARLIER_UNCONFIRMED]. */
     val rating: Rating?,
     val title: String,
     val message: String,
-    /** Retry the *same* commit (same id, same rating). Only when the failure is proven safe. */
+    /** Only a durable, proven-not-applied attempt with its original live turn may be retried. */
     val canRetry: Boolean,
-    /** Ask the backend for reconciliation evidence. Only for an unconfirmed (AMBIGUOUS) rating. */
+    /** Evidence gathering / retrying a *ledger write*, never re-rating the card. */
     val canCheckAgain: Boolean,
-    /** Ending the session is always available while a rating transaction is unresolved. */
     val canEndSession: Boolean,
-    /** False while this session's transaction is pending or unresolved (duplicate-input safety). */
     val ratingControlsEnabled: Boolean = false
 ) {
-    enum class Status { SAVING, NOT_SAVED, UNCONFIRMED, CHECKING, EARLIER_UNCONFIRMED }
+    enum class Status { SAVING, NOT_SAVED, UNCONFIRMED, CHECKING, PERSISTENCE_FAULT, SAVED, EARLIER_UNCONFIRMED }
 
     companion object {
         fun from(machine: SessionMachineState): RatingCommitRecoveryUi? {
@@ -33,23 +25,32 @@ data class RatingCommitRecoveryUi(
             val rating = commit?.rating
             val label = rating?.displayName ?: ""
             return when {
+                commit != null && machine.phase is SessionPhase.CommitPersistenceFailure ->
+                    RatingCommitRecoveryUi(Status.PERSISTENCE_FAULT, rating, "Review record could not be saved",
+                        "Study-Agent could not safely record the review result. It will not submit the rating " +
+                            "again or load another card. Check the record again or end the session.",
+                        canRetry = false, canCheckAgain = !commit.reconciling, canEndSession = true)
+
+                commit != null && local.restoredCommit && machine.phase is SessionPhase.RatingCommitFailed ->
+                    RatingCommitRecoveryUi(Status.NOT_SAVED, rating, "Review interrupted",
+                        "The original review turn cannot be resumed after restart. Study-Agent will not " +
+                            "send this rating again. End this session, then start a new review if needed.",
+                        canRetry = false, canCheckAgain = false, canEndSession = true)
+
                 commit != null && commit.isPending && machine.phase is SessionPhase.SubmittingRating ->
-                    RatingCommitRecoveryUi(
-                        Status.SAVING, rating, "Saving rating",
+                    RatingCommitRecoveryUi(Status.SAVING, rating, "Saving rating",
                         "Saving \u201c$label\u201d to Anki\u2026",
-                        canRetry = false, canCheckAgain = false, canEndSession = true
-                    )
+                        canRetry = false, canCheckAgain = false, canEndSession = true)
 
                 commit != null && commit.state == ReviewCommitState.FAILED &&
-                    machine.phase is SessionPhase.RatingCommitFailed ->
-                    RatingCommitRecoveryUi(
-                        Status.NOT_SAVED, rating, "Rating not saved",
-                        if (commit.safeToRetry) "Anki did not save \u201c$label\u201d. Nothing was changed. " +
+                    machine.phase is SessionPhase.RatingCommitFailed -> {
+                    val retryable = commit.safeToRetry && local.turn != null && !local.restoredCommit
+                    RatingCommitRecoveryUi(Status.NOT_SAVED, rating, "Rating not saved",
+                        if (retryable) "Anki did not save \u201c$label\u201d. Nothing was changed. " +
                             "You can retry the same rating or end the session."
-                        else "Anki did not accept \u201c$label\u201d. Nothing was changed. End the session; " +
-                            "Anki will show the card again when it is due.",
-                        canRetry = commit.safeToRetry, canCheckAgain = false, canEndSession = true
-                    )
+                        else "Anki did not accept \u201c$label\u201d. Nothing was changed. End the session.",
+                        canRetry = retryable, canCheckAgain = false, canEndSession = true)
+                }
 
                 commit != null && commit.state == ReviewCommitState.AMBIGUOUS &&
                     machine.phase is SessionPhase.ReconciliationRequired ->
@@ -58,23 +59,24 @@ data class RatingCommitRecoveryUi(
                         "Checking whether Anki saved \u201c$label\u201d\u2026",
                         canRetry = false, canCheckAgain = false, canEndSession = true
                     ) else RatingCommitRecoveryUi(
-                        Status.UNCONFIRMED, rating, "Rating not confirmed",
-                        "Study-Agent cannot confirm whether Anki saved \u201c$label\u201d, so it will not send it " +
-                            "again. Check again, or end the session \u2014 a new session asks Anki's scheduler " +
-                            "which card is next.",
+                        Status.UNCONFIRMED, rating, "Review status uncertain",
+                        "The rating may already have been saved in Anki. Study-Agent will not " +
+                            "submit it again until the review state can be verified.",
                         canRetry = false, canCheckAgain = true, canEndSession = true
                     )
 
-                commit == null && local.priorUnresolvedCommits > 0 && machine.phase.isActive ->
-                    RatingCommitRecoveryUi(
-                        Status.EARLIER_UNCONFIRMED, null, "Earlier rating not confirmed",
-                        "${local.priorUnresolvedCommits} earlier rating(s) could not be confirmed. They will " +
-                            "not be re-sent; Anki's scheduler decides which card comes next.",
-                        canRetry = false, canCheckAgain = false, canEndSession = false,
-                        // Informational only: the current turn is rated normally.
-                        ratingControlsEnabled = true
-                    )
+                commit != null && commit.state == ReviewCommitState.COMMITTED &&
+                    machine.phase is SessionPhase.WaitingForFirstCard ->
+                    RatingCommitRecoveryUi(Status.SAVED, rating, "Rating saved",
+                        "Loading the next scheduled card\u2026",
+                        canRetry = false, canCheckAgain = false, canEndSession = true)
 
+                commit == null && local.priorUnresolvedCommits > 0 && machine.phase.isActive ->
+                    RatingCommitRecoveryUi(Status.EARLIER_UNCONFIRMED, null, "Earlier rating not confirmed",
+                        "${local.priorUnresolvedCommits} earlier rating(s) remain unresolved in another " +
+                            "session or collection. They will not be re-sent.",
+                        canRetry = false, canCheckAgain = false, canEndSession = false,
+                        ratingControlsEnabled = true)
                 else -> null
             }
         }

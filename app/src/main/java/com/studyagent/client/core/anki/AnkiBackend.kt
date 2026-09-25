@@ -13,6 +13,9 @@ interface AnkiBackend {
     val availability: StateFlow<AnkiAvailability>
     val capabilities: StateFlow<AnkiCapabilities>
 
+    /** Effect semantics, not UI capability. Unverified adapters cannot claim safe replay. */
+    val commitSemantics: CommitSemantics get() = CommitSemantics.UNVERIFIED
+
     suspend fun refreshAvailability()
 
     /**
@@ -84,11 +87,10 @@ interface AnkiBackend {
      * GATE 11 — read-only preparation of one rating transaction, called *before* the ledger marks
      * the commit SUBMITTING.
      *
-     * A backend that can verify its own writes returns [CommitPreparation.Ready] with opaque
-     * [ReviewCommitEvidence] (for AnkiDroid: the card's stored review counters). The evidence is
-     * persisted with SUBMITTING, so a commit interrupted by process death can still be reconciled
-     * against the state that existed before the mutation. [CommitPreparation.Refused] is a
-     * pre-mutation refusal: nothing was written.
+     * A backend may return [CommitPreparation.Ready] with opaque, content-free baseline
+     * [ReviewCommitEvidence] (for AnkiDroid: card counters). This snapshot is NOT a commit receipt:
+     * it only assists a backend with an independent commit-correlated status API. It is persisted
+     * with PREPARED for recovery. [CommitPreparation.Refused] is a pre-mutation refusal.
      *
      * The default is "no evidence concept": commits still work, but reconciliation stays
      * [ReconcileCommitResult.Unsupported] — honest, never fabricated certainty.
@@ -106,6 +108,19 @@ interface AnkiBackend {
      * after dispatch — is `Ambiguous`. "No exception" is not proof of success.
      */
     suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult
+
+    /**
+     * Transaction executor's durable boundary. [mutationEntry] MUST be called once, after any
+     * read-only preflight but immediately BEFORE invoking the real scheduler mutation. A backend
+     * must not invoke that mutation if this callback returns false. If it returns before calling
+     * the callback it certifies that no scheduler mutation was dispatched by this attempt.
+     * The default has no separate preflight: it writes the marker before [commitRating].
+     * AnkiDroid overrides this so its queue/deck checks stay on the PREPARED side of the boundary.
+     */
+    suspend fun commitRating(request: CommitRatingRequest, mutationEntry: suspend () -> Boolean): CommitRatingResult {
+        if (!mutationEntry()) return CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable())
+        return commitRating(request)
+    }
 
     /**
      * GATE 11 — decide an AMBIGUOUS commit from backend-observable evidence, *without* mutating.
@@ -221,13 +236,17 @@ data class CommitRatingRequest(
     val rating: Rating,
     val ratedAtEpochMs: Long,
     val answerDurationMs: Long? = null,
-    val evidence: ReviewCommitEvidence? = null
+    val evidence: ReviewCommitEvidence? = null,
+    /** The deck bound to the turn; identity only, for restore/integrity checks. */
+    val deckRef: AnkiDeckRef? = null
 ) {
     val sessionId: String get() = commitId.studySessionId
     val turnId: ReviewTurnId get() = commitId.turnId
 
     init {
         require(commitId.backendId == card.backendId)
+        require(deckRef == null || (deckRef.backendId == card.backendId &&
+            (deckRef.collectionKey == null || card.collectionKey == null || deckRef.collectionKey == card.collectionKey)))
         require(ratedAtEpochMs >= 0)
         require(answerDurationMs == null || answerDurationMs >= 0)
     }

@@ -43,7 +43,7 @@ re-open this contract — not to violate it quietly.
 | Cards | `StudyCard(id, question, cardNumber, remaining, deckName)` — flat text, protocol-shaped | `core/models/StudyCard.kt`, `ProtocolMessages.kt` (`ServerMessage.Question`) |
 | Rating | `Rating(AGAIN/HARD/GOOD/EASY)` — domain-neutral 4-button rating | `core/models/Rating.kt` |
 | Review-turn identity | `CardTurn.turnId` = server `review_turn_id` (v2) else `epoch:cardId:generation` | `core/study/CardTurn.kt` |
-| Exactly-once | `SubmissionLedger` (per-turn answer/rating state) + `PendingAction` timeouts + `recentServerMessageIds` dedup | `core/study/` |
+| Local duplicate suppression (not backend exactly-once) | `SubmissionLedger` (per-turn state) + `PendingAction` + recent transport message-ID dedup | `core/study/` |
 | Reconciliation | `SessionReconciler` + `StudySnapshot` against PC protocol snapshots | `core/study/` |
 | Decks | `DeckSummary(name, due/new/learning/total counts)` via `request_decks`; cached in `ManagementCacheStorage`; picked in `DeckPicker` | `data/repository/DashboardRepository.kt`, `core/models/DashboardModels.kt` |
 | Session start | `HomeViewModel.startStudy()` refuses when `!connectionState.value.isConnected`; reducer sends `ClientMessage.StartSession` | `ui/screens/home/HomeViewModel.kt`, `core/study/StudyReducer.kt` |
@@ -407,16 +407,12 @@ commit sent → backend applies rating → process/network dies → no ACK
 Blind resend = double-commit risk. Study-Agent must not do it.
 ```
 
-**Exactly-once (INV-02, §29):** one ReviewTurn causes at most one scheduling
-mutation. Mechanism, per backend (implemented in later gates):
-
-- PC Agent: idempotency key = `ReviewCommitId.stableKey` attached to the
-  commit; agent deduplicates (extends the existing `message_id` discipline).
-- AnkiDroid: local **commit ledger** (committed/ambiguous sets, keyed by
-  `ReviewCommitId`) + reconciliation query before advancing (card already
-  answered ⇒ treat as committed) — GATE 06 owns this.
-- GATE 01 defines the invariant; later gates implement it and the **contract
-  tests** (§16.2) verify every backend against it.
+**GATE 11 correction (ADR 0008):** the intended one-effect-per-turn invariant is not
+an unqualified end-to-end guarantee. AnkiDroid has durable local intent, one serialized
+mutation attempt and no blind replay after uncertainty; its card state cannot prove a
+lost mutation's logical ID. The PC Agent mock only caches transport `message_id` values
+in memory and has no verified durable logical-commit table. The guarantee matrix and
+non-claims in the GATE 11 section supersede this earlier architectural aspiration.
 
 ---
 
@@ -1206,7 +1202,7 @@ re-probed and recovery policy must define which original facts remain authoritat
 
 Commit identity is `(backendId, studySessionId, turnId)`. Request adds the card ref,
 user rating, rated-at epoch milliseconds and optional answer duration; no HTML. Same ID
-with changed rating/card/timing payload is a conflict once accepted for submission.
+with changed rating/card/deck is a conflict once accepted; timing is not transaction identity.
 An exact duplicate can be acknowledged from a ledger without a second mutation, even
 if its ACK retry arrives after the next card is active. An unknown/stale turn is rejected.
 
@@ -1370,7 +1366,7 @@ Answered           ← GATE 07+: rendered content, user answer
     ↓
 Awaiting Rating    ← GATE 10: StudySessionMachine owns the turn lifecycle
     ↓
-Committed          ← GATE 11: rating mutation, exactly-once ledger
+Committed          ← GATE 11: rating mutation + durable result (backend guarantee limits below)
 ```
 
 GATE 06 implements the first two states. The later states are named so that the *order* is fixed
@@ -1585,73 +1581,54 @@ media URI/stream. Consequently the current adapter reports media as `PROVIDER_UN
 than deriving a private AnkiDroid path. See [`ANKI_WEBVIEW_SECURITY.md`](ANKI_WEBVIEW_SECURITY.md)
 for the actual policy matrix and residual risks.
 
-## GATE 11 — Rating commit, durable ledger and exactly-once reliability
+## GATE 11 — Rating commit, durable attempt phases and exactly-once limits
 
-### Layering (who may do what)
+**Normative correction:** ADR [0008](adr/0008-durable-review-attempts-and-exactly-once-limits.md) supersedes earlier aspirational “exactly-once scheduling”/card-state-reconciliation statements in this document and ADR 0007. The implementation enforces **at-most-once delivery with fail-closed ambiguity** for AnkiDroid, not end-to-end exactly-once. See the explicit guarantee matrix below.
+
+### Roles and identity
 
 ```text
-UI (StudyScreen / RatingCommitRecoveryUi)      renders state, dispatches intents; never sees a backend
-  └─ StudySessionMachine ── StudyReducer        pure: SelectRating → CommitRating effect; COMMITTED → Next
-        └─ AnkiStudyEffectExecutor               ledger prepare → prepareCommit → ledger claim → commitRating
-              ├─ ReviewCommitLedger (core/anki)  durable, backend-neutral, Mutex CAS (DataStore adapter)
-              └─ AnkiBackend.commitRating        typed result only
-                    └─ AnkiDroidBackend → AnkiDroidRatingCommitter → AnkiDroidRatingGateway → provider client
+StudyScreen → StudySessionMachine / StudyReducer (pure events)
+  → AnkiStudyEffectExecutor (one serialized write lane)
+    → ReviewCommitLedger (DataStore, durable metadata-only snapshot)
+    → AnkiBackend.commitRating(request, mutationEntry)
+       → AnkiDroid preflight → mutationEntry() → one provider update(schedule)
 ```
 
-The reducer is pure and never calls a backend; the executor only emits events; numeric ease values
-exist only in `AnkiDroidRatingContract` (below the gateway).
+`ReviewTurnId` identifies one presentation. `ReviewCommitId` identifies its **one logical rating transaction**, scoped to backend and study session. A WebSocket `message_id` identifies a **delivery**; it is not the logical commit key. Retry of a proven pre-call failure reuses the exact commit ID, card/deck and rating. Timing does not redefine the logical payload. The ledger stores IDs, rating, timing and bounded counter evidence, **not** question/answer text, HTML, audio, transcript or an Anki-synced note.
 
-### Identity
+### State and durable boundary
 
-`ReviewCommitId` = (backend id, study session id, review turn id) — the GATE 03 type, unchanged.
-It is never derived from the card id or a timestamp, so the same card reviewed twice produces two
-commits, and a retry or restore reuses the same id. `CommitRatingRequest` carries the id, card,
-rating, answer time and the backend's pre-mutation evidence; a retry re-sends the recorded request.
+Logical state: `NOT_STARTED`, `SUBMITTING`, `COMMITTED`, `FAILED` (`safeToRetry`), `AMBIGUOUS`. Independent durable attempt phase: null (no claim), `PREPARED`, `MUTATION_CALL_ENTERED`, `MUTATION_RESPONSE_RECEIVED`, `LOCAL_RESULT_PERSISTED`. The transaction executor performs:
 
-### Ledger (`ReviewCommitLedger`, `ReviewCommitRecord`)
+1. Persist first intent (`NOT_STARTED`) and read-only baseline, then claim a durable `SUBMITTING/PREPARED` attempt. Only one claimant wins the ledger compare-and-set.
+2. During backend preflight, do not claim the scheduler was called. Immediately **before** the actual mutation API, persist `MUTATION_CALL_ENTERED`. If this write fails, the callback refuses mutation. This marker means the call **may** have mutated; it never proves success. Adapters without separate preflight mark entry before entering `commitRating`.
+3. Send at most one rating for that attempt; persist its classified response (`MUTATION_RESPONSE_RECEIVED`), then persist a terminal state (`LOCAL_RESULT_PERSISTED`). **Only durable `COMMITTED` may produce `Next`**. A failed response/final write produces `CommitPersistenceFailure`, not an optimistic success, replay or next-card query. An in-process known response can finish *only the ledger write* when the user checks again; it is never resent to the backend.
 
-* States NOT_STARTED / SUBMITTING / COMMITTED / FAILED(safeToRetry) / AMBIGUOUS; FAILED and
-  AMBIGUOUS are distinct.
-* Every transition is a compare-and-set under one `Mutex`; NOT_STARTED and SUBMITTING are durable
-  before they are reported. Writes run `NonCancellable` once started.
-* The first load in a process turns SUBMITTING into AMBIGUOUS (persisted).
-* Bounded: 200 records by default. Only resolved records are pruned, oldest first, and never
-  SUBMITTING or unacknowledged AMBIGUOUS. A full ledger refuses new commits instead of evicting.
-* Persistence port `ReviewCommitStore` (one durable string cell, typed read/write). Production uses
-  `DataStoreReviewCommitStore`: a dedicated DataStore file with no replace-on-corruption handler.
-  An unreadable snapshot makes the ledger unavailable (fail closed) and is never overwritten.
+The DataStore snapshot is a dedicated, serialized cell with no reset-on-corruption handler. Unreadable storage, contradictory identities/phases, failed recovery writes and full capacity stop new commits before mutation. Committed and unresolved identities are not evicted to make room. Schema-v1 `SUBMITTING` is migrated conservatively as **call entered**, not as a safe pre-call retry. Health/count diagnostics are metadata-only; the UI never rewrites a record as “committed.”
 
-### Result classification and retry policy
+| Durable state found after interruption | Recovery | Scheduler call / next card |
+|---|---|---|
+| `NOT_STARTED` or `SUBMITTING/PREPARED` | Safe only because the call boundary was never entered; explicit retry on the same *live* turn | No automatic replay; a restored turn has no live backend handle |
+| `SUBMITTING/MUTATION_CALL_ENTERED` without durable response | `AMBIGUOUS` | Never blind replay, never next card |
+| `SUBMITTING/MUTATION_RESPONSE_RECEIVED` | Finalize durably from the known response; no backend call | Only after terminal `COMMITTED` is saved |
+| `COMMITTED/LOCAL_RESULT_PERSISTED` | Duplicate event returns recorded success | Do not mutate again |
+| `FAILED/LOCAL_RESULT_PERSISTED` | Retry **only if** proven not applied and original turn is live; otherwise end | No next card while failed |
+| `AMBIGUOUS/LOCAL_RESULT_PERSISTED` | Read-only authoritative reconciliation, if backend supports it | No retry, rating buttons, skip or next card while unresolved |
+| Storage/integrity fault | Separate persistence-fault/error presentation, including failure *after backend success* | Stop; never guess from UI/card state |
 
-| Outcome | Ledger | Machine | Next card | Retry |
-|---|---|---|---|---|
-| Committed | COMMITTED | WaitingForFirstCard | exactly once | never (replay answers from the ledger) |
-| RetryableFailure | FAILED, safe | RatingCommitFailed | no | explicit user retry, same id + rating |
-| Rejected | FAILED, not safe | RatingCommitFailed | no | no — end the session |
-| Ambiguous / timeout / cancellation after dispatch / unexpected exception | AMBIGUOUS | ReconciliationRequired | blocked | never blind; reconcile first |
-| Prepare refused / ledger write failed before SUBMITTING | FAILED | RatingCommitFailed | no | if transient |
-| Ledger unavailable or full | nothing written | RatingCommitFailed | no | no |
+On startup, scan before opening the backend review session or querying `nextCard`. Block the affected study session and any new session in the same known collection (unknown collection: entire backend) while an answer may be unresolved. Other backends and known unrelated collections are not blocked. Exiting/acknowledging does not delete the ambiguity. Restored turns cannot be re-rated by a new live turn. The UI distinguishes saving, saved, known-not-saved, unconfirmed, checking and persistence fault; “Check again” retries a read/ledger finalization, **not** the rating. No production “mark committed” or abandonment-as-proof control exists.
 
-### Reconciliation
+### Backend guarantee audit
 
-`AnkiBackend.reconcileCommit` defaults to `Unsupported`, which keeps the commit AMBIGUOUS.
-AnkiDroid implements it from public card counters (`reps`, `last_review_time_secs`, queue/due/deck)
-against the durable baseline and the commit window; anything unattributable stays AMBIGUOUS. Users
-get "Check again", and "End session" is always available. A fresh session asks the scheduler, and
-unresolved AMBIGUOUS commits are surfaced (never dropped) when it begins.
+| Backend | Serialized local delivery / durable intent | Backend-owned durable dedup by logical commit ID | Authoritative reconciliation of lost response | Receipt | Claim |
+|---|---|---|---|---|---|
+| AnkiDroid provider | Yes (client ledger + gateway) | No public API | No commit-correlated status query | None | `AT_MOST_ONCE_FAIL_CLOSED` |
+| PC Agent mock/protocol | Client turn guard; server has only a bounded, process-local cache by `message_id` | **Not verified or implemented here** | Session snapshot/revision is not a receipt | None shown | No end-to-end exactly-once claim |
+| JVM fake | Configurable; shared effect store models backend-owned dedup | Only in idempotent simulation mode | Only in authoritative simulation mode | Configurable fake metadata | A simulation, not real-provider proof |
 
-### Diagnostics (metadata only)
+`AnkiBackend.commitSemantics` describes these *separate* capabilities; it does not authorize replay. `AnkiDroidBackend` never upgrades an unknown post-call outcome by comparing `reps`, due date, revlog/time, interval, queue, or next card. Read-only reconciliation remains `StillAmbiguous` without a commit-correlated backend receipt. Its immediate synchronous `rowCount=1` + consistent card transition path is a **limited direct-response classification** (no backend receipt); it needs real AnkiDroid validation on a disposable collection. Timeout, exception, `-1`, filtered preview or inconclusive observation remains ambiguous. Do not conflate JVM fake behavior or source review with on-device mutation evidence.
 
-`ANKI_COMMIT_PREPARED`, `ANKI_COMMIT_STARTED`, `ANKI_COMMIT_COMMITTED`, `ANKI_COMMIT_FAILED`,
-`ANKI_COMMIT_AMBIGUOUS`, `ANKI_COMMIT_RETRY_STARTED`, `ANKI_RECONCILIATION_STARTED`,
-`ANKI_RECONCILIATION_RESULT`, `ANKI_NEXT_CARD_AFTER_COMMIT_STARTED`. Metadata: commit-id hash, rating
-name, attempt, state, failure category and elapsed ms. Rejected stale results appear as
-`EVENT_REJECTED` with the reducer's reason. Never card text, HTML, transcripts or paths.
+The PC reducer now fails closed on a rating timeout: original pending transport ID remains, new rating/skip and unsolicited next-card/snapshot progress are blocked, and only an ACK correlated to the original pending ID may advance the live turn. A process restart still loses that PC turn state. `server/mock_pc_agent.py` caches `message_id` responses in memory (max 200) and has no durable `ReviewCommitId` scheduler-effect table. `review_turn_id` and `session_revision` check stale context but cannot substitute for that table. Upgrading PC to `IDEMPOTENT_REPLAY_SUPPORTED` requires an audited server-side atomic logical-commit table + read-only commit-status query; neither exists in this repo today.
 
-### PC backend
-
-Unchanged: `handleRateCard`, `handleRatingSaved` and `handleTimeout` are byte-identical to GATE 10,
-and `SubmissionLedger`, `PendingAction` and the protocol are untouched. The PC path keeps its remote
-idempotency (`message_id` + `review_turn_id`) and its retry-on-timeout semantics. Its UI gains only
-the shared rule that rating buttons are disabled outside WaitingForRating/ShowingFeedback, and the
-pending rating is shown as data while submitting.
+**Claims NOT made:** guaranteed eventual completion; recovery of every ambiguous AnkiDroid rating; proof from changed/unchanged card state; backend-side idempotent AnkiDroid replay; PC Agent durable logical-ID dedup or exactly-once across restart; physical AnkiDroid validation. The modeled process-death windows are JVM tests, not empirical device crash trials.

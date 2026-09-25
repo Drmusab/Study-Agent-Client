@@ -17,6 +17,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * Identity counters survive reset; ledgers never evict a dedup key to make room for another write.
  * Use a fresh instance or reset between scenarios. Nothing registers this in production DI.
  */
+class FakeBackendCommitStore {
+    /** Share this across constructed fakes to model a backend-owned dedup table surviving restart. */
+    internal val records = linkedMapOf<ReviewCommitId, FakeAnkiBackend.RecordedCommit>()
+    internal val mutex = Mutex()
+}
+
 class FakeAnkiBackend(
     override val id: AnkiBackendId = AnkiBackendId.Fake(),
     decks: List<AnkiDeck> = emptyList(),
@@ -29,8 +35,14 @@ class FakeAnkiBackend(
     nextErrors: List<AnkiError> = emptyList(),
     commitSteps: List<CommitStep> = emptyList(),
     private val maxLedgerEntries: Int = 10_000,
-    private val instanceId: String = UUID.randomUUID().toString()
+    private val instanceId: String = UUID.randomUUID().toString(),
+    private val guaranteeLevel: CommitGuaranteeLevel = CommitGuaranteeLevel.AT_MOST_ONCE_FAIL_CLOSED,
+    private val persistedEffectStore: FakeBackendCommitStore = FakeBackendCommitStore()
 ) : AnkiBackend {
+    override val commitSemantics = CommitSemantics(guaranteeLevel,
+        supportsIdempotentReplay = guaranteeLevel == CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED ||
+            guaranteeLevel == CommitGuaranteeLevel.END_TO_END_EXACTLY_ONCE,
+        supportsAuthoritativeReconciliation = true, commitReceiptKind = CommitReceiptKind.NONE)
     data class CommitStep(
         val result: CommitRatingResult,
         /** Models applied-write/lost-response separately from never-applied/unknown response. */
@@ -46,7 +58,9 @@ class FakeAnkiBackend(
         val mutationCount: Int
     )
 
-    private val mutex = Mutex()
+    // A shared simulated backend owns serialization as well as the logical commit table; two
+    // recreated adapters cannot race around a process-local mutex and double-apply the same ID.
+    private val mutex = persistedEffectStore.mutex
     private val deckData = decks.toMutableList()
     var selectedDeckRef: AnkiDeckRef? = decks.firstOrNull()?.ref
     var selectedDeckError: AnkiError? = null
@@ -59,7 +73,7 @@ class FakeAnkiBackend(
     }.toMutableList()
     private val nextFailures = ArrayDeque(nextErrors)
     private val commits = ArrayDeque(commitSteps)
-    private val ledger = linkedMapOf<ReviewCommitId, RecordedCommit>()
+    private val ledger = persistedEffectStore.records
     private val mutableAvailability = MutableStateFlow(coherent(initialAvailability, initialCapabilities))
     private val mutableCapabilities = MutableStateFlow(initialCapabilities)
     override val availability = mutableAvailability.asStateFlow()
@@ -120,12 +134,17 @@ class FakeAnkiBackend(
      * never increment it.
      */
     val physicalCommitCalls: Int get() = physicalCalls.get()
+    val logicalCommitCount: Int get() = ledger.size
+    val backendEffectCount: Int get() = ledger.values.sumOf { it.mutationCount }
+    val deliveryCount: Int get() = invocations.get()
 
     /** When set, every commit suspends here (after the call started) until the test completes it. */
     @Volatile var commitGate: CompletableDeferred<Unit>? = null
 
     /** When set, the mutation step throws this *after* counting the physical call. */
     @Volatile var commitThrowable: Throwable? = null
+    /** An effect may occur before the exception removes the response. */
+    @Volatile var applyBeforeThrow: Boolean = false
 
     /** When set, `prepareCommit` refuses with this (pre-mutation). */
     @Volatile var prepareRefusal: CommitPreparation.Refused? = null
@@ -382,8 +401,28 @@ class FakeAnkiBackend(
             }
             val previous = ledger[request.commitId]
             if (previous != null) {
-                if (previous.request != request) return@withLock CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card))
-                // A known ACK or ambiguous response remains known even if the backend disappears.
+                if (previous.request.card != request.card || previous.request.rating != request.rating ||
+                    previous.request.deckRef != request.deckRef) {
+                    return@withLock CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card))
+                }
+                if (guaranteeLevel == CommitGuaranteeLevel.LOCAL_DEDUP_ONLY &&
+                    previous.result is CommitRatingResult.Committed) {
+                    // Deliberately unsafe backend: tests can verify the *client ledger*, not a UI
+                    // debounce, is what stops this second scheduler effect.
+                    physicalCalls.incrementAndGet()
+                    ledger[request.commitId] = previous.copy(attempts = previous.attempts + 1,
+                        mutationCount = previous.mutationCount + 1)
+                    return@withLock previous.result
+                }
+                if (commitSemantics.supportsIdempotentReplay && previous.result is CommitRatingResult.Ambiguous) {
+                    // The backend's durable logical-commit table knows the actual effect even
+                    // though the original response was lost. Re-delivery performs no mutation.
+                    val result = if (previous.mutationCount > 0) CommitRatingResult.Committed()
+                        else CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("fake_no_effect"))
+                    ledger[request.commitId] = previous.copy(result = result)
+                    return@withLock result
+                }
+                // At-most-once: an ambiguous response stays ambiguous, never resent internally.
                 if (previous.result !is CommitRatingResult.RetryableFailure) return@withLock previous.result
             }
             if (session?.context?.studySessionId != request.commitId.studySessionId) {
@@ -405,7 +444,7 @@ class FakeAnkiBackend(
                     commitThrowable?.let { thrown ->
                         // Dispatched, then the transport failed: the stand-in records "unknown".
                         ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
-                            (previous?.attempts ?: 0) + 1, 0)
+                            (previous?.attempts ?: 0) + 1, if (applyBeforeThrow) 1 else 0)
                         throw thrown
                     }
                     commits.removeFirstOrNull() ?: CommitStep(CommitRatingResult.Committed())

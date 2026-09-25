@@ -169,7 +169,8 @@ class PhoneModeLoopTest {
             state = StudyReducer.reduce(state, StudyEvent.ServerEvaluationReceived("s1", "c$index", evaluation(), true, "e$index"), 3_000L + index).newState
             state = StudyReducer.reduce(state, StudyEvent.FeedbackSpeechCompleted("c$index", state.activeSpeechEffectId ?: "f", true), 4_000L + index).newState
             state = StudyReducer.reduce(state, StudyEvent.UserRateCard(Rating.GOOD, "c$index"), 5_000L + index).newState
-            state = StudyReducer.reduce(state, StudyEvent.ServerRatingSaved("s1", "c$index", Rating.GOOD, "2d", "r$index"), 6_000L + index).newState
+            state = StudyReducer.reduce(state, StudyEvent.ServerRatingSaved("s1", "c$index", Rating.GOOD,
+                "2d", "r$index", inReplyTo = state.pendingAction!!.messageId), 6_000L + index).newState
 
             // Turn boundaries are where a deferred switch would be applied.
             coordinator.onSafeTurnBoundary()

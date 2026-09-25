@@ -8,10 +8,10 @@ import kotlinx.serialization.Serializable
  * scheduler mutation).
  *
  * ```text
- *   NOT_STARTED ──claim──▶ SUBMITTING ──backend proves applied──▶ COMMITTED
+ *   NOT_STARTED ──claim──▶ SUBMITTING ──backend confirms applied──▶ COMMITTED
  *        │                     │ ──backend proves NOT applied──▶ FAILED (safeToRetry?)
  *        │                     │ ──unknown / timeout / crash──▶ AMBIGUOUS
- *        └─prepare refused─▶ FAILED            AMBIGUOUS ──reconciliation evidence──▶ COMMITTED | FAILED
+ *        └─prepare refused─▶ FAILED            AMBIGUOUS ──authoritative reconciliation──▶ COMMITTED | FAILED
  * ```
  *
  * [FAILED] and [AMBIGUOUS] are deliberately separate facts: FAILED means *known not applied*,
@@ -23,10 +23,7 @@ enum class ReviewCommitState {
     /** Prepared and persisted. The backend has provably not been asked to mutate for this attempt. */
     NOT_STARTED,
 
-    /**
-     * Persisted immediately *before* the backend call. Observed after a process restart it means
-     * "the call may have happened", which is why a restart converts it to [AMBIGUOUS].
-     */
+    /** An attempt is in progress; [ReviewCommitRecord.phase] says whether the call may have begun. */
     SUBMITTING,
 
     /** The backend confirmed — or reconciliation evidence proved — that the scheduler applied it. */
@@ -37,6 +34,33 @@ enum class ReviewCommitState {
 
     /** May or may not have been applied. Blocks progression; never retried without reconciliation. */
     AMBIGUOUS
+}
+
+/** Physical attempt progress, separate from the logical state. Entered means *may* have mutated. */
+@Serializable
+enum class CommitAttemptPhase {
+    PREPARED,
+    MUTATION_CALL_ENTERED,
+    MUTATION_RESPONSE_RECEIVED,
+    LOCAL_RESULT_PERSISTED
+}
+
+/** Only a durably recorded definitive response can be finalized after process death without replay. */
+@Serializable
+enum class CommitResponseKind { CONFIRMED_COMMITTED, CONFIRMED_NOT_APPLIED, OUTCOME_UNKNOWN }
+
+/** Content-free copy of an actual backend response. Not a fabricated backend receipt. */
+@Serializable
+data class CommitResponseEvidence(
+    val kind: CommitResponseKind,
+    val failure: ReviewCommitFailure? = null,
+    val backendReceiptId: String? = null
+) {
+    init {
+        require(kind == CommitResponseKind.CONFIRMED_COMMITTED || backendReceiptId == null)
+        require(kind == CommitResponseKind.CONFIRMED_COMMITTED || failure != null)
+        require(backendReceiptId == null || backendReceiptId.isNotBlank())
+    }
 }
 
 /**
@@ -79,6 +103,12 @@ data class ReviewCommitRecord(
     val rating: Rating,
     val state: ReviewCommitState,
     val attemptCount: Int,
+    /** Null only before the first attempt (or for a legacy pre-attempt failure). */
+    val phase: CommitAttemptPhase? = null,
+    /** A definitive backend response, durably recorded before the terminal transition. */
+    val response: CommitResponseEvidence? = null,
+    /** Turn's deck/collection identity; never a display name. */
+    val deckRef: AnkiDeckRef? = null,
     val createdAtEpochMs: Long,
     val updatedAtEpochMs: Long,
     val ratedAtEpochMs: Long,
@@ -96,6 +126,8 @@ data class ReviewCommitRecord(
 ) {
     init {
         require(commitId.backendId == card.backendId) { "A commit and its card share one backend" }
+        require(deckRef == null || (deckRef.backendId == backendId &&
+            (deckRef.collectionKey == null || card.collectionKey == null || deckRef.collectionKey == card.collectionKey)))
         require(attemptCount >= 0)
         require(state == ReviewCommitState.NOT_STARTED || attemptCount >= 1 ||
             state == ReviewCommitState.FAILED) { "Only a never-dispatched record has zero attempts" }
@@ -111,11 +143,12 @@ data class ReviewCommitRecord(
 
     /** The exact request every attempt sends — identical across retries and restores. */
     fun toRequest(): CommitRatingRequest =
-        CommitRatingRequest(commitId, card, rating, ratedAtEpochMs, answerDurationMs, evidence)
+        CommitRatingRequest(commitId, card, rating, ratedAtEpochMs, answerDurationMs, evidence, deckRef)
 
-    /** Same transaction payload: identity, card and rating. Timing fields never make a conflict. */
+    /** Same transaction payload: identity, card, deck and rating. Timing fields never make a conflict. */
     fun samePayload(request: CommitRatingRequest): Boolean =
-        request.commitId == commitId && request.card == card && request.rating == rating
+        request.commitId == commitId && request.card == card && request.rating == rating &&
+            (deckRef == null || request.deckRef == deckRef)
 }
 
 /** Stable resolution tokens persisted in [ReviewCommitRecord.resolution]. */
@@ -127,6 +160,8 @@ object ReviewCommitResolution {
     const val REFUSED_BEFORE_DISPATCH = "refused_before_dispatch"
     const val INTERRUPTED_AFTER_DISPATCH = "interrupted_after_dispatch"
     const val PROCESS_RESTART_WHILE_SUBMITTING = "process_restart_while_submitting"
+    const val RECOVERED_PREPARED = "recovered_before_mutation"
+    const val RECOVERED_RESPONSE = "recovered_durable_response"
     const val RECONCILED_APPLIED = "reconciled_applied"
     const val RECONCILED_NOT_APPLIED = "reconciled_not_applied"
     const val RECONCILIATION_INCONCLUSIVE = "reconciliation_inconclusive"
@@ -150,6 +185,7 @@ fun AnkiError.commitCategory(): String = when (this) {
     is AnkiError.CommitConflict -> "commit_conflict"
     is AnkiError.NoteNotFound -> "note_not_found"
     is AnkiError.SessionInvalid -> "session_invalid"
+    is AnkiError.CommitLedgerUnavailable -> "commit_ledger_unavailable"
     is AnkiError.StaleTurn -> "stale_turn"
     is AnkiError.MediaUnavailable -> "media_unavailable"
 }.take(96)

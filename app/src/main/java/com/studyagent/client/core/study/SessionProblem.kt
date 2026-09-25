@@ -27,6 +27,10 @@ enum class SessionProblem {
     ANKI_RATING_NOT_SAVED,
     /** GATE 11 — whether the Anki rating was saved cannot be confirmed (ledger AMBIGUOUS). */
     ANKI_RATING_UNCONFIRMED,
+    /** Backend result known in-process but durable transaction update failed. */
+    ANKI_COMMIT_PERSISTENCE_FAILURE,
+    /** Unreadable or contradictory ledger; mutation is refused before dispatch. */
+    ANKI_COMMIT_INTEGRITY,
     UNKNOWN
 }
 
@@ -58,6 +62,8 @@ fun SessionProblem.severity(): SessionProblemSeverity = when (this) {
     SessionProblem.RECOGNIZER_UNAVAILABLE,
     SessionProblem.TTS_UNAVAILABLE -> SessionProblemSeverity.DEGRADED
     SessionProblem.ANKI_RATING_NOT_SAVED,
-    SessionProblem.ANKI_RATING_UNCONFIRMED -> SessionProblemSeverity.RECOVERABLE
+    SessionProblem.ANKI_RATING_UNCONFIRMED,
+    SessionProblem.ANKI_COMMIT_PERSISTENCE_FAILURE,
+    SessionProblem.ANKI_COMMIT_INTEGRITY -> SessionProblemSeverity.RECOVERABLE
     SessionProblem.UNKNOWN -> SessionProblemSeverity.RECOVERABLE
 }

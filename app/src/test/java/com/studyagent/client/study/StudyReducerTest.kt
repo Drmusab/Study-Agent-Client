@@ -49,7 +49,8 @@ class StudyReducerTest {
         assertEquals(SessionPhase.WaitingForRating, s.phase)
         s = StudyReducer.reduce(s, StudyEvent.UserRateCard(Rating.GOOD, "c1"), 70L).newState
         assertEquals(SessionPhase.SubmittingRating, s.phase)
-        s = StudyReducer.reduce(s, StudyEvent.ServerRatingSaved("s1", "c1", Rating.GOOD, "3d", "r1"), 80L).newState
+        s = StudyReducer.reduce(s, StudyEvent.ServerRatingSaved("s1", "c1", Rating.GOOD, "3d", "r1",
+            inReplyTo = s.pendingAction!!.messageId), 80L).newState
         assertEquals(SessionPhase.WaitingForFirstCard, s.phase)
         // Next card
         s = StudyReducer.reduce(s, StudyEvent.ServerQuestionReceived("s1", "c2", "Q2", 2, 3, false, "q2", "turn2", 2L), 90L).newState
@@ -141,7 +142,7 @@ class StudyReducerTest {
         assertEquals(s.cardTurn?.turnId, (rating as com.studyagent.client.core.models.ClientMessage.RateCard).reviewTurnId)
     }
 
-    @Test fun `rating send fail recovers`() {
+    @Test fun `PC rating timeout retains original delivery and refuses blind replay or next card`() {
         var s = startedState()
         s = withQuestion(s, "c1")
         s = StudyReducer.reduce(s, StudyEvent.QuestionSpeechCompleted("c1", s.activeSpeechEffectId!!, true), 0L).newState
@@ -150,8 +151,27 @@ class StudyReducerTest {
         s = StudyReducer.reduce(s, StudyEvent.UserRateCard(Rating.GOOD, "c1"), 0L).newState
         val pending = s.pendingAction!!
         s = StudyReducer.reduce(s, StudyEvent.ActionTimedOut(pending.messageId, PendingAction.ActionType.RATE_CARD), 20_000L).newState
-        assertEquals(SessionPhase.WaitingForRating, s.phase)
-        assertTrue(s.ledger.canBeginRating(s.cardTurn!!.turnId))
+        assertEquals(SessionPhase.Error(SessionProblem.RATING_TIMEOUT), s.phase)
+        assertEquals(pending, s.pendingAction)
+        assertTrue(s.ledger.hasRatingInFlight(s.cardTurn!!.turnId))
+        assertFalse(s.ledger.canBeginRating(s.cardTurn!!.turnId))
+        assertFalse(StudyReducer.reduce(s, StudyEvent.UserRateCard(Rating.GOOD, "c1")).accepted)
+        assertFalse(StudyReducer.reduce(s, StudyEvent.UserSkipRequested("c1")).accepted)
+        assertEquals("pc-rating-unconfirmed", StudyReducer.reduce(s,
+            StudyEvent.ServerQuestionReceived("s1", "c2", "Next", 2, 3, false, "next")).rejectionReason)
+        val snapshot = StudySnapshot("s1", ServerSessionPhase.AWAITING_ANSWER, StudyCard("c2", "Next"),
+            null, 3, 1, 10, "Toronto Notes", serverRevision = 2L)
+        val restored = StudyReducer.reduce(s, StudyEvent.SessionStatusReceived(snapshot), 20_001L)
+        assertEquals(s.cardTurn, restored.newState.cardTurn)
+        assertEquals(0, restored.newState.session!!.totalReviewedInSession)
+        assertEquals(SessionPhase.Error(SessionProblem.RATING_TIMEOUT), restored.newState.phase)
+        assertFalse(StudyReducer.reduce(s, StudyEvent.ServerRatingSaved("s1", "c1", Rating.GOOD,
+            null, "other", inReplyTo = "wrong")).accepted)
+        val correlated = StudyReducer.reduce(s, StudyEvent.ServerRatingSaved("s1", "c1", Rating.GOOD,
+            null, "ack", inReplyTo = pending.messageId, reviewTurnId = s.cardTurn!!.turnId), 20_002L)
+        assertTrue(correlated.accepted)
+        assertEquals(SessionPhase.WaitingForFirstCard, correlated.newState.phase)
+        assertEquals(1, correlated.newState.session!!.totalReviewedInSession)
     }
 
     @Test fun `stale evaluation after card B ignored`() {
@@ -409,7 +429,8 @@ class StudyReducerTest {
             val r = StudyReducer.reduce(s, StudyEvent.UserRateCard(Rating.GOOD, cardId), i*10L+3)
             assertTrue("rating $i should be accepted", r.accepted)
             s = r.newState
-            s = StudyReducer.reduce(s, StudyEvent.ServerRatingSaved("s1", cardId, Rating.GOOD, null, "r-$i"), i*10L+4).newState
+            s = StudyReducer.reduce(s, StudyEvent.ServerRatingSaved("s1", cardId, Rating.GOOD, null, "r-$i",
+                inReplyTo = s.pendingAction!!.messageId), i*10L+4).newState
             // After each card, ledger should have one entry per card; prune keeps bounded
             assertTrue(s.ledger.entries.size <= 1005) // bounded
             assertEquals(i+1, s.cardTurnHistory.size)

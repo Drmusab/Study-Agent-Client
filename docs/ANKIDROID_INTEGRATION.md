@@ -1055,98 +1055,30 @@ The full provenance table lives in `AnkiDroidApiContract` (GATE 11 section).
 | Provider death mid-call | `ContentResolver.update` returns `-1` |
 | Atomicity | rslib `transact(Op::AnswerCard)`: card + revlog + deck stats commit together or not at all |
 
-### 29.2 Two provider behaviours that shape the design
+### 29.2 Provider semantics and a non-correlatable answer
 
-1. **`1` is not proof.** The provider's `answerCard` catches `RuntimeException` from
-   `col.sched.answerCard`, logs it, and `update` still answers `1`. AnkiDroid issue #20763 is this
-   exact path (`NoSuchElementException` swallowed). "No exception, one row" is therefore never
-   treated as success; every dispatched outcome is decided by before/after evidence.
-2. **Queue-front precondition.** At v2.24.1 the legacy `Scheduler.answerCard(card, rating)` builds
-   the answer from `queuedCards.first().states` of AnkiDroid's *currently selected* deck. If that is
-   another card, rslib rejects it (`card was modified`) and the provider swallows it. v2.25.0alpha1+
-   use `getSchedulingStates(card.id)` (commit `3e0bc30c7b`), but the precondition is kept for every
-   version.
+At v2.24.1 `answerCard` catches some scheduler `RuntimeException`s yet `update(schedule)` can still return `1`; a row count alone does **not** prove scheduling. The old documentation's classification of “no state change” as safe-to-retry, `-1` as committed after observing `reps+1`, or a review outside the window as definitely “someone else” was unsound and has been removed. Even unchanged state does not prove an in-flight provider call will not land later; a changed card/revlog/timestamp cannot attribute an effect to Study-Agent's `ReviewCommitId`. Filtered preview reviews may not change `reps` at all.
 
-### 29.3 The protocol (`AnkiDroidRatingCommitter`, single writer `AnkiDroidRatingGateway`)
+At v2.24.1 `Scheduler.answerCard` uses the selected deck's queue front, so Study-Agent checks/selects the session deck and verifies the queue-front note/ord before sending **one** answer update. The selected deck is restored in `finally`. The `mutationEntry` callback persists `MUTATION_CALL_ENTERED` after this preflight and **before** `submitAnswer` enters the real `update(schedule)` path. Failure to persist the marker prevents that answer update. The marker means **may have mutated**, never **did mutate**.
 
-1. Fresh card-state read (`notes/<id>/cards/<ord>`, identity + counters only) must equal the durable
-   baseline captured before SUBMITTING, else `Rejected(CommitConflict)` — nothing sent.
-2. If AnkiDroid's selected deck is not the session deck, select it (`selected_deck` update).
-3. Read the queue front (`schedule`, `limit=1`, **no** `deckID`); if it is not this card,
-   `Rejected` — nothing sent (a learning card became due first).
-4. **One** answer `update` (bounded wait; the call itself is never abandoned mid-flight).
-5. Restore the user's selected deck (always, `NonCancellable`).
-6. Read the card again and classify with `AnkiDroidCommitVerifier`.
+### 29.3 Attempt and response classification
 
-| Dispatch | Evidence | Result |
-|---|---|---|
-| not dispatched | — | `RetryableFailure` (nothing sent) |
-| any | `reps + 1`, `last_review_time` inside the window | `Committed` |
-| returned `1` | no change (normal card) | `RetryableFailure("answer_not_applied")` — swallowed exception |
-| returned `-1` | no change | `RetryableFailure("provider_died_before_applying")` |
-| returned `-1` | applied | `Committed` |
-| `SecurityException` / `IllegalArgumentException` | no change | `RetryableFailure` (permission) / `Rejected` |
-| timeout (call may still be running) | no change | `Ambiguous` — the call may still land |
-| any | one answer outside the window | `Rejected(CommitConflict)` — reviewed elsewhere |
-| any | extra reviews, lost counters, identity change, filtered-deck no-change | `Ambiguous` |
-| any | verification read fails | `Ambiguous` |
+| Situation | Safe classification |
+|---|---|
+| Preparation/preflight refuses before `mutationEntry` | Known no scheduler answer *from this attempt*; same live turn can explicitly retry if transient |
+| Callback cannot persist call-entry | No provider answer sent; separate persistence fault, no speculative retry or progression |
+| Synchronous `rowCount=1` and immediate normal-card state consistent with a single answer | Limited direct-response `Committed` path, with no backend transaction receipt; **not empirically validated on real AnkiDroid** |
+| `rowCount=1` with unchanged/inconclusive state, filtered preview/ambiguous state | `Ambiguous`, no retry/advance |
+| `-1`, exception (including permission-related), timeout or unreadable verification after answer dispatch | `Ambiguous` regardless of later card state |
+| Backend result known but response/`COMMITTED` ledger write fails | `CommitPersistenceFailure`, no next card; recover durable response or keep ambiguity without backend replay |
 
-#### Transaction state diagram (`ReviewCommitLedger`, durable store)
+The backend has no public idempotency key/receipt or lookup by `ReviewCommitId`. `reconcileCommit` is **read-only**: it may observe card identity/counters for diagnostics but always returns `StillAmbiguous` (or unavailable) unless a future, independently audited commit-correlated provider receipt/API exists. Neither a row count nor a changed/unchanged card authorizes `AMBIGUOUS → COMMITTED` or `AMBIGUOUS → FAILED_SAFE_TO_RETRY`.
 
-One entry per `ReviewCommitId(sessionId, turnId, backendId)`. The entry is persisted **before** any
-mutation is dispatched and `COMMITTED` is persisted **before** the session may advance to the next
-card. There is no edge out of `COMMITTED`; there is no automatic edge out of `AMBIGUOUS` (recovery
-is a reconciliation outcome, never a blind retry).
+The durable client ledger distinguishes logical states (`NOT_STARTED`, `SUBMITTING`, `COMMITTED`, `FAILED`, `AMBIGUOUS`) from attempt phases (`PREPARED`, `MUTATION_CALL_ENTERED`, `MUTATION_RESPONSE_RECEIVED`, `LOCAL_RESULT_PERSISTED`). After process death, `PREPARED` is a safe pre-call failure; entered/no durable response becomes `AMBIGUOUS`; a durably received response can be finalized without redispatch. `COMMITTED` is written **before** scheduler progression. Corrupt storage, conflicting metadata or failed writes stop the transaction. Startup scans before `beginReview`/`nextCard` and blocks the affected collection until authoritative resolution; ending the UI retains the record. Diagnostics expose only sanitized state counts and backend guarantee `AT_MOST_ONCE_FAIL_CLOSED`.
 
-```text
-                    ┌────────────────────────────────────────────────────┐
-                    │                                                    │
-                    │   persist BEFORE dispatch (durable write)          │
-                    ▼                                                    │
-              ┌───────────┐  claim/durable-write   ┌────────────┐        │
- (created) ──▶│NOT_STARTED│ ─────────────────────▶ │ SUBMITTING │──┐     │
-              └───────────┘   (CAS; one claimant)  └────────────┘  │     │
-                    │                                   │          │     │
-                    │ claim lost / evidence says        │ verified │     │
-                    │ nothing was sent                  ▼          │     │
-                    │                          ┌───────────────────┴──┐  │
-                    ├─────────────────────────▶│ COMMITTED (durable)  │  │
-                    │  (Reconciler: proof of   └──────────────────────┘  │
-                    │   the committed mutation)        ▲                 │
-                    │                                  │ complete()      │
-                    │                                  │ (NonCancellable │
-                    │                                  │  durable write) │
-                    │                                  │                 │
-                    │         proof nothing was sent   │                 │
-                    │  ┌───────────────────────────────┴──┐              │
-                    └─▶│ FAILED_SAFE_TO_RETRY            │◀─────────────┘
-                       └──────────────────────────────────┘  safeToRetry
-                                ▲        complete()            ─────────▶ retry resends the
-                                │        from SUBMITTING         identical ReviewCommitId
-                       (verified no-change + safe classification)
+### 29.4 Verification limits
 
-                       ┌──────────────────────────────────┐
-          (timeout /   │ AMBIGUOUS                        │
-           unknown /   │  - never auto-retried            │
-           verification│  - never counted as success      │──▶ ReconcileRatingCommit
-           failure) ──▶│  - refuses further mutations     │    (explicit, evidence-based;
-                       └──────────────────────────────────┘     may conclude COMMITTED /
-                                                                FAILED_SAFE_TO_RETRY /
-                                                                remain AMBIGUOUS)
-```
-
-`SUBMITTING` is converted to `AMBIGUOUS` on ledger load after process death
-(`PROCESS_RESTART_WHILE_SUBMITTING`) — the app cannot know whether the mutation landed while it was
-gone. An unreadable ledger makes the store `Health.Unavailable` and every commit is refused.
-
-### 29.4 Reconciliation and its limits
-
-`reconcileCommit` re-reads the card and compares it with the ledger's baseline over the commit's
-window; it never writes and works without the original session (after process death). It refuses
-to decide while an earlier provider write is still in flight. Filtered-deck *preview* answers do not
-move `reps` or `last_review_time` (rslib `preview.rs`), so after the fact they are never attributed:
-such commits stay AMBIGUOUS. Other actors may change a card at any time; a change that cannot be
-attributed to the commit window is never claimed.
+The provider path, mapping and modeled crash windows have scripted JVM fixtures, **not** real AnkiDroid mutation evidence. Before calling the direct normal-path behavior device-verified, exercise one real pinned-version AnkiDroid installation against a disposable collection (normal review, swallowed exception/row count, permission failure, background/process interruption, filtered deck and concurrent external review); independently compare its scheduler/revlog changes and UI safety. Never run this on a user's live deck. Even successful physical tests would not create a commit-correlated receipt for lost responses. See ADR [0008](adr/0008-durable-review-attempts-and-exactly-once-limits.md) and the GATE 11 guarantee matrix in `ANKI_INTEGRATION_ARCHITECTURE.md` for explicit non-claims.
 
 ### 29.5 Side effects, capability, verification status
 

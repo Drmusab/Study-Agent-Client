@@ -251,8 +251,10 @@ fun StudyScreen(
                                 RatingCommitRecoveryUi.Status.NOT_SAVED,
                                 RatingCommitRecoveryUi.Status.UNCONFIRMED -> BannerTone.DANGER
                                 RatingCommitRecoveryUi.Status.EARLIER_UNCONFIRMED -> BannerTone.WARNING
+                                RatingCommitRecoveryUi.Status.PERSISTENCE_FAULT -> BannerTone.DANGER
                                 RatingCommitRecoveryUi.Status.SAVING,
-                                RatingCommitRecoveryUi.Status.CHECKING -> BannerTone.INFO
+                                RatingCommitRecoveryUi.Status.CHECKING,
+                                RatingCommitRecoveryUi.Status.SAVED -> BannerTone.INFO
                             },
                             actionLabel = when {
                                 recovery.canRetry -> "Retry same rating"
@@ -423,7 +425,9 @@ fun StudyScreen(
                         onRepeat = { viewModel.onRepeatQuestion() },
                         onHint = { viewModel.onRequestHint() },
                         onExplain = { viewModel.onRequestExplanation() },
-                        onSkip = { viewModel.onSkipCard() }
+                        onSkip = { viewModel.onSkipCard() },
+                        skipEnabled = ratingCommitRecovery == null ||
+                            ratingCommitRecovery.status == RatingCommitRecoveryUi.Status.EARLIER_UNCONFIRMED
                     )
 
                     val suggestedRating = when (val s = studyState) {
@@ -754,7 +758,8 @@ private fun QuickToolsRow(
     onRepeat: () -> Unit,
     onHint: () -> Unit,
     onExplain: () -> Unit,
-    onSkip: () -> Unit
+    onSkip: () -> Unit,
+    skipEnabled: Boolean = true
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -763,14 +768,17 @@ private fun QuickToolsRow(
         QuickTool("Repeat", Icons.Default.Replay, onRepeat, Modifier.weight(1f))
         QuickTool("Hint", Icons.Default.Lightbulb, onHint, Modifier.weight(1f))
         QuickTool("Explain", Icons.Default.Info, onExplain, Modifier.weight(1f))
-        QuickTool("Skip", Icons.Default.SkipNext, onSkip, Modifier.weight(1f))
+        QuickTool("Skip", Icons.Default.SkipNext, onSkip, Modifier.weight(1f), enabled = skipEnabled)
     }
 }
 
 @Composable
-private fun QuickTool(label: String, icon: ImageVector, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun QuickTool(label: String, icon: ImageVector, onClick: () -> Unit, modifier: Modifier = Modifier,
+    enabled: Boolean = true
+) {
     FilledTonalButton(
         onClick = onClick,
+        enabled = enabled,
         modifier = modifier.heightIn(min = 48.dp),
         shape = AppShape.buttonShape,
         contentPadding = PaddingValues(horizontal = AppSpacing.XS, vertical = AppSpacing.XS),

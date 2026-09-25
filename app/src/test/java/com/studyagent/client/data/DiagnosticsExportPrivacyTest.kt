@@ -1,6 +1,9 @@
 package com.studyagent.client.data
 
+import com.studyagent.client.core.anki.*
+import com.studyagent.client.anki.fake.InMemoryReviewCommitStore
 import com.studyagent.client.core.common.AppLogger
+import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.diagnostics.AppPerformanceMetrics
 import com.studyagent.client.data.repository.DefaultDiagnosticsRepository
 import com.studyagent.client.data.repository.DiagnosticsAppInfo
@@ -38,7 +41,9 @@ class DiagnosticsExportPrivacyTest {
     }
 
     /** Diagnostics over a live harness: the real machine, the real timeline, the real log buffer. */
-    private fun StudySessionHarness.diagnosticsRepo(appInfo: DiagnosticsAppInfo = testAppInfo()): DefaultDiagnosticsRepository =
+    private fun StudySessionHarness.diagnosticsRepo(
+        appInfo: DiagnosticsAppInfo = testAppInfo(), ledger: ReviewCommitLedger? = null
+    ): DefaultDiagnosticsRepository =
         DefaultDiagnosticsRepository(
             connectionRepository = connection,
             audioRouteManager = routeManager,
@@ -57,7 +62,8 @@ class DiagnosticsExportPrivacyTest {
             studyControlRepository = null,
             persistenceDiagnostics = null,
             persistenceSnapshot = null,
-            appInfo = { appInfo }
+            appInfo = { appInfo },
+            reviewCommitLedger = ledger
         )
 
     private fun testAppInfo() = DiagnosticsAppInfo(
@@ -170,6 +176,27 @@ class DiagnosticsExportPrivacyTest {
         assertTrue(export.contains("--- Network ---"))
         assertTrue(export.contains("--- Performance ---"))
         assertTrue(export.contains("--- Persistence ---"))
+    }
+
+    @Test
+    fun `ledger health and unresolved count are exported without transaction identifiers`() = runTest {
+        val id = AnkiBackendId.Fake("private-backend")
+        val commitId = ReviewCommitId(id, "private-session", ReviewTurnId("private-turn"))
+        val card = AnkiCardRef(id, "private-card", "private-note", 0, "private-collection")
+        val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), { 123L })
+        val request = CommitRatingRequest(commitId, card, Rating.GOOD, 123L)
+        ledger.prepare(request)
+        ledger.claim(commitId, null, false)
+        ledger.markMutationEntered(commitId)
+        ledger.markAmbiguous(commitId, "unknown_response")
+        val h = newHarness(serverDeckSize = 1)
+        val export = h.diagnosticsRepo(ledger = ledger).getFormattedLogsText()
+        assertTrue(export.contains("Ledger health: Ready"))
+        assertTrue(export.contains("Ledger ambiguous: 1"))
+        for (secret in listOf("private-backend", "private-session", "private-turn", "private-card",
+                "private-note", "private-collection", "unknown_response")) {
+            assertFalse("ledger export must not include $secret", export.contains(secret))
+        }
     }
 
     @Test

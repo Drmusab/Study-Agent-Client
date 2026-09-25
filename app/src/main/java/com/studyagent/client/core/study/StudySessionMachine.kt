@@ -295,7 +295,8 @@ class StudySessionMachine(
                 )
             }
             SessionPhase.RatingCommitFailed,
-            SessionPhase.ReconciliationRequired -> StudyState.Error(
+            SessionPhase.ReconciliationRequired,
+            SessionPhase.CommitPersistenceFailure -> StudyState.Error(
                 machine.error?.message ?: "The rating could not be confirmed.",
                 recoverable = true
             )
@@ -415,7 +416,8 @@ class StudySessionMachine(
         // by a COMMITTED commit, and a commit always belongs to the live turn.
         machine.anki?.let { local ->
             val commit = local.commit
-            if (commit != null && commit.state != com.studyagent.client.core.anki.ReviewCommitState.COMMITTED) {
+            if (commit != null && !local.restoredCommit &&
+                commit.state != com.studyagent.client.core.anki.ReviewCommitState.COMMITTED) {
                 if (local.turn == null) {
                     recordInvariantViolation("anki-advanced-without-commit", "turn released while commit is ${commit.state}")
                 } else if (commit.commitId.turnId != local.turn.turnId) {
@@ -490,7 +492,8 @@ class StudySessionMachine(
             is SessionPhase.Paused,
             is SessionPhase.Pausing,
             is SessionPhase.RatingCommitFailed,
-            is SessionPhase.ReconciliationRequired -> false
+            is SessionPhase.ReconciliationRequired,
+            is SessionPhase.CommitPersistenceFailure -> false
 
             is SessionPhase.WaitingForAnswer,
             is SessionPhase.PendingAnswerReview,
@@ -1228,6 +1231,7 @@ class StudySessionMachine(
             is AnkiCommitOutcome.Committed -> "ANKI_COMMIT_COMMITTED"
             is AnkiCommitOutcome.Failed -> "ANKI_COMMIT_FAILED"
             is AnkiCommitOutcome.Ambiguous -> "ANKI_COMMIT_AMBIGUOUS"
+            is AnkiCommitOutcome.PersistenceFailure -> "ANKI_COMMIT_PERSISTENCE_FAILURE"
         }
         tl.record(DiagnosticCategory.SESSION, name, sessionEpoch = epoch, turnId = turn, metadata = base)
         if (transition.effects.any { it is AnkiStudyEffect.Next }) {

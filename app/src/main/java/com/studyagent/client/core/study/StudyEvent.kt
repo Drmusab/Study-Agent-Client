@@ -66,7 +66,9 @@ sealed interface StudyEvent {
         val cardId: String,
         val rating: Rating,
         val nextInterval: String?,
-        val messageId: String?
+        val messageId: String?,
+        val inReplyTo: String? = null,
+        val reviewTurnId: String? = null
     ) : StudyEvent
     data class ServerSessionPaused(val sessionId: String?, val messageId: String?) : StudyEvent
     data class ServerSessionResumed(val sessionId: String?, val messageId: String?) : StudyEvent
@@ -139,7 +141,8 @@ object StudyEventMapper {
         is ServerMessage.Hint -> StudyEvent.ServerHintReceived(msg.cardId, msg.hintText, msg.speak, msg.messageId)
         is ServerMessage.Explanation -> StudyEvent.ServerExplanationReceived(msg.cardId, msg.explanationText, msg.speak, msg.messageId)
         is ServerMessage.Answer -> StudyEvent.ServerAnswerReceived(msg.cardId, msg.answerText, msg.speak, msg.messageId)
-        is ServerMessage.RatingSaved -> StudyEvent.ServerRatingSaved(msg.sessionId, msg.cardId, msg.rating, msg.nextInterval, msg.messageId)
+        is ServerMessage.RatingSaved -> StudyEvent.ServerRatingSaved(msg.sessionId, msg.cardId, msg.rating,
+            msg.nextInterval, msg.messageId, msg.inReplyTo, msg.reviewTurnId)
         is ServerMessage.SessionPaused -> StudyEvent.ServerSessionPaused(msg.sessionId, msg.messageId)
         is ServerMessage.SessionResumed -> StudyEvent.ServerSessionResumed(msg.sessionId, msg.messageId)
         is ServerMessage.SessionFinished -> StudyEvent.ServerSessionFinished(msg.sessionId, msg.totalReviewed, msg.summary, msg.messageId)

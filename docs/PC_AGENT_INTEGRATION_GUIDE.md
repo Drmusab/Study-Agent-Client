@@ -146,7 +146,7 @@ timestamp: string (required) - ISO-8601 UTC
 session_id: string? (optional) - active session, null for hello/auth
 in_reply_to: string? (optional) - correlation, new in v2
 session_revision: long? (optional) - monotonic server revision
-review_turn_id: string? (optional) - turn identity for exactly-once
+review_turn_id: string? (optional) - turn correlation/stale guard, not a durable commit key
 ```
 
 ## 7. Request/Response Table
@@ -158,7 +158,7 @@ review_turn_id: string? (optional) - turn identity for exactly-once
 | authenticate | (none or error) | No | No | Yes | 5s |
 | start_session | session_started | No | Yes | Yes | 5s |
 | submit_answer | evaluation | No | Yes | Yes | 30s (LLM) |
-| rate_card | rating_saved | No | Yes | Yes | 5s |
+| rate_card | rating_saved | No | Yes | Not established in the mock; needs durable logical-ID dedup | 5s |
 | repeat_question | question | No | No | Yes | 5s |
 | request_hint | hint | No | No | Yes | 5s |
 | request_explanation | explanation | No | No | Yes | 5s |
@@ -206,36 +206,13 @@ v1 compatibility: server echoes client's message_id as its own message_id. New i
 
 Client's RequestCoordinator tracks request messageId, expected response type, timeout, result, cancellation. Completed/timed-out removed to prevent leak.
 
-## 9. Idempotency Contract
+## 9. Transport cache vs durable logical rating commit (GATE 11 correction)
 
-- message_id acts as idempotency identifier for mutating requests
-- Server remembers recently processed mutation IDs (e.g. last 200, TTL 1 hour)
-- If duplicate mutation arrives (same message_id), do NOT execute twice, return equivalent ACK/result
+`message_id` identifies one **transport delivery**. Reusing that ID may hit a bounded, in-memory response cache, but it does not prove the backend scheduler effect was durably deduplicated. The supplied `server/mock_pc_agent.py` remembers at most 200 message IDs per in-memory session. A new message ID for the same turn, cache eviction, or server restart bypasses that cache. `review_turn_id` and `session_revision` guard stale context, not backend mutation identity. This mock has **no** server-side durable logical `ReviewCommitId` table, atomic effect/receipt write, or read-only status lookup. Do not present it as end-to-end exactly-once.
 
-Critical for:
+For a *future* PC Agent implementation to advertise `IDEMPOTENT_REPLAY_SUPPORTED`, the protocol must explicitly carry a stable logical commit ID independent of the WebSocket message ID; server persistence must atomically bind `(backend/collection, logical ID, immutable card+rating payload, result/receipt)` to one scheduler effect, survive restarts for the advertised lifetime, reject changed payloads, and provide a read-only query of that same ID. Replay of a proven identical ID must return the saved result without a second scheduler mutation. Demonstrate with tests using **different** message IDs, concurrent delivery, response loss, cache eviction and server restart. End-to-end exactly-once additionally requires a proven progress guarantee across documented failure windows; this repo makes no such claim.
 
-```
-start_session
-submit_answer
-rate_card
-end_session
-update_study_config
-```
-
-Example exactly-once rating:
-
-```
-RateCard X sent
-↓ network disappears
-↓ Android does not receive ACK
-↓ reconnect
-↓ RateCard X resent with same message_id
-↓ Server sees duplicate, returns previous rating_saved without re-applying to Anki
-```
-
-Rating must never apply twice to Anki scheduling.
-
-Answer submission must never evaluate twice unnecessarily; cache/replay result for same request ID.
+Until that contract exists, the Android machine fails closed on an unacknowledged PC rating: it keeps the pending delivery, does not offer blind retry/skip or accept next-card/snapshot state as commit proof, and may progress only on a live, matching `rating_saved` ACK correlated to the original message ID and turn. A process death still loses PC-specific in-memory turn state; PC is **not** included in the Anki-local durable ledger. An older direct repository API remains outside this machine guarantee. See ADR [0008](adr/0008-durable-review-attempts-and-exactly-once-limits.md).
 
 ## 10. Turn Identity & Session Revision
 
@@ -535,7 +512,7 @@ Contract tests should cover:
 - Handshake timeout
 - Ping: normal, late, duplicate, missing
 - Network loss during idle, question, answer submission, evaluation wait, rating
-- Exactly-once: rating sent, server applies, ACK lost, reconnect, same request resent -> applied once
+- Logical-commit audit: different message IDs, ACK loss, restart and cache eviction must not duplicate a scheduler effect **before** advertising idempotent replay (not implemented in this mock)
 - Large payloads
 - Malformed JSON: do not crash
 - Unknown message type: must not destroy connection

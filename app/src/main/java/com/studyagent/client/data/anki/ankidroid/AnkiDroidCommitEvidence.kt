@@ -114,21 +114,19 @@ data class AnkiDroidCardState(
 }
 
 /**
- * GATE 11 — decides whether one answer was applied, from before/after card state (STEP 55-§59).
+ * GATE 11 — advisory card-state comparison during the *synchronous* answer call.
  *
- * Grounded in rslib 25.09.2: every *normal* answer does `reps += 1` and sets `last_review_time`
- * to the answer time, inside one transaction; a filtered-deck *preview* answer changes queue, due
- * or deck instead. Anything that does not fit exactly one answer is [Verdict.Unattributable] —
- * other actors (AnkiDroid's own reviewer, sync, another client) may change a card at any time,
- * and a change they made is never claimed as ours.
+ * Counters and timestamp are NOT a transaction-correlated receipt. They cannot prove a lost
+ * answer was ours, nor that an unchanged card will not be mutated by an outstanding call. This
+ * classifier is never used by process-death reconciliation or by exception/timeout handling.
  */
 internal object AnkiDroidCommitVerifier {
     sealed interface Verdict {
         val detail: String
-        /** Exactly one answer attributable to the mutation window. */
-        data class Applied(override val detail: String) : Verdict
-        /** No answer from this commit. [safeToRetry] = the card is still exactly as rated. */
-        data class NotApplied(override val detail: String, val safeToRetry: Boolean) : Verdict
+        /** Observations consistent with one normal answer, NOT a standalone commit receipt. */
+        data class ConsistentWithAnswer(override val detail: String) : Verdict
+        /** No *observed* change, NOT proof that an outstanding call will never land. */
+        data class Unchanged(override val detail: String) : Verdict
         data class Unattributable(override val detail: String) : Verdict
     }
 
@@ -156,20 +154,17 @@ internal object AnkiDroidCommitVerifier {
                 val reviewedAt = after.lastReviewEpochSeconds
                 when {
                     reviewedAt == null -> Verdict.Unattributable("reps_plus_one_without_review_time")
-                    reviewedAt in startSec..endSec -> Verdict.Applied("reps_plus_one_in_window")
-                    // Exactly one answer happened, but outside this commit's window: that answer is
-                    // someone else's, and ours did not apply. The card moved on — no retry.
-                    else -> Verdict.NotApplied("superseded_by_other_review", safeToRetry = false)
+                    reviewedAt in startSec..endSec -> Verdict.ConsistentWithAnswer("reps_plus_one_in_window")
+                    // Timestamp proximity (or distance) cannot attribute a review to our commit.
+                    else -> Verdict.Unattributable("review_time_outside_window")
                 }
             }
             0 -> when {
                 after.unchangedFrom(before) ->
-                    // Normal cards: an applied answer always moves reps, so no change = not applied.
-                    // Filtered cards may be *preview* cards, which is conservative: unattributable.
                     if (before.inFilteredDeck) Verdict.Unattributable("filtered_deck_no_observable_change")
-                    else Verdict.NotApplied("no_state_change", safeToRetry = true)
+                    else Verdict.Unchanged("no_state_change_observed")
                 before.inFilteredDeck && tightWindow ->
-                    Verdict.Applied("preview_transition_in_window")
+                    Verdict.Unattributable("preview_transition_not_attributable")
                 else -> Verdict.Unattributable("state_changed_without_review")
             }
             else -> Verdict.Unattributable("external_review_activity")

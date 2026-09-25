@@ -21,6 +21,18 @@ object SessionReconciler {
         snapshot: StudySnapshot,
         clockMs: Long = System.currentTimeMillis()
     ): Reconciliation {
+        // PC Agent's current snapshot/revision has no durable ReviewCommitId receipt. Even a
+        // different next card or finished session cannot attribute a lost rate_card delivery.
+        // Keep the pending original message for a later correlated ACK, but never replay it.
+        if (local.anki == null && local.cardTurn?.let { local.ledger.hasRatingInFlight(it.turnId) } == true) {
+            return Reconciliation(local.copy(
+                phase = SessionPhase.Error(SessionProblem.RATING_TIMEOUT),
+                connection = SessionConnectionStatus.CONNECTED,
+                error = SessionProblemHolder(SessionProblem.RATING_TIMEOUT,
+                    "PC rating is unconfirmed. Do not retry or advance without a correlated receipt.", false, clockMs)
+            ), listOf(StudyEffect.Voice.CancelSpeech("pc-rating-unconfirmed"),
+                StudyEffect.Voice.CancelRecognition("pc-rating-unconfirmed")))
+        }
         // Session missing on server -> terminal or error
         if (snapshot.isFinished) {
             val finished = local.copy(
