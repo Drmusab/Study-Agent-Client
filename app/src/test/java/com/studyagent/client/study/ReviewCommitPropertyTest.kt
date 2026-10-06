@@ -218,6 +218,8 @@ class ReviewCommitPropertyTest {
         assertTrue("a COMMITTED row has no failure", row.state != ReviewCommitState.COMMITTED || row.failure == null)
         assertTrue("an AMBIGUOUS row is never safe to retry",
             !(row.state == ReviewCommitState.AMBIGUOUS && row.safeToRetry))
-        assertTrue("a FAILED row explains itself", row.state != ReviewCommitState.FAILED || row.failure != null)
+        assertTrue("a known-not-applied row explains itself",
+            row.state !in setOf(ReviewCommitState.FAILED_SAFE_TO_RETRY, ReviewCommitState.FAILED_NOT_RETRYABLE) ||
+                row.failure != null)
     }
 }

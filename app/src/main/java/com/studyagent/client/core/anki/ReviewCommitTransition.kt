@@ -13,10 +13,20 @@ package com.studyagent.client.core.anki
  * of the ledger file. That is the concurrency model; do not pretend otherwise.
  */
 sealed interface ReviewCommitTransition {
+    /** NOT_STARTED → SUBMITTING/PREPARED, incrementing one real attempt. */
+    data class Prepare(val evidence: ReviewCommitEvidence?) : ReviewCommitTransition
+    /** FAILED_SAFE_TO_RETRY → SUBMITTING/PREPARED for the same immutable payload. */
+    data class RetryPrepared(val evidence: ReviewCommitEvidence? = null) : ReviewCommitTransition
     data object MarkMutationCallEntered : ReviewCommitTransition
     data class MarkResponseReceived(val result: CommitRatingResult) : ReviewCommitTransition
     data class MarkCommitted(val result: CommitRatingResult, val resolution: String) : ReviewCommitTransition
-    data class MarkSafeToRetry(val category: String, val safeToRetry: Boolean = true) : ReviewCommitTransition
+    /** Finalize an already durable response after process recreation; never redispatches. */
+    data object FinalizeRecordedResponse : ReviewCommitTransition
+    data class MarkSafeToRetry(
+        val category: String,
+        val safeToRetry: Boolean = true,
+        val resolution: String = ReviewCommitResolution.REFUSED_BEFORE_DISPATCH
+    ) : ReviewCommitTransition
     data class MarkNotApplied(val category: String, val safeToRetry: Boolean) : ReviewCommitTransition
     data class MarkAmbiguous(val category: String, val resolution: String) : ReviewCommitTransition
     data class MarkReconciled(val result: ReconcileCommitResult, val action: CommitRecoveryAction) : ReviewCommitTransition
@@ -25,7 +35,33 @@ sealed interface ReviewCommitTransition {
     data class NoteAbandoned(val abandonedAtEpochMs: Long) : ReviewCommitTransition
 }
 
+/** Typed failure reasons for a rejected pure transition. No failed command silently becomes a no-op. */
+enum class ReviewCommitTransitionRejection {
+    COMMITTED_TERMINAL,
+    INVALID_BACKEND_RESULT,
+    INVALID_RECONCILIATION_ACTION,
+    ILLEGAL_STATE_TRANSITION,
+    IDENTITY_MUTATION,
+    INVALID_RESULT_RECORD
+}
+
+sealed interface ReviewCommitTransitionResult {
+    data class Applied(val record: ReviewCommitRecord) : ReviewCommitTransitionResult
+    data class Rejected(val reason: ReviewCommitTransitionRejection) : ReviewCommitTransitionResult
+}
+
 object ReviewCommitTransitions {
+    /** Validates an initial durable intent; creation is not an unrestricted state transition. */
+    fun validateInitial(record: ReviewCommitRecord): ReviewCommitTransitionResult {
+        val valid = record.state == ReviewCommitState.NOT_STARTED && record.attemptCount == 0 &&
+            record.phase == null && record.response == null && record.failure == null &&
+            record.committedRating == null && record.submittedAtEpochMs == null &&
+            record.resolvedAtEpochMs == null && record.acknowledged.not() &&
+            record.version == 0L && record.abandonedAtEpochMs == null
+        return if (valid) ReviewCommitTransitionResult.Applied(record)
+        else ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.INVALID_RESULT_RECORD)
+    }
+
     fun responseEvidence(record: ReviewCommitRecord, result: CommitRatingResult): CommitResponseEvidence? = when (result) {
         is CommitRatingResult.Committed -> {
             val receipt = result.receipt
@@ -44,17 +80,19 @@ object ReviewCommitTransitions {
         )
     }
 
-    fun terminalFromResponse(record: ReviewCommitRecord, resolution: String, now: Long): ReviewCommitRecord {
+    private fun terminalFromResponse(record: ReviewCommitRecord, resolution: String, now: Long): ReviewCommitRecord {
         val response = checkNotNull(record.response)
         val state = when (response.kind) {
             CommitResponseKind.CONFIRMED_COMMITTED -> ReviewCommitState.COMMITTED
-            CommitResponseKind.CONFIRMED_NOT_APPLIED -> ReviewCommitState.FAILED
+            CommitResponseKind.CONFIRMED_NOT_APPLIED -> if (response.failure?.safeToRetry == true)
+                ReviewCommitState.FAILED_SAFE_TO_RETRY else ReviewCommitState.FAILED_NOT_RETRYABLE
             CommitResponseKind.OUTCOME_UNKNOWN -> ReviewCommitState.AMBIGUOUS
         }
         return record.copy(
             state = state,
             phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
             failure = response.failure,
+            committedRating = if (state == ReviewCommitState.COMMITTED) record.selectedRating else null,
             resolution = resolutionFor(state, resolution, response),
             updatedAtEpochMs = now,
             resolvedAtEpochMs = now
@@ -64,8 +102,8 @@ object ReviewCommitTransitions {
     fun resolutionFor(state: ReviewCommitState, source: String, response: CommitResponseEvidence): String =
         if (source != ReviewCommitResolution.BACKEND_CONFIRMED) source else when (state) {
             ReviewCommitState.COMMITTED -> ReviewCommitResolution.BACKEND_CONFIRMED
-            ReviewCommitState.FAILED -> if (response.failure?.safeToRetry == true)
-                ReviewCommitResolution.BACKEND_NOT_APPLIED else ReviewCommitResolution.BACKEND_REJECTED
+            ReviewCommitState.FAILED_SAFE_TO_RETRY -> ReviewCommitResolution.BACKEND_NOT_APPLIED
+            ReviewCommitState.FAILED_NOT_RETRYABLE -> ReviewCommitResolution.BACKEND_REJECTED
             ReviewCommitState.AMBIGUOUS -> ReviewCommitResolution.BACKEND_AMBIGUOUS
             else -> source
         }
@@ -74,12 +112,60 @@ object ReviewCommitTransitions {
      * Pure command application. `null` means the command is illegal for [record] and must not be
      * written. Does not assign [ReviewCommitRecord.version]; the ledger stamps that at the write.
      */
-    fun apply(record: ReviewCommitRecord, transition: ReviewCommitTransition, now: Long): ReviewCommitRecord? {
-        if (record.state == ReviewCommitState.COMMITTED && transition !is ReviewCommitTransition.NoteAbandoned &&
-            transition !is ReviewCommitTransition.Acknowledge) {
-            return null
+    fun transition(
+        record: ReviewCommitRecord,
+        transition: ReviewCommitTransition,
+        now: Long
+    ): ReviewCommitTransitionResult {
+        if (record.state == ReviewCommitState.COMMITTED && transition !is ReviewCommitTransition.NoteAbandoned) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.COMMITTED_TERMINAL)
         }
+        if (transition is ReviewCommitTransition.MarkResponseReceived &&
+            responseEvidence(record, transition.result) == null) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.INVALID_BACKEND_RESULT)
+        }
+        if (transition is ReviewCommitTransition.MarkCommitted &&
+            record.response != responseEvidence(record, transition.result)) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.INVALID_BACKEND_RESULT)
+        }
+        if ((transition is ReviewCommitTransition.MarkCommitted && transition.resolution.isBlank()) ||
+            (transition is ReviewCommitTransition.MarkAmbiguous && transition.resolution.isBlank())) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.INVALID_RESULT_RECORD)
+        }
+        if (transition is ReviewCommitTransition.MarkReconciled &&
+            ReviewCommitRecoveryPolicy().classify(record, transition.result) != transition.action) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.INVALID_RECONCILIATION_ACTION)
+        }
+        val next = try {
+            applyUnchecked(record, transition, now)
+        } catch (_: IllegalArgumentException) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.INVALID_RESULT_RECORD)
+        } ?: return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.ILLEGAL_STATE_TRANSITION)
+        if (!sameIdentity(record, next) ||
+            (record.evidence != null && next.evidence != record.evidence)) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.IDENTITY_MUTATION)
+        }
+        return ReviewCommitTransitionResult.Applied(next)
+    }
+
+    private fun sameIdentity(before: ReviewCommitRecord, after: ReviewCommitRecord): Boolean =
+        before.commitId == after.commitId && before.backendId == after.backendId &&
+            before.sessionId == after.sessionId && before.turnId == after.turnId &&
+            before.collectionRef == after.collectionRef && before.deckRef == after.deckRef &&
+            before.cardRef == after.cardRef && before.selectedRating == after.selectedRating &&
+            before.createdAtEpochMs == after.createdAtEpochMs && before.ratedAtEpochMs == after.ratedAtEpochMs &&
+            before.answerDurationMs == after.answerDurationMs && before.frozenGuarantee == after.frozenGuarantee &&
+            before.frozenIdempotentReplay == after.frozenIdempotentReplay &&
+            before.frozenAuthoritativeReconciliation == after.frozenAuthoritativeReconciliation
+
+    private fun applyUnchecked(
+        record: ReviewCommitRecord,
+        transition: ReviewCommitTransition,
+        now: Long
+    ): ReviewCommitRecord? {
         return when (transition) {
+            is ReviewCommitTransition.Prepare -> prepare(record, transition.evidence, now)
+            is ReviewCommitTransition.RetryPrepared -> retryPrepared(record, transition.evidence, now)
             ReviewCommitTransition.MarkMutationCallEntered ->
                 if (record.state == ReviewCommitState.SUBMITTING && record.phase == CommitAttemptPhase.PREPARED)
                     record.copy(phase = CommitAttemptPhase.MUTATION_CALL_ENTERED, updatedAtEpochMs = now) else null
@@ -95,16 +181,22 @@ object ReviewCommitTransitions {
                     record.response != responseEvidence(record, transition.result)) return null
                 terminalFromResponse(record, transition.resolution, now)
             }
+            ReviewCommitTransition.FinalizeRecordedResponse ->
+                if (record.state == ReviewCommitState.SUBMITTING &&
+                    record.phase == CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED && record.response != null)
+                    terminalFromResponse(record, ReviewCommitResolution.RECOVERED_RESPONSE, now)
+                else null
             is ReviewCommitTransition.MarkSafeToRetry ->
                 if (record.state == ReviewCommitState.SUBMITTING && record.phase == CommitAttemptPhase.PREPARED)
-                    failed(record, transition.category, transition.safeToRetry, ReviewCommitResolution.RECOVERED_PREPARED, now)
+                    failed(record, transition.category, transition.safeToRetry, transition.resolution, now)
                 else null
             is ReviewCommitTransition.MarkNotApplied ->
                 if (record.state == ReviewCommitState.NOT_STARTED || record.safeToRetry)
                     record.copy(
-                        state = ReviewCommitState.FAILED,
+                        state = failureState(transition.safeToRetry),
                         phase = if (record.attemptCount == 0) null else CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
                         response = null,
+                        committedRating = null,
                         failure = ReviewCommitFailure(transition.category.take(96), transition.safeToRetry),
                         resolution = ReviewCommitResolution.REFUSED_BEFORE_DISPATCH,
                         updatedAtEpochMs = now,
@@ -120,7 +212,7 @@ object ReviewCommitTransitions {
             }
             is ReviewCommitTransition.MarkReconciled -> reconcile(record, transition, now)
             ReviewCommitTransition.Acknowledge ->
-                if (record.state == ReviewCommitState.AMBIGUOUS || record.state == ReviewCommitState.FAILED)
+                if (record.state == ReviewCommitState.AMBIGUOUS || record.state in FAILED_REVIEW_COMMIT_STATES)
                     record.copy(acknowledged = true, updatedAtEpochMs = now) else null
             is ReviewCommitTransition.NoteAbandoned ->
                 if (transition.abandonedAtEpochMs >= 0)
@@ -133,33 +225,31 @@ object ReviewCommitTransitions {
      * `version == before.version + 1`. Metadata-only updates (acknowledge, abandon) may keep state.
      */
     fun allowed(before: ReviewCommitRecord, after: ReviewCommitRecord): Boolean {
-        if (before.commitId != after.commitId || before.card != after.card || before.rating != after.rating ||
-            before.turnId != after.turnId || before.sessionId != after.sessionId ||
-            before.createdAtEpochMs != after.createdAtEpochMs) return false
-        if (before.deckRef != null && after.deckRef != before.deckRef) return false
+        if (!sameIdentity(before, after) ||
+            (before.evidence != null && after.evidence != before.evidence)) return false
         if (after.version != before.version + 1 || after.attemptCount < before.attemptCount) return false
         if (before.state == ReviewCommitState.COMMITTED && after.state != ReviewCommitState.COMMITTED) return false
         if (before.state == ReviewCommitState.AMBIGUOUS && after.state == ReviewCommitState.SUBMITTING) return false
-        if (before.state == ReviewCommitState.FAILED && !before.safeToRetry &&
-            after.state == ReviewCommitState.SUBMITTING) return false
+        if (before.state != ReviewCommitState.FAILED_SAFE_TO_RETRY &&
+            after.state == ReviewCommitState.SUBMITTING && before.state in FAILED_REVIEW_COMMIT_STATES) return false
         if (after.attemptCount > before.attemptCount &&
             (after.attemptCount != before.attemptCount + 1 || after.state != ReviewCommitState.SUBMITTING ||
                 after.phase != CommitAttemptPhase.PREPARED ||
                 (before.state != ReviewCommitState.NOT_STARTED &&
-                    !(before.state == ReviewCommitState.FAILED && before.safeToRetry)))) return false
+                    before.state != ReviewCommitState.FAILED_SAFE_TO_RETRY))) return false
         if (before.state == after.state && before.phase == after.phase && before.attemptCount == after.attemptCount &&
             before.response == after.response && before.failure == after.failure) return true
         return when (before.state) {
             ReviewCommitState.NOT_STARTED ->
                 (after.state == ReviewCommitState.SUBMITTING && after.phase == CommitAttemptPhase.PREPARED &&
                     after.attemptCount == before.attemptCount + 1) ||
-                    (after.state == ReviewCommitState.FAILED && after.attemptCount == before.attemptCount)
+                    (after.state in FAILED_REVIEW_COMMIT_STATES && after.attemptCount == before.attemptCount)
             ReviewCommitState.SUBMITTING -> when (before.phase) {
                 CommitAttemptPhase.PREPARED ->
                     (after.state == ReviewCommitState.SUBMITTING &&
                         after.phase == CommitAttemptPhase.MUTATION_CALL_ENTERED &&
                         after.attemptCount == before.attemptCount) ||
-                        (after.state == ReviewCommitState.FAILED &&
+                        (after.state in FAILED_REVIEW_COMMIT_STATES &&
                             after.phase == CommitAttemptPhase.LOCAL_RESULT_PERSISTED) ||
                         (after.state == ReviewCommitState.AMBIGUOUS &&
                             after.phase == CommitAttemptPhase.LOCAL_RESULT_PERSISTED)
@@ -173,18 +263,23 @@ object ReviewCommitTransitions {
                     after.phase == CommitAttemptPhase.LOCAL_RESULT_PERSISTED &&
                         after.attemptCount == before.attemptCount && after.response == before.response &&
                         after.state in setOf(
-                            ReviewCommitState.COMMITTED, ReviewCommitState.FAILED, ReviewCommitState.AMBIGUOUS
+                            ReviewCommitState.COMMITTED, ReviewCommitState.FAILED_SAFE_TO_RETRY,
+                            ReviewCommitState.FAILED_NOT_RETRYABLE, ReviewCommitState.AMBIGUOUS
                         )
                 CommitAttemptPhase.LOCAL_RESULT_PERSISTED, null -> false
             }
-            ReviewCommitState.FAILED ->
-                (after.state == ReviewCommitState.FAILED && after.attemptCount == before.attemptCount) ||
-                    (before.safeToRetry && after.state == ReviewCommitState.SUBMITTING &&
+            ReviewCommitState.FAILED_SAFE_TO_RETRY ->
+                (after.state in setOf(ReviewCommitState.FAILED_SAFE_TO_RETRY,
+                    ReviewCommitState.FAILED_NOT_RETRYABLE) && after.attemptCount == before.attemptCount) ||
+                    (after.state == ReviewCommitState.SUBMITTING &&
                         after.phase == CommitAttemptPhase.PREPARED &&
                         after.attemptCount == before.attemptCount + 1)
+            ReviewCommitState.FAILED_NOT_RETRYABLE ->
+                after.state == ReviewCommitState.FAILED_NOT_RETRYABLE && after.attemptCount == before.attemptCount
             ReviewCommitState.AMBIGUOUS ->
                 after.attemptCount == before.attemptCount && after.state in setOf(
-                    ReviewCommitState.AMBIGUOUS, ReviewCommitState.COMMITTED, ReviewCommitState.FAILED
+                    ReviewCommitState.AMBIGUOUS, ReviewCommitState.COMMITTED,
+                    ReviewCommitState.FAILED_SAFE_TO_RETRY, ReviewCommitState.FAILED_NOT_RETRYABLE
                 )
             ReviewCommitState.COMMITTED ->
                 after.state == ReviewCommitState.COMMITTED && after.phase == before.phase &&
@@ -193,11 +288,37 @@ object ReviewCommitTransitions {
         }
     }
 
+    private fun prepare(record: ReviewCommitRecord, evidence: ReviewCommitEvidence?, now: Long): ReviewCommitRecord? =
+        if (record.state != ReviewCommitState.NOT_STARTED || record.attemptCount != 0) null
+        else submitting(record, evidence, now)
+
+    private fun retryPrepared(record: ReviewCommitRecord, evidence: ReviewCommitEvidence?, now: Long): ReviewCommitRecord? =
+        if (record.state != ReviewCommitState.FAILED_SAFE_TO_RETRY) null
+        else submitting(record, evidence, now)
+
+    private fun submitting(record: ReviewCommitRecord, evidence: ReviewCommitEvidence?, now: Long) = record.copy(
+        state = ReviewCommitState.SUBMITTING,
+        attemptCount = record.attemptCount + 1,
+        phase = CommitAttemptPhase.PREPARED,
+        response = null,
+        committedRating = null,
+        evidence = record.evidence ?: evidence,
+        submittedAtEpochMs = now,
+        updatedAtEpochMs = now,
+        resolvedAtEpochMs = null,
+        failure = null,
+        resolution = null
+    )
+
+    private fun failureState(safeToRetry: Boolean) = if (safeToRetry)
+        ReviewCommitState.FAILED_SAFE_TO_RETRY else ReviewCommitState.FAILED_NOT_RETRYABLE
+
     private fun failed(
         record: ReviewCommitRecord, category: String, safeToRetry: Boolean, resolution: String, now: Long
     ) = record.copy(
-        state = ReviewCommitState.FAILED,
+        state = failureState(safeToRetry),
         phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
+        committedRating = null,
         failure = ReviewCommitFailure(category.take(96), safeToRetry),
         resolution = resolution,
         updatedAtEpochMs = now,
@@ -219,17 +340,18 @@ object ReviewCommitTransitions {
         if (record.state != ReviewCommitState.AMBIGUOUS) return null
         val next = when (transition.action) {
             CommitRecoveryAction.ResumeCommitted -> record.copy(
-                state = ReviewCommitState.COMMITTED, response = null, failure = null,
+                state = ReviewCommitState.COMMITTED, committedRating = record.selectedRating,
+                response = null, failure = null,
                 resolution = ReviewCommitResolution.RECONCILED_APPLIED
             )
             CommitRecoveryAction.RetryAllowed -> record.copy(
-                state = ReviewCommitState.FAILED, response = null,
+                state = ReviewCommitState.FAILED_SAFE_TO_RETRY, committedRating = null, response = null,
                 failure = ReviewCommitFailure("reconciled_not_applied", true),
                 resolution = ReviewCommitResolution.RECONCILED_NOT_APPLIED
             )
             CommitRecoveryAction.BlockedUnresolved -> if (transition.result is ReconcileCommitResult.NotApplied)
                 record.copy(
-                    state = ReviewCommitState.FAILED, response = null,
+                    state = ReviewCommitState.FAILED_NOT_RETRYABLE, committedRating = null, response = null,
                     failure = ReviewCommitFailure("reconciled_not_applied", false),
                     resolution = ReviewCommitResolution.RECONCILED_NOT_APPLIED
                 )

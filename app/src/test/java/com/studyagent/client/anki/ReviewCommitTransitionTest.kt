@@ -2,11 +2,14 @@ package com.studyagent.client.anki
 
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiCollectionIdentity
+import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.CommitAttemptPhase
 import com.studyagent.client.core.anki.CommitRatingResult
 import com.studyagent.client.core.anki.CommitResponseEvidence
 import com.studyagent.client.core.anki.CommitResponseKind
+import com.studyagent.client.core.anki.CommitReceipt
 import com.studyagent.client.core.anki.CommitRecoveryAction
 import com.studyagent.client.core.anki.ReconcileCommitResult
 import com.studyagent.client.core.anki.ReviewCommitFailure
@@ -14,6 +17,9 @@ import com.studyagent.client.core.anki.ReviewCommitId
 import com.studyagent.client.core.anki.ReviewCommitRecord
 import com.studyagent.client.core.anki.ReviewCommitState
 import com.studyagent.client.core.anki.ReviewCommitTransition
+import com.studyagent.client.core.anki.ReviewCommitTransitionRejection
+import com.studyagent.client.core.anki.ReviewCommitTransitionResult
+import com.studyagent.client.core.anki.ReviewCommitEvidence
 import com.studyagent.client.core.anki.ReviewTurnId
 import com.studyagent.client.core.anki.ReviewCommitTransitions
 import com.studyagent.client.core.models.Rating
@@ -49,6 +55,7 @@ class ReviewCommitTransitionTest {
         phase = phase,
         response = response,
         failure = failure,
+        committedRating = if (state == ReviewCommitState.COMMITTED) Rating.GOOD else null,
         createdAtEpochMs = 1_000,
         updatedAtEpochMs = 1_000,
         ratedAtEpochMs = 900,
@@ -57,7 +64,45 @@ class ReviewCommitTransitionTest {
 
     private val now = 5_000L
 
+    private fun assertIsApplied(result: ReviewCommitTransitionResult): ReviewCommitRecord = when (result) {
+        is ReviewCommitTransitionResult.Applied -> result.record
+        is ReviewCommitTransitionResult.Rejected -> error("unexpected rejection: ${result.reason}")
+    }
+
+    /** Test shorthand; rejection assertions that care about the reason use the typed engine directly. */
+    private fun apply(
+        record: ReviewCommitRecord,
+        command: ReviewCommitTransition,
+        at: Long = now
+    ): ReviewCommitRecord? = when (val result = ReviewCommitTransitions.transition(record, command, at)) {
+        is ReviewCommitTransitionResult.Applied -> result.record
+        is ReviewCommitTransitionResult.Rejected -> null
+    }
+
     // ------------------------------------------------------------ required transitions
+
+    @Test fun `NOT_STARTED prepares exactly one attempt through the typed engine`() {
+        val before = record(ReviewCommitState.NOT_STARTED)
+        val result = ReviewCommitTransitions.transition(
+            before, ReviewCommitTransition.Prepare(ReviewCommitEvidence("test-v1", "baseline=0")), now)
+        val after = assertIsApplied(result)
+        assertEquals(ReviewCommitState.SUBMITTING, after.state)
+        assertEquals(CommitAttemptPhase.PREPARED, after.phase)
+        assertEquals(1, after.attemptCount)
+        assertEquals(before.commitId, after.commitId)
+        assertEquals(before.rating, after.selectedRating)
+        assertNull(after.committedRating)
+    }
+
+    @Test fun `prepared enters the mutation boundary without incrementing attempts`() {
+        val prepared = ReviewCommitTransitions.transition(
+            record(ReviewCommitState.NOT_STARTED), ReviewCommitTransition.Prepare(null), now)
+        val before = assertIsApplied(prepared)
+        val after = assertIsApplied(ReviewCommitTransitions.transition(
+            before, ReviewCommitTransition.MarkMutationCallEntered, now + 1))
+        assertEquals(CommitAttemptPhase.MUTATION_CALL_ENTERED, after.phase)
+        assertEquals(1, after.attemptCount)
+    }
 
     @Test
     fun `NOT_STARTED to SUBMITTING is the only legal first step`() {
@@ -82,6 +127,7 @@ class ReviewCommitTransitionTest {
         val final = received.copy(
             state = ReviewCommitState.COMMITTED,
             phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
+            committedRating = Rating.GOOD,
             version = 2
         )
         assertTrue(ReviewCommitTransitions.allowed(received, final))
@@ -90,9 +136,9 @@ class ReviewCommitTransitionTest {
     @Test
     fun `SUBMITTING to FAILED_SAFE_TO_RETRY is legal only before the mutation call is entered`() {
         val prepared = record(ReviewCommitState.SUBMITTING, CommitAttemptPhase.PREPARED)
-        val failed = ReviewCommitTransitions.apply(
+        val failed = apply(
             prepared, ReviewCommitTransition.MarkSafeToRetry("preflight_refused"), now)!!
-        assertEquals(ReviewCommitState.FAILED, failed.state)
+        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, failed.state)
         assertTrue(failed.failure!!.safeToRetry)
         assertTrue(ReviewCommitTransitions.allowed(prepared, failed.copy(version = 1)))
     }
@@ -101,7 +147,7 @@ class ReviewCommitTransitionTest {
     fun `SUBMITTING to AMBIGUOUS is legal from PREPARED and from CALL_ENTERED`() {
         for (phase in listOf(CommitAttemptPhase.PREPARED, CommitAttemptPhase.MUTATION_CALL_ENTERED)) {
             val before = record(ReviewCommitState.SUBMITTING, phase)
-            val after = ReviewCommitTransitions.apply(
+            val after = apply(
                 before, ReviewCommitTransition.MarkAmbiguous("outcome_unknown", "backend_ambiguous"), now)!!
             assertEquals(ReviewCommitState.AMBIGUOUS, after.state)
             assertFalse("ambiguity is never retryable on its own", after.safeToRetry)
@@ -111,7 +157,7 @@ class ReviewCommitTransitionTest {
 
     @Test
     fun `FAILED_SAFE_TO_RETRY to SUBMITTING is legal and keeps the identity and rating`() {
-        val failed = ReviewCommitTransitions.apply(
+        val failed = apply(
             record(ReviewCommitState.SUBMITTING, CommitAttemptPhase.PREPARED),
             ReviewCommitTransition.MarkSafeToRetry("preflight_refused"), now)!!.copy(version = 1)
         val retry = failed.copy(
@@ -128,13 +174,13 @@ class ReviewCommitTransitionTest {
 
     @Test
     fun `AMBIGUOUS to COMMITTED is legal only through reconciliation`() {
-        val ambiguous = ReviewCommitTransitions.apply(
+        val ambiguous = apply(
             record(ReviewCommitState.SUBMITTING, CommitAttemptPhase.MUTATION_CALL_ENTERED),
             ReviewCommitTransition.MarkAmbiguous("lost_response", "backend_ambiguous"), now)!!.copy(version = 1)
         // Directly assigning COMMITTED is not a transition the engine offers at all.
-        assertNull(ReviewCommitTransitions.apply(
+        assertNull(apply(
             ambiguous, ReviewCommitTransition.MarkCommitted(CommitRatingResult.Committed(), "fabricated"), now))
-        val reconciled = ReviewCommitTransitions.apply(
+        val reconciled = apply(
             ambiguous,
             ReviewCommitTransition.MarkReconciled(ReconcileCommitResult.Applied("proof"), CommitRecoveryAction.ResumeCommitted),
             now)!!
@@ -144,15 +190,15 @@ class ReviewCommitTransitionTest {
 
     @Test
     fun `AMBIGUOUS to FAILED_SAFE_TO_RETRY requires reconciliation proof that it was not applied`() {
-        val ambiguous = ReviewCommitTransitions.apply(
+        val ambiguous = apply(
             record(ReviewCommitState.SUBMITTING, CommitAttemptPhase.MUTATION_CALL_ENTERED),
             ReviewCommitTransition.MarkAmbiguous("lost_response", "backend_ambiguous"), now)!!.copy(version = 1)
-        val reconciled = ReviewCommitTransitions.apply(
+        val reconciled = apply(
             ambiguous,
             ReviewCommitTransition.MarkReconciled(
                 ReconcileCommitResult.NotApplied("not applied", safeToRetry = true), CommitRecoveryAction.RetryAllowed),
             now)!!
-        assertEquals(ReviewCommitState.FAILED, reconciled.state)
+        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, reconciled.state)
         assertTrue(reconciled.safeToRetry)
         assertTrue(ReviewCommitTransitions.allowed(ambiguous, reconciled.copy(version = 2)))
     }
@@ -174,10 +220,10 @@ class ReviewCommitTransitionTest {
             ReviewCommitTransition.MarkReconciled(
                 ReconcileCommitResult.Applied("late"), CommitRecoveryAction.ResumeCommitted)
         )) {
-            assertNull("$command must not move a COMMITTED record", ReviewCommitTransitions.apply(committed, command, now))
+            assertNull("$command must not move a COMMITTED record", apply(committed, command, now))
         }
         // Metadata-only notes are the only thing a COMMITTED record accepts.
-        assertNotNull(ReviewCommitTransitions.apply(
+        assertNotNull(apply(
             committed, ReviewCommitTransition.NoteAbandoned(9_000), now))
     }
 
@@ -192,23 +238,34 @@ class ReviewCommitTransitionTest {
             version = 1
         )
         assertFalse(ReviewCommitTransitions.allowed(ambiguous, directRetry))
-        assertNull(ReviewCommitTransitions.apply(ambiguous, ReviewCommitTransition.MarkSafeToRetry("invented"), now))
+        assertNull(apply(ambiguous, ReviewCommitTransition.MarkSafeToRetry("invented"), now))
     }
 
     @Test
     fun `COMMITTED cannot be downgraded and a second attempt cannot be invented`() {
         val committed = record(ReviewCommitState.COMMITTED, CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
             response = CommitResponseEvidence(CommitResponseKind.CONFIRMED_COMMITTED))
-        val downgraded = committed.copy(state = ReviewCommitState.FAILED,
-            failure = ReviewCommitFailure("late", false), attemptCount = 2, version = 1)
+        val downgraded = committed.copy(state = ReviewCommitState.FAILED_NOT_RETRYABLE,
+            committedRating = null, response = null, failure = ReviewCommitFailure("late", false),
+            attemptCount = 2, version = 1)
         assertFalse(ReviewCommitTransitions.allowed(committed, downgraded))
+    }
+
+    @Test fun `a safe-to-retry failure may be narrowed but never silently widened`() {
+        val safe = apply(record(ReviewCommitState.SUBMITTING, CommitAttemptPhase.PREPARED),
+            ReviewCommitTransition.MarkSafeToRetry("preflight"), now)!!
+        val notRetryable = apply(safe,
+            ReviewCommitTransition.MarkNotApplied("request_conflict", safeToRetry = false), now)
+        assertEquals(ReviewCommitState.FAILED_NOT_RETRYABLE, notRetryable?.state)
+        assertFalse(notRetryable!!.safeToRetry)
+        assertTrue(ReviewCommitTransitions.allowed(safe, notRetryable.copy(version = safe.version + 1)))
     }
 
     @Test
     fun `a not-applied command is refused for a non-retryable failure`() {
-        val rejected = record(ReviewCommitState.FAILED, CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
+        val rejected = record(ReviewCommitState.FAILED_NOT_RETRYABLE, CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
             failure = ReviewCommitFailure("rejected", false))
-        assertNull(ReviewCommitTransitions.apply(rejected, ReviewCommitTransition.MarkNotApplied("again", true), now))
+        assertNull(apply(rejected, ReviewCommitTransition.MarkNotApplied("again", true), now))
         val retry = rejected.copy(state = ReviewCommitState.SUBMITTING, phase = CommitAttemptPhase.PREPARED,
             attemptCount = 2, version = 1)
         assertFalse(ReviewCommitTransitions.allowed(rejected, retry))
@@ -225,6 +282,15 @@ class ReviewCommitTransitionTest {
             ReviewCommitTransitions.responseEvidence(record, foreign))
     }
 
+    @Test fun `recorded receipt can be read before terminal finalization without fabricating committedRating`() {
+        val entered = record(ReviewCommitState.SUBMITTING, CommitAttemptPhase.MUTATION_CALL_ENTERED)
+        val proof = ReviewCommitResultCommitted(entered.backendId, Rating.GOOD)
+        val received = assertIsApplied(ReviewCommitTransitions.transition(
+            entered, ReviewCommitTransition.MarkResponseReceived(proof), now))
+        assertNull(received.committedRating)
+        assertEquals(Rating.GOOD, received.receipt?.committedRating)
+    }
+
     @Test
     fun `every OUTCOME_UNKNOWN answer is recorded as unknown and never as applied`() {
         val record = record(ReviewCommitState.SUBMITTING, CommitAttemptPhase.MUTATION_CALL_ENTERED)
@@ -238,10 +304,10 @@ class ReviewCommitTransitionTest {
     fun `an illegal transition is rejected with a typed absence before any state change`() {
         val fresh = record(ReviewCommitState.NOT_STARTED)
         // No command may jump from NOT_STARTED straight to a terminal state.
-        assertNull(ReviewCommitTransitions.apply(
+        assertNull(apply(
             fresh, ReviewCommitTransition.MarkCommitted(CommitRatingResult.Committed(), "skip"), now))
-        assertNull(ReviewCommitTransitions.apply(fresh, ReviewCommitTransition.MarkMutationCallEntered, now))
-        assertNull(ReviewCommitTransitions.apply(fresh,
+        assertNull(apply(fresh, ReviewCommitTransition.MarkMutationCallEntered, now))
+        assertNull(apply(fresh,
             ReviewCommitTransition.MarkAmbiguous("before_dispatch", "backend_ambiguous"), now))
         // And nothing may reopen a turn with a different identity.
         val other = fresh.copy(
@@ -253,10 +319,49 @@ class ReviewCommitTransitionTest {
     fun `metadata-only notes keep the state and never mean not committed`() {
         val committed = record(ReviewCommitState.COMMITTED, CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
             response = CommitResponseEvidence(CommitResponseKind.CONFIRMED_COMMITTED))
-        val noted = ReviewCommitTransitions.apply(committed, ReviewCommitTransition.NoteAbandoned(9_000), now)!!
+        val noted = apply(committed, ReviewCommitTransition.NoteAbandoned(9_000), now)!!
         assertEquals(ReviewCommitState.COMMITTED, noted.state)
         assertTrue(ReviewCommitTransitions.allowed(committed, noted.copy(version = committed.version + 1)))
     }
+
+    @Test fun `reconciliation result and requested action cannot contradict each other`() {
+        val ambiguous = record(ReviewCommitState.AMBIGUOUS, CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
+            failure = ReviewCommitFailure("lost", false))
+        val result = ReviewCommitTransitions.transition(ambiguous,
+            ReviewCommitTransition.MarkReconciled(
+                ReconcileCommitResult.StillAmbiguous("no_receipt"), CommitRecoveryAction.ResumeCommitted), now)
+        assertEquals(ReviewCommitTransitionRejection.INVALID_RECONCILIATION_ACTION,
+            (result as ReviewCommitTransitionResult.Rejected).reason)
+        assertNull(apply(ambiguous,
+            ReviewCommitTransition.MarkReconciled(
+                ReconcileCommitResult.NotApplied("not applied", true), CommitRecoveryAction.ResumeCommitted), now))
+    }
+
+    @Test fun `identity fields are immutable even when collection identity was initially unknown`() {
+        val before = record(ReviewCommitState.NOT_STARTED)
+        val backend = before.backendId
+        val changedCollection = before.copy(
+            collectionRef = AnkiCollectionIdentity(backend, "collection"), version = before.version + 1)
+        assertFalse(ReviewCommitTransitions.allowed(before, changedCollection))
+        val changedDeck = before.copy(
+            deckRef = AnkiDeckRef(backend, "deck", "collection"), version = before.version + 1)
+        assertFalse(ReviewCommitTransitions.allowed(before, changedDeck))
+        assertEquals(ReviewCommitTransitionRejection.ILLEGAL_STATE_TRANSITION,
+            (ReviewCommitTransitions.transition(before, ReviewCommitTransition.MarkMutationCallEntered, now)
+                as ReviewCommitTransitionResult.Rejected).reason)
+    }
+
+    @Test fun `a receipt for a different rating is a typed backend-result rejection`() {
+        val entered = record(ReviewCommitState.SUBMITTING, CommitAttemptPhase.MUTATION_CALL_ENTERED)
+        val result = ReviewCommitResultCommitted(AnkiBackendId.Fake(), Rating.HARD)
+        val rejection = ReviewCommitTransitions.transition(
+            entered, ReviewCommitTransition.MarkResponseReceived(result), now)
+        assertEquals(ReviewCommitTransitionRejection.INVALID_BACKEND_RESULT,
+            (rejection as ReviewCommitTransitionResult.Rejected).reason)
+    }
+
+    private fun ReviewCommitResultCommitted(backend: AnkiBackendId, rating: Rating) =
+        CommitRatingResult.Committed(receipt = CommitReceipt(backend, "receipt", rating))
 
     @Test
     fun `an attempt count may only grow by exactly one and only into SUBMITTING`() {

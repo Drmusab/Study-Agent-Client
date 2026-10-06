@@ -125,27 +125,22 @@ class FakeAnkiBackend(
     // ---------------------------------------------------------------- GATE 11 commit controls
 
     private val invocations = AtomicInteger(0)
-    private val physicalCalls = AtomicInteger(0)
+    private val mutationBoundaryCrossings = AtomicInteger(0)
 
     /** Every `commitRating` call, including ones answered from the fake's own dedup ledger. */
     val commitInvocations: Int get() = invocations.get()
 
-    /**
-     * Calls that reached the stand-in's *mutation step* (consumed a scripted outcome). This is the
-     * physical-dispatch counter: dedup hits, validation refusals and pre-dispatch unavailability
-     * never increment it.
-     */
-    val physicalCommitCalls: Int get() = physicalCalls.get()
+    /** Durable mutation-boundary crossings accepted by the transaction layer. */
+    val mutationBoundaryCrossingCount: Int get() = mutationBoundaryCrossings.get()
+    /** Compatibility name: this is the boundary-attempt count, not the effect count. */
+    val physicalCommitCalls: Int get() = mutationBoundaryCrossingCount
     val logicalCommitCount: Int get() = ledger.size
+    /** Actual simulated scheduler effects; an ambiguous response may still have zero or one. */
     val backendEffectCount: Int get() = ledger.values.sumOf { it.mutationCount }
+    /** Every commitRating delivery, including failures and backend-table replays. */
     val deliveryCount: Int get() = invocations.get()
-
-    /**
-     * Deliveries that reached the fake's mutation step. GATE 11 checkpoint 4 requires this counter
-     * separately from [deliveryCount]: a dedup hit or a pre-dispatch refusal is a delivery but not a
-     * mutation attempt, and only this number may grow when a real effect is possible.
-     */
-    val mutationAttemptCount: Int get() = physicalCalls.get()
+    /** Number of durable boundary crossings, separate from deliveries and effects. */
+    val mutationAttemptCount: Int get() = mutationBoundaryCrossingCount
 
     private val redeliveries = AtomicInteger(0)
 
@@ -165,7 +160,7 @@ class FakeAnkiBackend(
     /** When set, every commit suspends here (after the call started) until the test completes it. */
     @Volatile var commitGate: CompletableDeferred<Unit>? = null
 
-    /** When set, the mutation step throws this *after* counting the physical call. */
+    /** When set, the fake throws after the durable mutation boundary has been accepted. */
     @Volatile var commitThrowable: Throwable? = null
     /** An effect may occur before the exception removes the response. */
     @Volatile var applyBeforeThrow: Boolean = false
@@ -426,7 +421,18 @@ class FakeAnkiBackend(
         true
     }
 
-    override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
+    override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult =
+        commitRatingInternal(request, mutationEntry = null)
+
+    override suspend fun commitRating(
+        request: CommitRatingRequest,
+        mutationEntry: suspend () -> Boolean
+    ): CommitRatingResult = commitRatingInternal(request, mutationEntry)
+
+    private suspend fun commitRatingInternal(
+        request: CommitRatingRequest,
+        mutationEntry: (suspend () -> Boolean)?
+    ): CommitRatingResult {
         invocations.incrementAndGet()
         delay(latencyMs)
         commitGate?.await()
@@ -438,28 +444,27 @@ class FakeAnkiBackend(
             if (previous != null) {
                 redeliveries.incrementAndGet()
                 if (previous.request.card != request.card || previous.request.rating != request.rating ||
-                    previous.request.deckRef != request.deckRef) {
+                    previous.request.deckRef != request.deckRef || previous.request.collectionRef != request.collectionRef) {
                     return@withLock CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card))
                 }
                 if (guaranteeLevel == CommitGuaranteeLevel.LOCAL_DEDUP_ONLY && previous.mutationCount > 0) {
-                    // Deliberately unsafe backend with no memory (the pessimistic AnkiDroid model):
-                    // once an id had an effect — confirmed or behind a lost response — any repeat
-                    // applies again. Tests can verify the *client ledger*, not a UI debounce or a
-                    // backend table, is what stops this second scheduler effect.
-                    physicalCalls.incrementAndGet()
+                    // This mode deliberately has no backend-owned dedup protection: the same id
+                    // would cross the boundary and apply a second scheduler effect.
+                    if (!crossMutationBoundary(mutationEntry)) {
+                        return@withLock CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable())
+                    }
                     ledger[request.commitId] = previous.copy(attempts = previous.attempts + 1,
                         mutationCount = previous.mutationCount + 1, result = CommitRatingResult.Committed())
                     return@withLock CommitRatingResult.Committed()
                 }
                 if (commitSemantics.supportsIdempotentReplay && previous.result is CommitRatingResult.Ambiguous) {
-                    // The backend's durable logical-commit table knows the actual effect even
-                    // though the original response was lost. Re-delivery performs no mutation.
+                    // A backend-owned dedup table answers from recorded truth; no mutation boundary.
                     val result = if (previous.mutationCount > 0) CommitRatingResult.Committed()
                         else CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("fake_no_effect"))
                     ledger[request.commitId] = previous.copy(result = result)
                     return@withLock result
                 }
-                // At-most-once: an ambiguous response stays ambiguous, never resent internally.
+                // At-most-once: a non-retryable/ambiguous response is answered without re-dispatch.
                 if (previous.result !is CommitRatingResult.RetryableFailure) return@withLock previous.result
             }
             if (session?.context?.studySessionId != request.commitId.studySessionId) {
@@ -472,62 +477,69 @@ class FakeAnkiBackend(
             if (previous == null && ledger.size >= maxLedgerEntries) {
                 return@withLock CommitRatingResult.Rejected(AnkiError.QueryFailure("fake-ledger-full"))
             }
+            fun recordPreMutationResult(result: CommitRatingResult): CommitRatingResult {
+                ledger[request.commitId] = RecordedCommit(request, result,
+                    (previous?.attempts ?: 0) + 1, previous?.mutationCount ?: 0)
+                return result
+            }
             val unavailable = usabilityError()
-            val scripted = if (unavailable == null && capabilities.value.review &&
-                !mode.refusesBeforeDispatch && mode != FakeCommitMode.FAIL_BEFORE_MUTATION)
-                commits.removeFirstOrNull() else null
+            if (unavailable != null) {
+                return@withLock recordPreMutationResult(CommitRatingResult.RetryableFailure(unavailable))
+            }
+            if (!capabilities.value.review) {
+                return@withLock recordPreMutationResult(CommitRatingResult.Rejected(unsupported("review")))
+            }
+            if (mode.refusesBeforeDispatch) {
+                return@withLock recordPreMutationResult(
+                    CommitRatingResult.RetryableFailure(AnkiError.BackendUnavailable()))
+            }
+            if (mode == FakeCommitMode.FAIL_BEFORE_MUTATION) {
+                // A delivered request can fail in read-only preflight before the callback. Record
+                // the known no-effect result so a same-id retry remains safe and countable.
+                val refused = CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("fake_fail_before_mutation"))
+                ledger[request.commitId] = RecordedCommit(request, refused, (previous?.attempts ?: 0) + 1, 0)
+                return@withLock refused
+            }
+            val scripted = commits.removeFirstOrNull()
+            if (!crossMutationBoundary(mutationEntry)) {
+                return@withLock CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable())
+            }
+            commitThrowable?.let { thrown ->
+                ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
+                    (previous?.attempts ?: 0) + 1, if (applyBeforeThrow) 1 else 0)
+                throw thrown
+            }
             val step = when {
-                unavailable != null -> CommitStep(CommitRatingResult.RetryableFailure(unavailable))
-                !capabilities.value.review -> CommitStep(CommitRatingResult.Rejected(unsupported("review")))
-                mode.refusesBeforeDispatch ->
-                    CommitStep(CommitRatingResult.RetryableFailure(AnkiError.BackendUnavailable()))
-                mode == FakeCommitMode.FAIL_BEFORE_MUTATION ->
-                    CommitStep(CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("fake_fail_before_mutation")))
                 // A scripted step always wins over the mode, so existing scenarios keep their
                 // exact sequencing.
-                scripted != null -> {
-                    physicalCalls.incrementAndGet()
-                    commitThrowable?.let { thrown ->
-                        // Dispatched, then the transport failed: the stand-in records "unknown".
-                        ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
-                            (previous?.attempts ?: 0) + 1, if (applyBeforeThrow) 1 else 0)
-                        throw thrown
-                    }
-                    scripted
-                }
-                mode == FakeCommitMode.OUTCOME_UNKNOWN -> {
-                    // Nothing applied, and the backend cannot prove it: still AMBIGUOUS for the
-                    // client. A pessimistic backend must never be upgraded into a safe retry.
-                    physicalCalls.incrementAndGet()
+                scripted != null -> scripted
+                mode == FakeCommitMode.OUTCOME_UNKNOWN ->
+                    // Nothing applied, and the backend cannot prove it: fail closed despite zero effect.
                     CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("fake_outcome_unknown")))
+                mode == FakeCommitMode.MUTATE_THEN_DROP_RESPONSE -> {
+                    // The effect happens; the response never arrives.
+                    ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
+                        (previous?.attempts ?: 0) + 1, 1)
+                    throw FakeTransportLost("fake_response_dropped_after_effect")
                 }
-                else -> {
-                    physicalCalls.incrementAndGet()
-                    commitThrowable?.let { thrown ->
-                        ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
-                            (previous?.attempts ?: 0) + 1, if (applyBeforeThrow) 1 else 0)
-                        throw thrown
-                    }
-                    when (mode) {
-                        FakeCommitMode.MUTATE_THEN_DROP_RESPONSE -> {
-                            // The effect happens; the response never arrives.
-                            ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
-                                (previous?.attempts ?: 0) + 1, 1)
-                            throw FakeTransportLost("fake_response_dropped_after_effect")
-                        }
-                        FakeCommitMode.DELAYED_SUCCESS -> {
-                            delayedSuccessGate.await()
-                            CommitStep(CommitRatingResult.Committed())
-                        }
-                        else -> CommitStep(CommitRatingResult.Committed())
-                    }
+                mode == FakeCommitMode.DELAYED_SUCCESS -> {
+                    delayedSuccessGate.await()
+                    CommitStep(CommitRatingResult.Committed())
                 }
+                else -> CommitStep(CommitRatingResult.Committed())
             }
             val applied = step.result is CommitRatingResult.Committed || step.appliedWhenAmbiguous
             ledger[request.commitId] = RecordedCommit(request, step.result, (previous?.attempts ?: 0) + 1,
                 if (applied) 1 else 0)
             step.result
         }
+    }
+
+    /** True only when the durable boundary accepted this potential physical mutation. */
+    private suspend fun crossMutationBoundary(mutationEntry: (suspend () -> Boolean)?): Boolean {
+        if (mutationEntry != null && !mutationEntry()) return false
+        mutationBoundaryCrossings.incrementAndGet()
+        return true
     }
 
     private fun usabilityError(): AnkiError? = availability.value.unavailabilityError()
