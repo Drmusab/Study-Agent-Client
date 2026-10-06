@@ -858,3 +858,118 @@ What changed: the study/voice/commit behavioural surface this gate is about is n
 real virtual time, and the rating-timeout semantics are capability-driven instead of
 contradictory — fail-closed by default, replay-safe only where the agent froze
 `review_commit_idempotency` at session start, and never auto-resending anywhere.
+
+---
+
+# PART XIII — THE RESIDUAL-46 REMEDIATION SWEEP (FULL SUITE GREEN)
+
+Status: complete. This part discharges owed item 3 of §33 (the residual non-study failure
+catalogue). Owed items 1 (INV-48 real-device mutation validation) and 2 (Gradle command
+evidence) are environmental and remain owed — see §40.
+
+## 34. Scope and method
+
+Run #4 (commit `f109104`) left 1267 tests / 1221 passed / 46 failed. The 46 were triaged into
+seven clusters (Appendix B). Each cluster was driven to green in isolation (`run.sh <regex>`),
+then the full suite was re-run. Every fix was classified as production-side (the code lied or
+crashed on inputs it must tolerate) or test-side (the test encoded a false expectation, a
+fixture omission, or fell into a known virtual-time/background-scope trap). No production
+behaviour was weakened to make a test pass; where two tests contradicted each other, the side
+matching the documented contract and the production enforcement path that already existed was
+kept, and the stale side was corrected with a comment saying why.
+
+## 35. Cluster results
+
+| Cluster | Surface | Root causes | Fix side | Result |
+|---|---|---|---|---|
+| A/E/G | `ProtocolJson`, render, TTS | decode fallback invented values for unknown frames; render/TTS assertions hit virtual-time and priority-rank traps; `ProtocolJson` fallback rewritten to null-for-all except error-frame recovery | production (ProtocolJson) + tests | network 70/70, render 196/196, tts 76/76 |
+| ProfileValidator | profile labels | all-digit final label accepted; contract rejects it | production | green |
+| B | `StudyControlRepository`, `DashboardRepository` | `advanceUntilIdle()` advances past pending `withTimeoutOrNull` deadlines — production timeouts are correct | tests (`runCurrent()`, 11 sites) + `DashboardUiState.startSummary.deckLabel` = raw `config.activeDeck` (production) | green |
+| F | `DiagnosticsRepository` | Session section conditionally omitted; export-privacy asserts ran before harness reset and against padded-column rendering | production (unconditional section) + tests | data 92/92 |
+| C | `AnkiDroidHealthRepositoryTest` | vanilla coroutines-test 1.10.2: `advanceUntilIdle()` never runs `backgroundScope`/`stateIn` projections | tests only (`runCurrent` + `advanceTimeBy`) | 13/13 |
+| D | `client.anki.*` (9 failures) | see §36 | mixed | 461/461 |
+
+## 36. Cluster D in detail (the Anki surface)
+
+1. **`require()`-in-constructor vs typed refusal.** `BeginReviewRequest` required `limit > 0`
+   and `AnkiSessionContext` required collection/deckRef backendId agreement. Both pre-empted
+   the backends' own typed enforcement — `InvalidRequest("review_limit_out_of_range")`,
+   `SessionInvalid` for a foreign `context.backendId`, `DeckNotFound` against the provider
+   listing — by crashing with `IllegalArgumentException` on exactly the inputs those guards
+   exist to refuse (INV-ANKI-DET-09). Boundary kept: the *collection*-backendId require stays
+   (a collection identity naming another backend than its own context is self-contradictory
+   data, not a request); the *deckRef*-backendId require is gone (a cross-backend deck is a
+   refusable request); `studySessionId`, `startedAtEpochMs`, collectionKey-consistency requires
+   stay. `AnkiDomainModelTest` pinned the limit IAEs — corrected to assert constructibility,
+   because `AnkiDroidReviewSessionTest` pins the typed refusal end-to-end and the backend's
+   `limit <= 0` branch is unreachable dead code while the constructor throws first.
+2. **`identityMatches` — contradiction-only semantics.** A hydrated card is refused only when
+   BOTH sides know an identity component (cardId/noteId/cardOrd) and the values differ; null on
+   either side is unconfirmed, not contradicted (§53: absence ≠ empty ≠ error). A degraded cell
+   (`_id` unreadable) no longer fails a card whose note+ord confirm identity — it surfaces
+   `card_id_unreadable` as metadata. Collection key and backendId remain strict equality.
+3. **Unit-lie rule for scheduling info.** A negative raw Anki interval is a learning-step
+   encoding in minutes; rendering it as `intervalDays = -3` is a unit lie on an informational
+   surface (INV-ANKI-CARD-18/19). `schedulingFor` now parses reps/lapses/interval with
+   `parseNonNegativeInt`; when nothing readable remains the section is null, never a shell.
+4. **Degradation tokens are per-card, not per-side.** `card_speech_text_unavailable` is added
+   once per card even when both question and answer lack simple text.
+5. **`validateLogicalName` and malformed escapes.** `URLDecoder` throws on a broken percent
+   escape (the `"% r"` in `"100% ready.webp"`); that is not a reason to reject the name — no
+   conforming decoder turns a broken escape into traversal and a lenient one passes it through
+   literally. Validation now continues on the name as-is, and every candidate including the
+   literal name is traversal-checked (the old loop only checked decoded forms). All encoded
+   traversal cases (`..%2F`, `%2E%2E%2F`, double-encoded) still reject.
+6. **Fixture truths corrected (test-side).** Gateway diagnostics asserted
+   `questionHtmlLength == 9` for `"<b>Front</b>"` (12). The gateway `cardRow()` omitted the
+   queue column the pinned projection always serves, so every hydration carried
+   `card_queue_state_unmapped` noise (contract: mapper test — no queue AND no type ⇒ token).
+   `AnkiCardFlowTest.realBackend` served an empty deck listing, making every `beginReview` a
+   `DeckNotFound` (CCE at the Success cast). The hydration compose test's "unexplained move"
+   used home deck `deck-1` — structurally identical to the scheduled deck (all `deck()`
+   fixtures are `deck-1`), i.e. accidentally the filtered-deck explanation asserted two lines
+   later; corrected to `deck-0`.
+
+## 37. Changed files (24)
+
+Production (12): `AnkiBackend.kt`, `AnkiSessionContext.kt`, `AnkiCardHydration.kt`,
+`AnkiMediaResolver.kt`, `AnkiDroidCardMapper.kt`, `ProfileValidator.kt`, `ProtocolJson.kt`,
+`DefaultSpeechOrchestrator.kt`, `SpeechQueue.kt`, `TtsVoiceSelector.kt`,
+`DiagnosticsRepository.kt`, `DashboardUiState.kt`.
+Tests (12): `ProtocolJsonTest.kt`, `IdempotencyTest.kt`, `AnkiCardRenderControllerTest.kt`,
+`AnkiRenderEventTest.kt`, `AnkiCardFlowTest.kt`, `AnkiCardHydrationTest.kt`,
+`AnkiDomainModelTest.kt`, `AnkiDroidCardGatewayTest.kt`, `AnkiDroidHealthRepositoryTest.kt`,
+`DashboardRepositoryTest.kt`, `DiagnosticsExportPrivacyTest.kt`, `StudyControlRepositoryTest.kt`.
+
+## 38. Evidence (JVM harness, this environment's equivalence evidence class — §0)
+
+- Full suite: **1267 tests / 1267 passed / 0 failed / 0 ignored, 111 classes**.
+- `client\.anki\.`: **461/461** (was 452/461 at run #4's residual catalogue).
+- Commit surface (ReviewCommitLedger/RatingCommitFlow/Machine/AnkiDroidRatingCommit/
+  CommitVerifier/Chaos/CrashWindow/DurabilityOrder/Architecture/StudyInteraction +
+  FakeAnkiBackend suites): **103/103 across 11 classes** — frozen guarantees untouched:
+  AnkiDroid `AT_MOST_ONCE_FAIL_CLOSED`, PC branches on frozen semantics and never
+  auto-resends, `END_TO_END_EXACTLY_ONCE` never claimed.
+- Main build 194 files / test build 130 files, 0 compile errors.
+- Server suite `server/test_review_commit_store.py`: 21 tests OK (unchanged, PART XII §31).
+
+## 39. Invariant table delta
+
+No row changes. The sweep repaired crash-on-refusable-input paths (INV-ANKI-DET-09), tightened
+the informational-surface unit rule (INV-ANKI-CARD-18/19) and made degradation metadata honest
+(§53 absence semantics); all were already the documented invariants — the code now matches them.
+
+## 40. Verdict
+
+**GATE 11 = BLOCKED** — unchanged, but the owed list is shorter. §33 item 3 (residual failure
+catalogue) is **discharged**: the full suite is green. Still owed, both environmental:
+
+1. INV-48: real AnkiDroid mutation validation on a disposable collection/profile (no
+   device/emulator/AnkiDroid in this sandbox).
+2. Gradle command evidence (`--stop/clean/testDebugUnitTest/lint/assembleDebug/assembleRelease/
+   connectedDebugAndroidTest`) — Maven/Gradle mirrors unreachable from this sandbox; the JVM
+   harness remains equivalence evidence only.
+
+Production readiness for safe real rating commits is unchanged by this part: the commit state
+machine, ledger durability order, crash-window and chaos suites were green before it and remain
+green under it.

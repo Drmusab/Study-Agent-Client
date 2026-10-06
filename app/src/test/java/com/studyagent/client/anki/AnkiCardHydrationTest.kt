@@ -90,7 +90,10 @@ class AnkiCardHydrationTest {
     @Test fun `compose keeps the card intact and reports the deck move as a degradation`() {
         val scheduledDeck = deck(id = fakeId, key = "collection").ref
         val scheduled = scheduledOf(full())
-        val original = AnkiDeckRef(fakeId, "deck-1", "collection")
+        // An UNEXPLAINED move needs a home-deck claim that is NOT the scheduled deck: every
+        // deck() fixture carries id "deck-1" (== scheduledOf(full()).deckRef), so a "deck-1"
+        // claim here would accidentally be the filtered-deck explanation asserted at the bottom.
+        val original = AnkiDeckRef(fakeId, "deck-0", "collection")
 
         // Same deck — no token (§77/§78).
         val same = AnkiCardHydration.compose(scheduled, full()) as AnkiResult.Success

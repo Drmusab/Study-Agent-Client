@@ -864,8 +864,11 @@ class DefaultDiagnosticsRepository(
         appendSection(sb, "Network", networkDiagnosticsRows())
         appendSection(sb, "Protocol", protocolDiagnosticsRows())
 
-        val session = sessionDiagnostics?.invoke()
-        if (session != null) appendSection(sb, "Session", sessionDiagnosticsRows())
+        // The Session section always renders: with the collaborator it shows the real rows,
+        // without it sessionDiagnosticsRows() falls back to the truthful
+        // "unavailable in this build" rows (§100) — the export structure must not depend on
+        // which optional subsystems a given build wires up.
+        appendSection(sb, "Session", sessionDiagnosticsRows())
 
         sb.append("--- TTS ---\n")
         sb.append("Audio Route: ${activeOutputDevice.value.name} (${activeOutputDevice.value.typeName})\n")

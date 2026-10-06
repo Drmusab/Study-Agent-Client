@@ -15,6 +15,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -56,7 +57,11 @@ class AnkiDroidHealthRepositoryTest {
         val repository = repository(DefaultAnkiDroidHealthCheck(detector, TestClock()))
 
         val snapshot = repository.refresh()
-        advanceUntilIdle()
+        // The availability projection is a stateIn over the repository's backgroundScope.
+        // coroutines-test 1.10 advanceUntilIdle() deliberately does NOT run background-scope
+        // events (it stops once only non-foreground events remain); runCurrent()/advanceTimeBy()
+        // do. Background work in this file is therefore driven with those primitives.
+        runCurrent()
 
         assertEquals(AnkiAvailability.Ready(AnkiCapabilities.NONE), snapshot.availability)
         assertEquals(snapshot, repository.health.value)
@@ -129,7 +134,9 @@ class AnkiDroidHealthRepositoryTest {
         val repository = repository(check)
 
         val jobs = (1..8).map { backgroundScope.launch { repository.refresh() } }
-        advanceUntilIdle()
+        runCurrent()
+        advanceTimeBy(1_000)
+        runCurrent()
 
         assertEquals(8, check.calls)
         assertEquals("at most one provider check at a time", 1, check.maxConcurrentChecks)
@@ -144,16 +151,16 @@ class AnkiDroidHealthRepositoryTest {
         val repository = repository(DefaultAnkiDroidHealthCheck(detector, clock), clock)
 
         repository.onAppForeground()
-        advanceUntilIdle()
+        runCurrent()
         assertEquals(1, detector.calls)
 
         repository.onAppForeground()
-        advanceUntilIdle()
+        runCurrent()
         assertEquals("the resume burst collapses into the check that just ran", 1, detector.calls)
 
         clock.advance(AnkiDroidHealthRepository.DEFAULT_MIN_REFRESH_INTERVAL_MS + 1L)
         repository.onAppForeground()
-        advanceUntilIdle()
+        runCurrent()
         assertEquals(2, detector.calls)
     }
 
@@ -166,7 +173,9 @@ class AnkiDroidHealthRepositoryTest {
         // Activity onStart fires twice in quick succession during startup (create + resume).
         repository.onAppForeground()
         repository.onAppForeground()
-        advanceUntilIdle()
+        runCurrent()
+        advanceTimeBy(50)
+        runCurrent()
 
         assertEquals("startup still produces a result", 1, detector.calls)
         assertTrue(repository.health.value.availability is AnkiAvailability.Ready)
@@ -196,7 +205,7 @@ class AnkiDroidHealthRepositoryTest {
         detector.result = testDetection(AnkiAvailability.Ready(AnkiCapabilities.NONE), collectionReady = true)
         clock.advance(5_000L)
         repository.onAppForeground()
-        advanceUntilIdle()
+        runCurrent()
 
         assertEquals(AnkiAvailability.Ready(AnkiCapabilities.NONE), repository.health.value.availability)
         assertEquals("READY", repository.availability.value.statusCode)

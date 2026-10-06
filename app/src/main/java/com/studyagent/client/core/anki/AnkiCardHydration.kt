@@ -29,20 +29,24 @@ package com.studyagent.client.core.anki
 object AnkiCardHydration {
 
     /**
-     * True when [hydrated] confirms every identity component [scheduled] knows (STEP 54).
+     * True when [hydrated] never *contradicts* an identity component [scheduled] knows (STEP 54).
      *
      * Directional on purpose: a scheduled ref addressed by `noteId + ord` must be confirmed on
-     * those fields, while a hydrated ref that *adds* a card id is fine — enrichment is allowed,
-     * unconfirmed claims are not. Collection identity is strict equality: a known collection key
-     * on either side that the other does not share is a different collection
-     * (INV-ANKI-CARD-03/§13/§47), and unknown (`null`) is never a wildcard.
+     * those fields, while a hydrated ref that *adds* a card id is fine — enrichment is allowed.
+     * Symmetrically, an absent component on either side is unconfirmed, not contradicted (§53):
+     * a hydrated ref whose card id could not be read (a recorded `card_id_unreadable`
+     * degradation) still confirms the note + ordinal it *can* read, and a degraded cell must
+     * not fail a card the provider otherwise confirmed. Only a known-vs-known difference
+     * refuses. Collection identity is strict equality: a known collection key on either side
+     * that the other does not share is a different collection (INV-ANKI-CARD-03/§13/§47), and
+     * unknown (`null`) is never a wildcard there.
      */
     fun identityMatches(scheduled: AnkiCardRef, hydrated: AnkiCardRef): Boolean {
         if (scheduled.backendId != hydrated.backendId) return false
         if (scheduled.collectionKey != hydrated.collectionKey) return false
-        if (scheduled.cardId != null && scheduled.cardId != hydrated.cardId) return false
-        if (scheduled.noteId != null && scheduled.noteId != hydrated.noteId) return false
-        if (scheduled.cardOrd != null && scheduled.cardOrd != hydrated.cardOrd) return false
+        if (scheduled.cardId != null && hydrated.cardId != null && scheduled.cardId != hydrated.cardId) return false
+        if (scheduled.noteId != null && hydrated.noteId != null && scheduled.noteId != hydrated.noteId) return false
+        if (scheduled.cardOrd != null && hydrated.cardOrd != null && scheduled.cardOrd != hydrated.cardOrd) return false
         return true
     }
 

@@ -47,12 +47,22 @@ object AnkiMediaReferencePolicy {
         if (name.isEmpty() || name.length > 1024) return false
         if (name.startsWith("/") || name.startsWith("\\")) return false
         if (name.contains('\u0000')) return false
-        // Decode repeatedly so double-encoded traversal cannot reach a provider.
+        // Decode repeatedly so double-encoded traversal cannot reach a provider. Every candidate
+        // is checked, starting with the literal name itself. A malformed percent escape (e.g. the
+        // "% r" in "100% ready.webp") makes URLDecoder throw; that is not a reason to reject the
+        // name — no conforming decoder turns a broken escape into traversal, and a lenient one
+        // passes the characters through literally — so validation continues on the name as-is.
+        fun isTraversal(value: String): Boolean =
+            value.contains("../") || value.contains("..\\") || value == ".."
+
         var candidate = name
+        if (isTraversal(candidate)) return false
         repeat(3) {
-            candidate = runCatching { java.net.URLDecoder.decode(candidate, Charsets.UTF_8.name()) }
-                .getOrElse { return false }
-            if (candidate.contains("../") || candidate.contains("..\\") || candidate == "..") return false
+            val decoded = runCatching {
+                java.net.URLDecoder.decode(candidate, Charsets.UTF_8.name())
+            }.getOrNull() ?: return@repeat
+            candidate = decoded
+            if (isTraversal(candidate)) return false
         }
         return !candidate.contains(':') && !candidate.contains("//")
     }

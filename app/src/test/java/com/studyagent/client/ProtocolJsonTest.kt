@@ -21,7 +21,9 @@ class ProtocolJsonTest {
         val json = ProtocolJson.encodeClientMessage(msg)
         assertTrue(json.contains("\"type\":\"start_session\""))
         assertTrue(json.contains("\"deck\":\"Toronto Notes\""))
-        assertTrue(json.contains("\"protocol_version\":\"1\""))
+        // The client's default envelope version is Protocol v2 (docs/PROTOCOL.md); v1 servers
+        // ignore the v2-only fields, which is the documented backward-compatibility path.
+        assertTrue(json.contains("\"protocol_version\":\"2\""))
     }
 
     @Test
