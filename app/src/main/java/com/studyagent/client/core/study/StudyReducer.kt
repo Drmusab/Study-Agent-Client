@@ -316,12 +316,21 @@ object StudyReducer {
                 if (event.cardId != state.currentCardId) reject("stale-card") else reveal()
             }
             is AnkiStudyEvent.SelectRating -> selectRating(state, local, event, now, cancelVoice)
+            is AnkiStudyEvent.RatingCommitPrepared -> {
+                val commit = local.commit
+                if (event.epoch != state.epoch || commit == null || commit.commitId != event.commitId) {
+                    reject("stale-anki-commit-prepared")
+                } else moved(state.copy(anki = local.copy(commit = commit.copy(
+                    guaranteeLevel = event.guaranteeLevel ?: commit.guaranteeLevel))))
+            }
             is AnkiStudyEvent.RatingCommitStarted -> {
                 val commit = local.commit
                 if (event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ||
                     state.phase != SessionPhase.SubmittingRating || commit.state != ReviewCommitState.NOT_STARTED
                 ) reject("stale-anki-commit-start")
-                else moved(state.copy(anki = local.copy(commit = commit.copy(state = ReviewCommitState.SUBMITTING))))
+                else moved(state.copy(anki = local.copy(commit = commit.copy(
+                    state = ReviewCommitState.SUBMITTING,
+                    guaranteeLevel = event.guaranteeLevel ?: commit.guaranteeLevel))))
             }
             is AnkiStudyEvent.RatingCommitResolved ->
                 resolveAnkiCommit(state, local, event, event.epoch, event.commitId, event.outcome, reconciliation = false, now = now)

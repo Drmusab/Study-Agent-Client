@@ -1086,12 +1086,14 @@ class StudySessionMachine(
             return
         }
         // GATE 11 — touch, voice, headset and keyboard all reach the commit through different
-        // events (UserRateCard / SelectRating), so "prepared" is detected from the state change.
-        val preparedCommit = transition.newState.anki?.commit
-        if (preparedCommit != null && preparedCommit.commitId != before.anki?.commit?.commitId) {
+        // events (UserRateCard / SelectRating), so the selection is detected from the state change.
+        // This is the user's intent, not the durable row: ANKI_COMMIT_PREPARED is recorded later,
+        // when the executor confirms the intent is durably persisted.
+        val selectedCommit = transition.newState.anki?.commit
+        if (selectedCommit != null && selectedCommit.commitId != before.anki?.commit?.commitId) {
             performance?.onRatingSubmitted()
-            tl?.record(DiagnosticCategory.SESSION, "ANKI_COMMIT_PREPARED", sessionEpoch = epoch,
-                turnId = preparedCommit.commitId.turnId.value, metadata = commitMetadata(preparedCommit))
+            tl?.record(DiagnosticCategory.SESSION, "ANKI_RATING_SELECTED", sessionEpoch = epoch,
+                turnId = selectedCommit.commitId.turnId.value, metadata = commitMetadata(selectedCommit))
         }
         when (event) {
             is StudyEvent.UserStartRequested -> {
@@ -1174,6 +1176,11 @@ class StudySessionMachine(
                 turnId = turnId
             )
 
+            is AnkiStudyEvent.RatingCommitPrepared -> transition.newState.anki?.commit?.let { commit ->
+                tl?.record(DiagnosticCategory.SESSION, "ANKI_COMMIT_PREPARED", sessionEpoch = epoch,
+                    turnId = commit.commitId.turnId.value, metadata = commitMetadata(commit))
+            }
+
             is AnkiStudyEvent.RatingCommitStarted -> transition.newState.anki?.commit?.let { commit ->
                 tl?.record(DiagnosticCategory.SESSION, "ANKI_COMMIT_STARTED", sessionEpoch = epoch,
                     turnId = commit.commitId.turnId.value,
@@ -1209,15 +1216,25 @@ class StudySessionMachine(
     }
 
     /**
-     * GATE 11 — metadata only: a short hash of the commit identity, the rating name, the attempt
-     * and the persisted state. Never card content, transcripts, HTML or file paths.
+     * GATE 11 checkpoint 19 — the correlation a support engineer needs, and nothing else:
+     * session, turn, commit hash, backend, frozen guarantee, selected/committed rating, state,
+     * attempt count. Never card content, transcripts, HTML or file paths.
      */
     private fun commitMetadata(commit: AnkiRatingCommit): Map<String, String> = buildMap {
+        // Exactly the eight correlation keys the timeline keeps (MAX_METADATA_ENTRIES), most
+        // important first: turn id travels in the event's own turnId field, and the attempt phase
+        // travels in the REVIEW_COMMIT_* markers, so neither needs a key here.
         put("commit", commitHash(commit.commitId))
+        put("session", commit.commitId.studySessionId.take(12))
+        put("backend", commit.commitId.backendId.stableId)
+        put("guarantee", commit.guaranteeLevel?.name ?: "unfrozen")
         put("rating", commit.rating.name.lowercase())
+        put("committed",
+            if (commit.state == com.studyagent.client.core.anki.ReviewCommitState.COMMITTED)
+                commit.rating.name.lowercase() else "-")
+        // The stable failure token is folded into the state so the fixed key budget cannot drop it.
+        put("state", commit.state.name + (commit.failureCategory?.let { "($it)" } ?: ""))
         put("attempt", commit.attempt.toString())
-        put("state", commit.state.name)
-        commit.failureCategory?.let { put("category", it) }
     }
 
     private fun commitHash(id: com.studyagent.client.core.anki.ReviewCommitId): String =
@@ -1241,7 +1258,9 @@ class StudySessionMachine(
         }
         val name = when (outcome) {
             is AnkiCommitOutcome.Committed -> "ANKI_COMMIT_COMMITTED"
-            is AnkiCommitOutcome.Failed -> "ANKI_COMMIT_FAILED"
+            // A proven not-applied failure that may be retried is a distinct fact from a refusal:
+            // only the safe one may ever be retried, and only by explicit user action.
+            is AnkiCommitOutcome.Failed -> if (outcome.safeToRetry) "ANKI_COMMIT_SAFE_FAILURE" else "ANKI_COMMIT_FAILED"
             is AnkiCommitOutcome.Ambiguous -> "ANKI_COMMIT_AMBIGUOUS"
             is AnkiCommitOutcome.PersistenceFailure -> "ANKI_COMMIT_PERSISTENCE_FAILURE"
         }

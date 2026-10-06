@@ -35,7 +35,11 @@ class AnkiRatingCommitFlowTest {
         assertEquals(Rating.GOOD, effect.request.rating)
 
         val events = h.run(effect)
-        assertTrue(events.first() is AnkiStudyEvent.RatingCommitStarted)
+        // Checkpoint 19: the durable row publishes the frozen guarantee before any dispatch.
+        val prepared = events.first() as AnkiStudyEvent.RatingCommitPrepared
+        assertEquals(firstTurn.commitId, prepared.commitId)
+        assertNotNull("the frozen guarantee travels with the durable row", prepared.guaranteeLevel)
+        assertTrue(events.any { it is AnkiStudyEvent.RatingCommitStarted })
         assertTrue((events.last() as AnkiStudyEvent.RatingCommitResolved).outcome is AnkiCommitOutcome.Committed)
         assertEquals(SessionPhase.WaitingForFirstCard, h.state.phase)
         assertEquals(1, h.pending.count { it is AnkiStudyEffect.Next })

@@ -36,7 +36,10 @@ class ThrowingCommitFault(private val point: CommitFaultPoint) : CommitFaultInje
     }
 }
 
-/** Phase name and attempt count only. Do not pass card text or the raw commit key. */
+/**
+ * GATE 11 checkpoint 19 — durable phase marker with correlation. [commitId] is the transaction
+ * identity (never card content), so a phase marker can be joined with the session's own events.
+ */
 fun interface CommitPhaseSink {
-    fun onPhase(phase: String, attempt: Int)
+    fun onPhase(phase: String, attempt: Int, commitId: ReviewCommitId)
 }
