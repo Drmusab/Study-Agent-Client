@@ -86,6 +86,16 @@ class DefaultSpeechOrchestrator(
     @Volatile
     private var pumpController: Job? = null
 
+    /**
+     * Lost-wakeup guard for the pump handoff. Two decisions must never interleave:
+     * (a) the pump retiring because the queue looked empty, and (b) an enqueue deciding
+     * "a pump is already running" via [pumpController]'s isActive. Without one shared
+     * lock, a request enqueued exactly between the pump's final empty-poll and its Job
+     * completion is orphaned forever — the retiring pump saw an empty queue and the
+     * enqueuer saw an "active" pump, so nobody ever plays (and the speak() caller hangs).
+     */
+    private val pumpLock = Any()
+
     @Volatile
     private var currentEntry: SpeechQueue.Entry? = null
 
@@ -277,7 +287,9 @@ class DefaultSpeechOrchestrator(
             val msg = controlChannel.tryReceive().getOrNull() ?: break
             if (msg is ControlMsg.Speak) msg.completion.complete(SpeechResult.Cancelled)
         }
-        pumpController?.cancel()
+        synchronized(pumpLock) {
+            pumpController?.cancel()
+        }
         focusController.abandonFocus()
         engine.release()
         _isSpeaking.value = false
@@ -345,8 +357,10 @@ class DefaultSpeechOrchestrator(
         stopReason.set(reason)
         val result = resultForStop(reason)
         queue.drain(result)
-        pumpController?.cancel()
-        pumpController = null
+        synchronized(pumpLock) {
+            pumpController?.cancel()
+            pumpController = null
+        }
         // Nothing is playing any more → settle global state immediately.
         _isSpeaking.value = false
         focusController.abandonFocus()
@@ -357,8 +371,10 @@ class DefaultSpeechOrchestrator(
     private fun cancelCurrentIfAble(force: Boolean) {
         val entry = currentEntry ?: return
         if (force || entry.request.interruptible) {
-            pumpController?.cancel()
-            pumpController = null
+            synchronized(pumpLock) {
+                pumpController?.cancel()
+                pumpController = null
+            }
         }
         // A non-interruptible in-flight request is allowed to finish; the new request
         // was already queued and will play right after.
@@ -367,27 +383,45 @@ class DefaultSpeechOrchestrator(
     // ------------------------------------------------------------- playback pump
 
     private fun ensurePumpRunning() {
-        if (pumpController?.isActive == true) return
-        // Separate controller Job so identity survives the launch/assignment race and we can
-        // distinguish "latest pump" from a cancelled predecessor when settling global state.
-        val controller = Job(scope.coroutineContext[Job])
-        pumpController = controller
-        scope.launch(controller) {
-            while (isActive) {
-                val entry = queue.poll() ?: break
-                currentEntry = entry
-                stopReason.set(StopReason.USER)
-                val result = runEntry(entry)
-                entry.completion.complete(result)
-                currentEntry = null
-                refreshHealth()
-            }
-            // Only the latest pump may settle global state/focus — a cancelled predecessor
-            // must not tear down the replacement's audio focus or overwrite Speaking state.
-            if (pumpController === controller) {
-                focusController.abandonFocus()
-                if (_isReady.value) _ttsState.value = readyState()
-                refreshHealth()
+        synchronized(pumpLock) {
+            if (pumpController?.isActive == true) return
+            // Separate controller Job so identity survives the launch/assignment race and we can
+            // distinguish "latest pump" from a cancelled predecessor when settling global state.
+            val controller = Job(scope.coroutineContext[Job])
+            pumpController = controller
+            scope.launch(controller) {
+                var wasLatest = false
+                while (isActive) {
+                    val entry = queue.poll()
+                    if (entry == null) {
+                        // Atomic retirement (see [pumpLock]): stop only if the queue is STILL
+                        // empty under the lock. A request enqueued concurrently either finds
+                        // this pump holding [pumpController] — then we re-poll and play it —
+                        // or finds it already nulled — then the enqueuer starts a successor.
+                        synchronized(pumpLock) {
+                            if (queue.isEmpty()) {
+                                wasLatest = pumpController === controller
+                                if (wasLatest) pumpController = null
+                                break
+                            }
+                        }
+                        continue
+                    }
+                    currentEntry = entry
+                    stopReason.set(StopReason.USER)
+                    val result = runEntry(entry)
+                    entry.completion.complete(result)
+                    currentEntry = null
+                    refreshHealth()
+                }
+                // Only the latest pump may settle global state/focus — a cancelled predecessor
+                // must not tear down the replacement's audio focus or overwrite Speaking state.
+                // After release() the Released state is terminal: never settle over it.
+                if (wasLatest && !released.get()) {
+                    focusController.abandonFocus()
+                    if (_isReady.value) _ttsState.value = readyState()
+                    refreshHealth()
+                }
             }
         }
     }

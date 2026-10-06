@@ -53,7 +53,12 @@ object TtsVoiceSelector {
             } else {
                 if (preferOffline) SCORE_OFFLINE_PREFERRED else SCORE_OFFLINE_DEFAULT
             }
-            s += v.quality.rank * 10
+            // Quality is weighted so the whole ladder (rank 0..4 ⇒ 0..80) outweighs the
+            // offline-preference swing (30 − (−40) = 70): preferring offline must never mean
+            // preferring a *broken* engine — a VERY_LOW/VERY_HIGH-latency offline voice loses to
+            // a VERY_HIGH/LOW-latency network voice, while a HIGH offline voice still beats a
+            // VERY_HIGH network one (docs/TTS_ARCHITECTURE.md §Voice ranking, ladder steps 2–3).
+            s += v.quality.rank * 20
             s -= v.latency.rank * 2
             return s
         }

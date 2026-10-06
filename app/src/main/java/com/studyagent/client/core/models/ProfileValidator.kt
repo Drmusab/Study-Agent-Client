@@ -75,6 +75,12 @@ object ProfileValidator {
         if (host.length > 253) return false
         if (!hostnamePattern.matcher(host).matches()) return false
         if (host.contains("..")) return false
+        // An all-digit final label means this is an IPv4-style address, not a hostname.
+        // Without this rule, out-of-range octet strings ("999.999.999.999") fail the IPv4
+        // check but sneak back in as "valid hostnames" — a fail-open the profile validator
+        // must never allow (RFC 1123: the top-level label is never all-numeric).
+        val lastLabel = host.substringAfterLast('.')
+        if (lastLabel.isNotEmpty() && lastLabel.all { it.isDigit() }) return false
         return true
     }
 

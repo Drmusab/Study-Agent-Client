@@ -18,6 +18,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -87,7 +88,10 @@ class DashboardRepositoryTest {
         val h = Harness()
         h.start(testScheduler)
         h.connectV2()
-        advanceUntilIdle()
+        // runCurrent, NOT advanceUntilIdle: the automatic request arms an 8 s virtual-time
+        // timeout, and advanceUntilIdle would burn it while the request is still meant to be
+        // in flight. In-flight windows in this file are advanced with runCurrent only.
+        runCurrent()
 
         assertEquals(1, h.connection.sentOfType("request_dashboard").size)
         assertTrue(h.dashboard.data.value.isRefreshing)
@@ -98,14 +102,14 @@ class DashboardRepositoryTest {
         val h = Harness()
         h.start(testScheduler)
         h.connectV2()
-        advanceUntilIdle()
+        runCurrent()
         assertEquals(1, h.connection.sentOfType("request_dashboard").size)
 
         // Hammer refresh while the request is in flight (§110/§111).
         h.dashboard.refresh("manual-1")
         h.dashboard.refresh("manual-2")
         h.dashboard.refresh("manual-3")
-        advanceUntilIdle()
+        runCurrent()
         assertEquals(1, h.connection.sentOfType("request_dashboard").size)
 
         // Answer the request: one coalesced follow-up may run, never a burst.
@@ -152,7 +156,7 @@ class DashboardRepositoryTest {
         val h = Harness()
         h.start(testScheduler)
         h.connectV2()
-        advanceUntilIdle()
+        runCurrent()
         assertTrue(h.dashboard.data.value.isRefreshing)
 
         advanceTimeBy(9_000)
@@ -338,7 +342,7 @@ class DashboardRepositoryTest {
         advanceTimeBy(9_000)
         assertEquals(DashboardError.TimedOut, h.dashboard.data.value.error)
         h.dashboard.refresh("manual-retry")
-        advanceUntilIdle()
+        runCurrent()
         val requestB = h.lastDashboardRequestId()
         assertTrue(requestB != null && requestB != requestA)
 
@@ -360,7 +364,7 @@ class DashboardRepositoryTest {
 
         // And B's own reply still completes normally afterwards.
         h.dashboard.refresh("manual-retry-2")
-        advanceUntilIdle()
+        runCurrent()
         val requestC = h.lastDashboardRequestId()
         h.connection.emit(
             ServerMessage.DashboardSnapshotResponse(
@@ -380,7 +384,7 @@ class DashboardRepositoryTest {
         val h = Harness()
         h.start(testScheduler)
         h.connectV2()
-        advanceUntilIdle()
+        runCurrent()
         val requestId = h.lastDashboardRequestId()
         assertTrue(requestId != null)
 
@@ -393,7 +397,7 @@ class DashboardRepositoryTest {
                 message = "unrelated failure"
             )
         )
-        advanceUntilIdle()
+        runCurrent()
         assertTrue(h.dashboard.data.value.isRefreshing)
         assertNull(h.dashboard.data.value.error)
 

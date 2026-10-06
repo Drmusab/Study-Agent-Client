@@ -133,7 +133,11 @@ object DashboardUiMapper {
             presetName = preset.displayName,
             modeLabel = config.studyMode.displayName,
             targetLabel = targetLabel,
-            deckLabel = config.activeDeck?.let { deckDisplayName(it) }
+            // The Smart-Start panel states WHICH deck the session will commit ratings to, so it
+            // reflects the control configuration verbatim ("MCCQE::Cardiology"). Leaf-shortening
+            // (deckDisplayName) belongs to deck-list rows, where the hierarchy is shown beside
+            // it — on the start panel it could silently mean the wrong parent's deck.
+            deckLabel = config.activeDeck
         )
     }
 

@@ -42,6 +42,12 @@ data class SessionMachineState(
     val activeRecognitionEffectId: String? = null,
     /** Card generation counter for turn identity. */
     val cardGeneration: Long = 0L,
+    /**
+     * Commit semantics frozen at session start from the agent's negotiated capabilities
+     * (GATE 11 §XI.5). Null behaves as UNVERIFIED/AT_MOST_ONCE_FAIL_CLOSED: an unconfirmed PC
+     * rating then parks the session fail-closed instead of offering a replay.
+     */
+    val commitSemantics: com.studyagent.client.core.anki.CommitSemantics? = null,
 ) {
     val isIdle: Boolean get() = phase is SessionPhase.Idle
     val isFinished: Boolean get() = phase is SessionPhase.Finished

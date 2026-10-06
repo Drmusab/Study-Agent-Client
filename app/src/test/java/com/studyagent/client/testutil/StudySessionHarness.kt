@@ -23,6 +23,7 @@ import com.studyagent.client.core.study.StudyReducer
 import com.studyagent.client.core.study.SubmissionLedger
 import com.studyagent.client.core.voice.stt.RecognitionPurpose
 import com.studyagent.client.core.voice.stt.RecognitionTurnResult
+import com.studyagent.client.core.voice.tts.SpeechPurpose
 import com.studyagent.client.data.repository.StudySessionMachineRepository
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -120,6 +121,13 @@ class StudySessionHarness internal constructor(
 
     /** Advances virtual time and runs everything that became ready. */
     fun advance(millis: Long) {
+        // A parked utterance only survives while the test explicitly holds the orchestrator in
+        // PARK mode (the chaos suite drives completion by hand). In the normal COMPLETE mode a
+        // real engine always terminates eventually, so a parked utterance — e.g. the next
+        // question caught by playCard() at the rating boundary — completes on the next advance.
+        if (speech.mode == FakeSpeechOrchestrator.Mode.COMPLETE && speech.pendingCount > 0) {
+            speech.completeNext()
+        }
         testScheduler.advanceTimeBy(millis)
         testScheduler.runCurrent()
         observe()
@@ -140,9 +148,42 @@ class StudySessionHarness internal constructor(
     fun awaitPhase(maxSteps: Int = 40, predicate: (SessionPhase) -> Boolean): Boolean =
         advanceUntil(maxSteps) { predicate(phase) }
 
-    fun awaitWaitingForAnswer(maxSteps: Int = 40): Boolean = awaitPhase(maxSteps) { it is SessionPhase.WaitingForAnswer }
+    /**
+     * Whether the current route lets a microphone window open at all: the turn gate refuses
+     * blocked routes and missing microphones before the acoustic gap, so waiting for a live
+     * window there would spin the budget for nothing.
+     */
+    private fun micWindowPossible(): Boolean {
+        val route = coordinator.effectiveRoute.value
+        return route.canStartVoiceStudy && route.hasUsableMicrophone
+    }
 
-    fun awaitWaitingForRating(maxSteps: Int = 40): Boolean = awaitPhase(maxSteps) { it is SessionPhase.WaitingForRating }
+    /**
+     * The reducer records the phase flip and dispatches `StartRecognition` in the same transition,
+     * but the microphone window itself opens one acoustic gap later ([StudyVoiceTurnGate]). Under
+     * real virtual time, "waiting for the answer/rating window" must therefore wait for the *live*
+     * window, not just the phase — a caller that speaks into it right after the phase flip would
+     * otherwise find no open turn. The wait ends early when the window cannot or need not open:
+     * the phase moved on, the utterance is parked for the test to drive, or the route has no
+     * usable microphone.
+     */
+    private fun awaitMicWindow(maxSteps: Int, inWindow: () -> Boolean) {
+        advanceUntil(maxSteps) {
+            !inWindow() || recognition.hasActiveTurn || speech.pendingCount > 0 || !micWindowPossible()
+        }
+    }
+
+    fun awaitWaitingForAnswer(maxSteps: Int = 40): Boolean {
+        if (!awaitPhase(maxSteps) { it is SessionPhase.WaitingForAnswer }) return false
+        awaitMicWindow(maxSteps) { phase is SessionPhase.WaitingForAnswer }
+        return phase is SessionPhase.WaitingForAnswer
+    }
+
+    fun awaitWaitingForRating(maxSteps: Int = 40): Boolean {
+        if (!awaitPhase(maxSteps) { it is SessionPhase.WaitingForRating }) return false
+        awaitMicWindow(maxSteps) { phase is SessionPhase.WaitingForRating }
+        return phase is SessionPhase.WaitingForRating
+    }
 
     fun awaitPhaseIs(target: SessionPhase, maxSteps: Int = 40): Boolean = awaitPhase(maxSteps) { it == target }
 
@@ -150,6 +191,17 @@ class StudySessionHarness internal constructor(
         repository.startStudy(deck, mode, null)
         testScheduler.runCurrent()
         awaitPhase(maxSteps = 10) { it is SessionPhase.SpeakingQuestion || it is SessionPhase.WaitingForAnswer }
+        // Under real virtual time the phase flips to SpeakingQuestion before the utterance has
+        // run: the speech duration and the acoustic gap elapse on the scheduler, not eagerly.
+        // "Started" therefore means the question pipeline has settled — the utterance reached a
+        // terminal result (or is parked for the test to drive, or the flow moved on) — so callers
+        // observe a session whose first card is actually being presented.
+        advanceUntil(maxSteps = 20) {
+            speech.pendingCount > 0 ||
+                speech.spoken.any { it.request.purpose == SpeechPurpose.QUESTION } ||
+                !(phase is SessionPhase.Starting || phase is SessionPhase.SpeakingQuestion ||
+                    phase is SessionPhase.WaitingForAnswer)
+        }
     }
 
     suspend fun answer(text: String = answerText) {
@@ -237,21 +289,54 @@ class StudySessionHarness internal constructor(
      * window (that is itself the failure signal, and [report] explains why).
      */
     suspend fun playCard(rating: Rating = Rating.GOOD, text: String = answerText): String? {
+        val entryCardId = currentCardId
+        if (autoAnswerEnabled) {
+            // The fake recognizer answers every window by itself, and its reply fires 1 ms after
+            // the window opens: under real virtual time the answer phase can be crossed inside a
+            // single advance step. Waiting for the rating window is the observable milestone that
+            // remains — the answer is provably in flight by then.
+            if (!awaitWaitingForRating()) return entryCardId
+            val ratedCardId = currentCardId ?: entryCardId
+            rate(rating)
+            awaitNextCardParked(ratedCardId)
+            return ratedCardId
+        }
         if (!awaitWaitingForAnswer()) return currentCardId
         val cardId = currentCardId
-        if (!autoAnswerEnabled) {
-            // On a device the transcript arrives from the recognizer, which is also what feeds the
-            // STT metrics. The direct submit is only a fallback for the (test-only) case where no
-            // turn is open: it exercises the same repository entry point without pretending a
-            // recognizer said something.
-            if (!speakAnswer(text = text, cardId = cardId)) answer(text)
-        }
+        // On a device the transcript arrives from the recognizer, which is also what feeds the
+        // STT metrics. The direct submit is only a fallback for the (test-only) case where no
+        // turn is open: it exercises the same repository entry point without pretending a
+        // recognizer said something.
+        if (!speakAnswer(text = text, cardId = cardId)) answer(text)
         if (!awaitWaitingForRating()) return cardId
         rate(rating)
-        // Wait for the rating to be acknowledged and the *next* card to arrive; a rating that is
-        // silently dropped would otherwise make the next playCard() answer the same card twice.
-        advanceUntil(maxSteps = 20) { currentCardId != null && currentCardId != cardId }
+        awaitNextCardParked(cardId)
         return cardId
+    }
+
+    /**
+     * Wait for the rating to be committed and the *next* card to arrive — a rating that is
+     * silently dropped would otherwise make the next playCard() answer the same card twice.
+     *
+     * The server pushes the next question together with the receipt, and a real engine would
+     * start speaking it at once; the caller's assertions, however, belong to the turn just
+     * rated ("exactly one question + one feedback utterance", "no microphone window the user
+     * did not ask for"). The next question is therefore caught *parked*: the card change is
+     * observable (turn advanced, generation incremented) while its utterance has neither
+     * started nor completed and its answer window has not opened. The park is transient —
+     * [advance] releases it as soon as the test advances time in normal mode again.
+     */
+    private fun awaitNextCardParked(previousCardId: String?) {
+        val restore = speech.mode
+        speech.mode = FakeSpeechOrchestrator.Mode.PARK
+        try {
+            advanceUntil(maxSteps = 30) {
+                phase is SessionPhase.Finished || phase is SessionPhase.Error ||
+                    (currentCardId != null && currentCardId != previousCardId)
+            }
+        } finally {
+            speech.mode = restore
+        }
     }
 
     // ------------------------------------------------------------------ inspection
@@ -537,6 +622,9 @@ fun TestScope.newHarness(
     )
     server.onReply = { message -> connection.deliver(message) }
     connection.onSendHook = { message -> server.onClientMessage(message) }
+    // The machine freezes commit semantics from what the transport advertises at session start;
+    // the fake server implements the dedup it advertises, so the advertisement is honest.
+    connection.advertiseCapabilities(server.advertisedCapabilities)
 
     val harness = StudySessionHarness(
         testScheduler = testScheduler,

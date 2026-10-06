@@ -170,8 +170,11 @@ class AnkiDomainModelTest {
     }
 
     @Test fun `request validation is local and does not invent scheduler values`() {
-        invalid { BeginReviewRequest(context(), 0) }
-        invalid { BeginReviewRequest(context(), -1) }
+        // A non-positive limit is not local nonsense but backend policy: the request constructs,
+        // and the backend refuses it with a typed InvalidRequest("review_limit_out_of_range")
+        // (pinned by AnkiDroidReviewSessionTest) rather than crashing the caller (INV-ANKI-DET-09).
+        assertEquals(0, BeginReviewRequest(context(), 0).limit)
+        assertEquals(-1, BeginReviewRequest(context(), -1).limit)
         invalid { AnkiReviewSession(context(), " ") }
         val turn = AnkiReviewTurn(
             ReviewTurnId("t"), "s",

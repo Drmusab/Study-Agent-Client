@@ -58,7 +58,9 @@ class StudySessionSimulationTest {
 
     @Test
     fun `a long session keeps every bounded structure bounded`() = runTest {
-        val h = newHarness(serverDeckSize = cardCount, timelineCapacity = 2_000)
+        // Capacity deliberately smaller than a hundred cards' worth of events (~13 per turn) so
+        // the rotation the assertions below demand actually happens.
+        val h = newHarness(serverDeckSize = cardCount, timelineCapacity = 500)
         h.startSession()
 
         var maxTimers = 0

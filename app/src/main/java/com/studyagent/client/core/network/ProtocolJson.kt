@@ -47,49 +47,32 @@ object ProtocolJson {
         return try {
             json.decodeFromString(ServerMessage.serializer(), rawJson)
         } catch (e: Exception) {
-            // Try envelope-first parsing for forward compatibility
+            // Fail closed (ProtocolFuzz contract): a frame that does not strictly decode is
+            // DROPPED (null) — never guessed, never dressed up. That covers unknown frame
+            // types ("dropped, not misread"), unknown enum values, nulls in non-nullable
+            // fields and missing required data alike; the connection counts the drop as a
+            // protocol error. The only recovery path is a best-effort read of a *server
+            // error* frame so operator-facing failures stay visible.
             try {
                 val element = json.parseToJsonElement(rawJson).jsonObject
-                val type = element["type"]?.jsonPrimitive?.content
-
-                if (type != null) {
-                    // Unknown type - return Unknown instead of failing
-                    AppLogger.w("ProtocolJson", "Unknown server message type: $type (bytes=${rawJson.length})")
-                    return ServerMessage.Unknown(
-                        rawType = type,
-                        messageId = element["message_id"]?.jsonPrimitive?.content,
-                        sessionId = element["session_id"]?.jsonPrimitive?.content,
-                        timestamp = element["timestamp"]?.jsonPrimitive?.content,
-                        inReplyTo = element["in_reply_to"]?.jsonPrimitive?.content
-                    )
-                }
-
-                // Try generic error parsing
-                val msg = element["message"]?.jsonPrimitive?.content ?: "Unknown error"
                 if (element["type"]?.jsonPrimitive?.content == "error") {
                     return ServerMessage.ErrorMessage(
-                        message = msg,
+                        message = element["message"]?.jsonPrimitive?.content ?: "Unknown error",
                         code = element["code"]?.jsonPrimitive?.content,
                         details = element["details"]?.jsonPrimitive?.content,
                         messageId = element["message_id"]?.jsonPrimitive?.content,
                         inReplyTo = element["in_reply_to"]?.jsonPrimitive?.content
                     )
                 }
-
-                AppLogger.e(
-                    "ProtocolJson",
-                    "Failed to decode server message: ${e.message} (type=${peekType(rawJson)} bytes=${rawJson.length})",
-                    e
-                )
-                null
             } catch (_: Exception) {
-                AppLogger.e(
-                    "ProtocolJson",
-                    "Failed to decode server message: ${e.message} (type=${peekType(rawJson)} bytes=${rawJson.length})",
-                    e
-                )
-                null
+                // fall through to the drop below
             }
+            AppLogger.e(
+                "ProtocolJson",
+                "Failed to decode server message: ${e.message} (type=${peekType(rawJson)} bytes=${rawJson.length})",
+                e
+            )
+            null
         }
     }
 

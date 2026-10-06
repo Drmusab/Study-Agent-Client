@@ -67,11 +67,18 @@ class SpeechQueue(
         }
         // Full — CRITICAL work may evict the *worst* pending entry (lowest priority, newest).
         if (request.priority == SpeechPriority.CRITICAL) {
-            val worst = entries.maxWithOrNull(
-                compareByDescending<Entry> { it.request.priority.rank }.thenByDescending { it.sequence }
-            )
+            // Entry's natural order is rank-ascending/sequence-ascending (poll takes the MIN:
+            // highest priority, oldest). The MAX is therefore the eviction target: the lowest
+            // priority, and among equals the newest arrival. An inverted comparator here would
+            // evict the BEST pending entry and keep the worst.
+            val worst = entries.maxOrNull()
             if (worst != null && worst.request.priority != SpeechPriority.CRITICAL) {
                 entries.remove(worst)
+                // The queue owns the completion of every entry it removes (same rule as drain):
+                // an evicted caller is resolved exactly once here, so no call site can forget
+                // it and leave a speak() hanging forever. complete() is idempotent — an
+                // orchestrator that also completes the evicted entry is a harmless no-op.
+                worst.completion.complete(SpeechResult.Cancelled)
                 entries += entry
                 return EnqueueResult.EvictedLowest(worst)
             }

@@ -294,7 +294,12 @@ class AnkiCardFlowTest {
             gateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidGateway(stateToReturn = ankiDroidState(capabilities)),
             scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined),
             clock = TestClock(),
-            deckGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidDeckGateway(),
+            // beginReview confirms the session deck against the provider's deck listing (§45/§46);
+            // the default fake serves an EMPTY listing, which would fail every begin with
+            // DeckNotFound. Serve the session's deck so the fake behaves like an AnkiDroid that
+            // actually holds the collection.
+            deckGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidDeckGateway()
+                .also { it.succeed(listOf(AnkiDeck(deckRef, "Flow Deck"))) },
             reviewGateway = com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidReviewGateway(results = reviewResults),
             cardGateway = cardGateway,
             turnIds = com.studyagent.client.data.anki.ankidroid.SequentialReviewTurnIdSource(instancePrefix = "flow")

@@ -204,6 +204,9 @@ class AnkiCardRenderControllerTest {
 
         harness.controller.onRendererProcessGone(before, didCrash = true)
         assertTrue(harness.controller.retry())
+        // The renderer death dropped the WebView (STEP 71): the retry arms the re-presentation,
+        // and the recreated surface attachment is what lands it on screen (STEP 73).
+        harness.controller.attachSurface(harness.surface)
 
         val after = harness.request
         assertEquals(before.turnId, after.turnId)
@@ -302,7 +305,7 @@ class AnkiCardRenderControllerTest {
         assertEquals(latest, ready.request)
         assertEquals(AnkiCardSide.ANSWER, ready.request.side)
         assertTrue(harness.surface.lastHtml!!.contains(ANSWER_MARKER))
-        assertEquals(pending.size - 1, harness.snapshot().staleCallbacksIgnored)
+        assertEquals((pending.size - 1).toLong(), harness.snapshot().staleCallbacksIgnored)
     }
 
     // ------------------------------------------------------------------ recomposition safety
@@ -524,7 +527,9 @@ class AnkiCardRenderControllerTest {
     fun `a main-frame load failure fails the presentation but keeps the text fallback`() {
         val harness = Harness()
         val id = harness.show()
-        harness.controller.submit(renderCard(), turnId(), AnkiCardSide.QUESTION)
+        // A genuinely different card/turn: submitting the identical request again would be the
+        // recomposition no-op (INV-RENDER-23) and could never advance the generation.
+        harness.controller.submit(renderCard(id = "card-2"), turnId("7:card-2:1"), AnkiCardSide.QUESTION)
         harness.controller.onLoadFailure(harness.request, errorCode = -8)
 
         val failed = harness.state as AnkiRenderState.Failed

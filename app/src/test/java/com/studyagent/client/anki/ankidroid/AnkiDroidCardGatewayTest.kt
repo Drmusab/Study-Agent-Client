@@ -41,8 +41,11 @@ class AnkiDroidCardGatewayTest {
         "_id" to cardId,
         "note_id" to noteId,
         "ord" to ord,
-        "deck_id" to 1L,
-        "question" to "<b>Front</b>",
+            "deck_id" to 1L,
+            // The pinned projection always serves queue/type; without them every hydration
+            // would carry card_queue_state_unmapped (fixture noise, not the tested degradation).
+            "queue" to 2,
+            "question" to "<b>Front</b>",
         "answer" to "Back<hr id=answer>Tail",
         "question_simple" to "Front",
         "answer_simple" to "Back",
@@ -208,7 +211,7 @@ class AnkiDroidCardGatewayTest {
         assertEquals("42", diagnostics.lastCardId)
         assertEquals("7", diagnostics.lastNoteId)
         assertEquals(0, diagnostics.lastCardOrd)
-        assertEquals(9, diagnostics.questionHtmlLength) // "<b>Front</b>"
+        assertEquals(12, diagnostics.questionHtmlLength) // "<b>Front</b>".length — the fixture's truth
         assertEquals(1, diagnostics.providerQueryCount)
         // Lengths and availability only — the payload itself must not be observable (STEP 88/89).
         val serialized = diagnostics.toString()

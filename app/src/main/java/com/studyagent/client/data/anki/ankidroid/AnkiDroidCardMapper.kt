@@ -120,9 +120,12 @@ internal object AnkiDroidCardMapper {
             return AnkiDroidCardRowOutcome.Malformed(AnkiDroidCardRowProblem.QUESTION_CONTENT_MISSING)
         }
         // STEP 76 — HTML without simple text is a visual-only card: speech is unavailable and no
-        // HTML-derived substitute is fabricated. The gap is a recorded degradation, not a failure.
-        if (questionText == null && questionHtml != null) degradations.add(DEG_SPEECH_TEXT_UNAVAILABLE)
-        if (answerText == null && answerHtml != null) degradations.add(DEG_SPEECH_TEXT_UNAVAILABLE)
+        // HTML-derived substitute is fabricated. The gap is a recorded degradation, not a
+        // failure. The token is per-card, not per-side: a question-only and an answer-only gap
+        // each record it once, and both together still record it exactly once.
+        val questionSpeechGap = questionText == null && questionHtml != null
+        val answerSpeechGap = answerText == null && answerHtml != null
+        if (questionSpeechGap || answerSpeechGap) degradations.add(DEG_SPEECH_TEXT_UNAVAILABLE)
 
         // ---- optional metadata (lenient — STEP 16) --------------------------------------------
         val templateName = AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_NAME_COLUMN))
@@ -224,9 +227,13 @@ internal object AnkiDroidCardMapper {
         row: AnkiDroidProviderRow,
         degradations: MutableList<String>
     ): AnkiSchedulingInfo? {
-        val reps = parseBoundedInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_REPS_COLUMN)))
-        val lapses = parseBoundedInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_LAPSES_COLUMN)))
-        val intervalDays = parseBoundedInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_INTERVAL_COLUMN)))
+        // Counts and interval *days* are never negative: a negative raw interval is Anki's
+        // learning-step encoding in minutes — rendering it as intervalDays=-3 would be a
+        // unit lie in an informational surface (INV-ANKI-CARD-18/19), so it is treated as
+        // unreadable and the whole section degrades to null when nothing readable remains.
+        val reps = parseNonNegativeInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_REPS_COLUMN)))
+        val lapses = parseNonNegativeInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_LAPSES_COLUMN)))
+        val intervalDays = parseNonNegativeInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_INTERVAL_COLUMN)))
         val lastReviewEpochSeconds = parseEpochSeconds(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_LAST_REVIEW_TIME_COLUMN)))
         val stability = parseDouble(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_FSRS_STABILITY_COLUMN)))
         val difficulty = parseDouble(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_FSRS_DIFFICULTY_COLUMN)))

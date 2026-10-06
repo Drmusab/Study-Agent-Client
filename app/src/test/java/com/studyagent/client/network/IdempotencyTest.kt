@@ -44,7 +44,7 @@ class IdempotencyTest {
         )
 
         assertEquals(turnId, message.reviewTurnId)
-        assertEquals(3, message.sessionRevision)
+        assertEquals(3L, message.sessionRevision)
     }
 
     @Test

@@ -141,9 +141,10 @@ interface AnkiBackend {
 }
 
 /** Scheduled review only. Null deck means backend-defined collection-wide review. */
-data class BeginReviewRequest(val context: AnkiSessionContext, val limit: Int? = null) {
-    init { require(limit == null || limit > 0) }
-}
+data class BeginReviewRequest(val context: AnkiSessionContext, val limit: Int? = null)
+// No require() on the limit: an out-of-range value must be *refused*, not crash the caller.
+// Backends validate the range and return a typed InvalidRequest("review_limit_out_of_range"),
+// which keeps untrusted/edge input on the domain-error path (INV-ANKI-DET-09).
 
 /** Opaque backend stream handle, separate from the existing user study-session ID. */
 data class AnkiReviewSession(val context: AnkiSessionContext, val backendSessionRef: String) {

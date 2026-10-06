@@ -135,9 +135,13 @@ class AnkiRenderEventTest {
         )
         listOf(mediated, blocked).forEach { event ->
             val text = event.logLine()
-            assertFalse(text.contains("http"))
+            // The scheme is coarse classification data and belongs in the log line (the metadata
+            // assertions below pin it); what must never appear is any URL remnant — an authority,
+            // a host, a path. Note "https" as a *scheme* necessarily contains the letters "http",
+            // so the leak markers are the URL structure, not the scheme word.
             assertFalse(text.contains("//"))
             assertFalse(text.contains("wikipedia"))
+            assertFalse(text.contains("example.com"))
             assertTrue(event.metadata.containsKey("scheme"))
         }
         assertEquals("https", mediated.metadata["scheme"])

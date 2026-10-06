@@ -98,12 +98,15 @@ class DiagnosticsExportPrivacyTest {
 
     @Test
     fun `secrets logged anywhere are redacted before they reach the export`() = runTest {
+        val h = newHarness(serverDeckSize = 5)
+        // newHarness resets shared process state (log buffer, debug flag) for cross-test
+        // isolation, so the secret rows must be written AFTER that reset. The contract under
+        // test is unchanged: anything that reaches the buffer — at any point in the app's
+        // life — is redacted at write time and the redaction stays visible in the export.
         AppLogger.isDebugEnabled = true
         AppLogger.i("Connection", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.body.signature")
         AppLogger.w("Settings", "token=fake-device-token-1234567890")
         AppLogger.e("Protocol", """{"password":"not-a-real-password","api_key":"fake-key-abcdef"}""")
-
-        val h = newHarness(serverDeckSize = 5)
         h.startSession()
 
         val export = h.diagnosticsRepo().getFormattedLogsText()
@@ -191,8 +194,11 @@ class DiagnosticsExportPrivacyTest {
         ledger.markAmbiguous(commitId, "unknown_response")
         val h = newHarness(serverDeckSize = 1)
         val export = h.diagnosticsRepo(ledger = ledger).getFormattedLogsText()
-        assertTrue(export.contains("Ledger health: Ready"))
-        assertTrue(export.contains("Ledger ambiguous: 1"))
+        // Export rows render as a padded label column plus the value ("Ledger health   Ready"),
+        // so the assertions match on whitespace-normalized text — same contract, real format.
+        val flat = export.replace(Regex("\\s+"), " ")
+        assertTrue(flat.contains("Ledger health Ready"))
+        assertTrue(flat.contains("Ledger ambiguous 1"))
         for (secret in listOf("private-backend", "private-session", "private-turn", "private-card",
                 "private-note", "private-collection", "unknown_response")) {
             assertFalse("ledger export must not include $secret", export.contains(secret))
@@ -208,6 +214,11 @@ class DiagnosticsExportPrivacyTest {
         val repository = h.diagnosticsRepo()
 
         assertTrue(repository.timelineEvents().isNotEmpty())
+        // A clean session logs only INFO rows, and INFO publication is coalesced behind the
+        // publish executor (WARN/ERROR publish immediately). Tests asserting on the observable
+        // stream flush first — the pattern the AppLogger KDoc prescribes. (This assertion used
+        // to pass only because the flow under test was producing rejected-event WARN spam.)
+        AppLogger.flush()
         assertTrue(repository.logs.value.isNotEmpty())
 
         repository.clearLogs()

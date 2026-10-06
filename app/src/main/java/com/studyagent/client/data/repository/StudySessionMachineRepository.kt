@@ -28,7 +28,7 @@ import java.util.UUID
  * This satisfies §61-§62: UI/voice/notification all converge to dispatch.
  */
 class StudySessionMachineRepository(
-    connectionRepository: ConnectionRepository,
+    private val connectionRepository: ConnectionRepository,
     speechOrchestrator: SpeechOrchestrator,
     recognitionOrchestrator: SpeechRecognitionOrchestrator,
     settingsFlow: Flow<AppSettings>,
@@ -130,9 +130,27 @@ class StudySessionMachineRepository(
                 deck = deckName ?: fallback?.deck,
                 messageId = UUID.randomUUID().toString(),
                 mode = mode ?: fallback?.mode ?: com.studyagent.client.core.models.StudyMode.DUE_REVIEWS.wireValue,
-                config = config ?: fallback?.config
+                config = config ?: fallback?.config,
+                agentCapabilities = negotiatedCapabilities()
             )
         )
+    }
+
+    /**
+     * What the connected agent advertised during handshake, or null when nothing was negotiated.
+     * The reducer freezes the commit semantics from this at session start (GATE 11): a legacy v1
+     * agent resolves to LEGACY_V1 (fail-closed), a v2 agent to its advertised capability set.
+     */
+    private fun negotiatedCapabilities(): com.studyagent.client.core.models.AgentCapabilities? {
+        val snapshot = connectionRepository.connectionSnapshot.value
+        if (snapshot.protocolVersion == null && snapshot.capabilities.isEmpty()) return null
+        return if (snapshot.protocolVersion != "2" && snapshot.capabilities.isEmpty()) {
+            com.studyagent.client.core.models.AgentCapabilities(
+                status = com.studyagent.client.core.models.AgentCapabilities.NegotiationStatus.LEGACY_V1
+            )
+        } else {
+            com.studyagent.client.core.models.AgentCapabilities.fromStrings(snapshot.capabilities)
+        }
     }
 
     override suspend fun submitSpokenAnswer(cardId: String, transcript: String) {

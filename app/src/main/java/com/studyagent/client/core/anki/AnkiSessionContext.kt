@@ -18,8 +18,13 @@ data class AnkiSessionContext(
     init {
         require(studySessionId.isNotBlank())
         require(startedAtEpochMs >= 0)
+        // A collection identity naming a *different* backend than its own context is
+        // self-contradictory data — structural nonsense, refused at construction.
+        // A foreign *deckRef* is different in kind: it is a cross-backend request that the
+        // backend must answer with a typed SessionInvalid / DeckNotFound (beginReview checks
+        // `context.backendId != id` first and resolves decks against the provider listing),
+        // never a crash before that guard can run (INV-ANKI-DET-09).
         require(collection == null || collection.backendId == backendId)
-        require(deckRef == null || deckRef.backendId == backendId)
         require(collection?.collectionKey == null || deckRef?.collectionKey == null ||
             collection.collectionKey == deckRef.collectionKey)
     }

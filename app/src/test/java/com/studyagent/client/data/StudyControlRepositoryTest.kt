@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
@@ -87,7 +88,10 @@ class StudyControlRepositoryTest {
 
         val candidate = h.control.draft.value!!
         val saveJob = h.scope.async { h.control.saveConfig(candidate) }
-        advanceUntilIdle()
+        // runCurrent, NOT advanceUntilIdle: the save arms an 8 s virtual-time timeout, and
+        // advanceUntilIdle would burn it before the scripted ACK is emitted — every in-flight
+        // save in this file must be advanced with runCurrent until the ACK/rejection lands.
+        runCurrent()
 
         val requestId = h.lastUpdateRequestId()
         assertTrue(requestId != null)
@@ -113,7 +117,7 @@ class StudyControlRepositoryTest {
         h.control.updateDraft { it.copy(newPerDay = 44) }
         val candidate = h.control.draft.value!!
         val saveJob = h.scope.async { h.control.saveConfig(candidate) }
-        advanceUntilIdle()
+        runCurrent()
 
         h.connection.emit(
             ServerMessage.ErrorMessage(
@@ -144,7 +148,7 @@ class StudyControlRepositoryTest {
 
         h.control.updateDraft { it.copy(newPerDay = 51) }
         val saveJob = h.scope.async { h.control.saveConfig(h.control.draft.value!!) }
-        advanceUntilIdle()
+        runCurrent()
         assertTrue(h.control.saveState.value is ConfigSaveState.Saving)
 
         // §53/§139: bounded wait, then a clean exit.
@@ -180,7 +184,7 @@ class StudyControlRepositoryTest {
         h.control.updateDraft { it.copy(newPerDay = 61) }
         val candidate = h.control.draft.value!!
         val first = h.scope.async { h.control.saveConfig(candidate) }
-        advanceUntilIdle()
+        runCurrent()
         assertEquals(1, h.connection.sentOfType("update_study_config").size)
 
         // §140: second and third taps while the ACK is in flight are refused.
@@ -377,7 +381,7 @@ class StudyControlRepositoryTest {
 
         // §126/§134: deck list changes; selection stays valid through sync.
         h.control.setActiveDeck("Pharmacology")
-        advanceUntilIdle()
+        runCurrent()
         val ackId = h.lastUpdateRequestId()
         assertTrue(ackId != null)
         h.connection.emit(
@@ -401,7 +405,7 @@ class StudyControlRepositoryTest {
         h.control.updateDraft { it.copy(newPerDay = 61) }
         val candidate = h.control.draft.value!!
         val saveJob = h.scope.async { h.control.saveConfig(candidate) }
-        advanceUntilIdle()
+        runCurrent()
         val requestId = h.lastUpdateRequestId()
         assertTrue(requestId != null)
 
@@ -432,7 +436,7 @@ class StudyControlRepositoryTest {
         h.control.updateDraft { it.copy(newPerDay = 62) }
         val candidate = h.control.draft.value!!
         val saveJob = h.scope.async { h.control.saveConfig(candidate) }
-        advanceUntilIdle()
+        runCurrent()
         val requestId = h.lastUpdateRequestId()
         assertTrue(requestId != null)
 
@@ -465,7 +469,7 @@ class StudyControlRepositoryTest {
         h.control.updateDraft { it.copy(newPerDay = 63) }
         val candidate = h.control.draft.value!!
         val saveJob = h.scope.async { h.control.saveConfig(candidate) }
-        advanceUntilIdle()
+        runCurrent()
         val requestId = h.lastUpdateRequestId()
         assertTrue(requestId != null)
         assertTrue(h.control.saveState.value is ConfigSaveState.Saving)
@@ -479,7 +483,7 @@ class StudyControlRepositoryTest {
                 message = "unrelated failure"
             )
         )
-        advanceUntilIdle()
+        runCurrent()
         assertTrue(saveJob.isActive)
         assertTrue(h.control.saveState.value is ConfigSaveState.Saving)
 
@@ -513,7 +517,7 @@ class StudyControlRepositoryTest {
         h.control.updateDraft { it.copy(newPerDay = 64) }
         val candidate = h.control.draft.value!!
         val saveJob = h.scope.async { h.control.saveConfig(candidate) }
-        advanceUntilIdle()
+        runCurrent()
         val requestId = h.lastUpdateRequestId()
         assertTrue(requestId != null)
 

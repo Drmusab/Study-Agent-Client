@@ -24,19 +24,56 @@ object SessionReconciler {
     ): Reconciliation {
         // PC Agent's current snapshot/revision has no durable ReviewCommitId receipt. Even a
         // different next card or finished session cannot attribute a lost rate_card delivery.
-        // Keep the pending original message for a later correlated ACK, but never replay it.
+        // Keep the pending original message for a later correlated ACK, but never replay it
+        // automatically — with or without frozen idempotent semantics, a resend is the user's
+        // explicit decision, never the reconciler's.
         if (local.anki == null && local.cardTurn?.let { local.ledger.hasRatingInFlight(it.turnId) } == true) {
-            // No frozen idempotent capability on this delivery. Do not resend rate_card.
-            check(!PcRatingReplayPolicy.automaticReplayAllowed(null)) {
-                "in-flight PC rating must not be replayed without frozen idempotent semantics"
+            val turnId = local.cardTurn?.turnId
+            return if (PcRatingReplayPolicy.automaticReplayAllowed(local.commitSemantics) && turnId != null) {
+                // The agent froze `review_commit_idempotency`: a user retry of the same logical
+                // commit cannot double-apply, so recovery lands in a phase the user can act on
+                // instead of a terminal error. Progression stays blocked until a correlated
+                // receipt or the user's own retry resolves the turn.
+                Reconciliation(local.copy(
+                    phase = SessionPhase.WaitingForRating,
+                    connection = SessionConnectionStatus.CONNECTED,
+                    ledger = local.ledger.markRatingFailed(turnId, true),
+                    error = SessionProblemHolder(SessionProblem.RATING_TIMEOUT,
+                        "Rating unconfirmed at reconnect. The agent deduplicates this commit; retrying will not apply it twice.",
+                        true, clockMs)
+                ), listOf(StudyEffect.Voice.CancelSpeech("pc-rating-unconfirmed"),
+                    StudyEffect.Voice.CancelRecognition("pc-rating-unconfirmed")))
+            } else {
+                // No frozen idempotent capability on this delivery. Do not resend rate_card.
+                check(!PcRatingReplayPolicy.automaticReplayAllowed(local.commitSemantics)) {
+                    "in-flight PC rating must not be replayed without frozen idempotent semantics"
+                }
+                Reconciliation(local.copy(
+                    phase = SessionPhase.Error(SessionProblem.RATING_TIMEOUT),
+                    connection = SessionConnectionStatus.CONNECTED,
+                    error = SessionProblemHolder(SessionProblem.RATING_TIMEOUT,
+                        "PC rating is unconfirmed. Do not retry or advance without a correlated receipt.", false, clockMs)
+                ), listOf(StudyEffect.Voice.CancelSpeech("pc-rating-unconfirmed"),
+                    StudyEffect.Voice.CancelRecognition("pc-rating-unconfirmed")))
             }
-            return Reconciliation(local.copy(
-                phase = SessionPhase.Error(SessionProblem.RATING_TIMEOUT),
-                connection = SessionConnectionStatus.CONNECTED,
-                error = SessionProblemHolder(SessionProblem.RATING_TIMEOUT,
-                    "PC rating is unconfirmed. Do not retry or advance without a correlated receipt.", false, clockMs)
-            ), listOf(StudyEffect.Voice.CancelSpeech("pc-rating-unconfirmed"),
-                StudyEffect.Voice.CancelRecognition("pc-rating-unconfirmed")))
+        }
+
+        // An unsolicited stats/status frame that claims nothing new — no phase claim, no card
+        // divergence, session healthy and live — is inert: it may refresh counters and nothing
+        // else. Running the full reconciliation for it would cancel the live microphone window
+        // and re-speak the question on every chatty push; a frame flood must not wake the voice
+        // pipeline. Real reconnect recovery is untouched: it arrives with an explicit server
+        // phase, or finds the local session disconnected/recovering, and reconciles in full.
+        if (snapshot.phase == ServerSessionPhase.UNKNOWN && !snapshot.isFinished && !snapshot.isPaused &&
+            local.phase.isActive && local.connection == SessionConnectionStatus.CONNECTED &&
+            (snapshot.currentCard == null || snapshot.currentCard.id == local.cardTurn?.cardId)
+        ) {
+            val refreshed = local.session?.copy(
+                remainingCards = snapshot.remainingCards ?: local.session.remainingCards,
+                totalReviewedInSession = snapshot.reviewedCards ?: local.session.totalReviewedInSession,
+                totalCardsInQueue = snapshot.totalCards ?: local.session.totalCardsInQueue
+            )
+            return Reconciliation(local.copy(session = refreshed), emptyList())
         }
         // Session missing on server -> terminal or error
         if (snapshot.isFinished) {
@@ -124,6 +161,12 @@ object SessionReconciler {
             cardTurn = cardTurn,
             phase = localPhase,
             connection = SessionConnectionStatus.CONNECTED,
+            // The stale voice pipeline is cancelled unconditionally below, so the published
+            // state must not keep claiming effect ownership — most importantly a reconciled
+            // Paused: a paused session holds no microphone (§22), whatever was open before the
+            // drop. Fresh speak/listen effects for the restart phase reassign these ids.
+            activeSpeechEffectId = null,
+            activeRecognitionEffectId = null,
             pendingAction = null // pending actions ambiguous after reconnect => require fresh intent
         )
 
