@@ -30,7 +30,7 @@ class AnkiStudyEffectExecutor(
     private val ledger: ReviewCommitLedger? = null,
     private val clock: () -> Long = System::currentTimeMillis,
     private val faults: CommitFaultInjector = NoCommitFaults,
-    private val phases: CommitPhaseSink = CommitPhaseSink { _, _ -> },
+    private val phases: CommitPhaseSink = CommitPhaseSink { _, _, _ -> },
     /** Upper bound for one read-only reconciliation query; expiry leaves the commit AMBIGUOUS. */
     private val reconcileTimeoutMs: Long = DEFAULT_RECONCILE_TIMEOUT_MS
 ) {
@@ -155,7 +155,11 @@ class AnkiStudyEffectExecutor(
         // Semantics are frozen here and are not rewritten if the record already exists.
         val backendForFreeze = registry.find(commitId.backendId)
         val record = when (val prepared = ledger.prepare(request, backendForFreeze?.commitSemantics?.enforced(backendForFreeze.id))) {
-            is ReviewCommitLedger.PrepareResult.Prepared -> prepared.record
+            is ReviewCommitLedger.PrepareResult.Prepared -> {
+                // INTENT is durable: this is the CREATED marker of the transaction.
+                phases.onPhase("CREATED", 0, prepared.record.commitId)
+                prepared.record
+            }
             is ReviewCommitLedger.PrepareResult.Existing -> prepared.record
             is ReviewCommitLedger.PrepareResult.Tombstoned ->
                 return resolved(AnkiCommitOutcome.Committed("ledger_tombstone"))
@@ -165,6 +169,11 @@ class AnkiStudyEffectExecutor(
             is ReviewCommitLedger.PrepareResult.StoreFailed -> return storageFault("commit_persistence_failure")
             is ReviewCommitLedger.PrepareResult.Unavailable -> return storageFault("ledger_unavailable")
         }
+        // The durable row exists (or already existed): publish the guarantee the ledger froze with
+        // it, so every later outcome — including a preflight refusal that never claims the write —
+        // correlates with the same guarantee level. Correlation only: no state, no phase change.
+        emit(AnkiStudyEvent.RatingCommitPrepared(effect.epoch, commitId, record.frozenGuarantee))
+
         // Answer from the ledger whenever the record is not claimable by this effect.
         when (record.state) {
             ReviewCommitState.COMMITTED -> return resolved(AnkiCommitOutcome.Committed("ledger_replay"))
@@ -210,8 +219,9 @@ class AnkiStudyEffectExecutor(
             is ReviewCommitLedger.ClaimResult.StoreFailed -> return storageFault("commit_persistence_failure")
             is ReviewCommitLedger.ClaimResult.Unavailable -> return storageFault("ledger_unavailable")
         }
-        phases.onPhase("PREPARED", claimed.attemptCount)
-        emit(AnkiStudyEvent.RatingCommitStarted(effect.epoch, commitId, claimed.attemptCount))
+        phases.onPhase("PREPARED", claimed.attemptCount, commitId)
+        emit(AnkiStudyEvent.RatingCommitStarted(
+            effect.epoch, commitId, claimed.attemptCount, claimed.frozenGuarantee))
         faults.on(CommitFaultPoint.AFTER_PREPARED)
 
         // The backend may perform preflight while PREPARED. Its boundary callback persists
@@ -228,7 +238,7 @@ class AnkiStudyEffectExecutor(
                     mutationEntered = saved != null
                     if (!mutationEntered) boundaryFault = true
                     if (mutationEntered) {
-                        phases.onPhase("CALL_ENTERED", claimed.attemptCount)
+                        phases.onPhase("CALL_ENTERED", claimed.attemptCount, commitId)
                         faults.on(CommitFaultPoint.AFTER_CALL_ENTERED)
                         faults.on(CommitFaultPoint.BEFORE_PROVIDER_CALL)
                     }
@@ -277,7 +287,7 @@ class AnkiStudyEffectExecutor(
         val final = withContext(NonCancellable) { ledger.complete(commitId, result) }
             ?: return storageFault("commit_persistence_failure")
         faults.on(CommitFaultPoint.AFTER_COMMITTED_PERSIST)
-        phases.onPhase("LOCAL_COMMIT_PERSISTED", final.attemptCount)
+        phases.onPhase("LOCAL_COMMIT_PERSISTED", final.attemptCount, commitId)
         unpersistedResponses.remove(commitId)
         return resolved(final.toOutcome(committedSource = "backend_confirmed"))
     }

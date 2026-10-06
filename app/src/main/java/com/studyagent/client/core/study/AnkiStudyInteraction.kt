@@ -49,7 +49,9 @@ data class AnkiRatingCommit(
     /** A reconciliation read is in flight (AMBIGUOUS only). */
     val reconciling: Boolean = false,
     /** True only when reconciliation evidence, not the original response, proved COMMITTED. */
-    val verifiedByReconciliation: Boolean = false
+    val verifiedByReconciliation: Boolean = false,
+    /** Guarantee frozen with the durable record; null until the executor reports it. */
+    val guaranteeLevel: CommitGuaranteeLevel? = null
 ) {
     val commitId: ReviewCommitId get() = request.commitId
     val rating: Rating get() = request.rating
@@ -121,8 +123,28 @@ sealed interface AnkiStudyEvent : StudyEvent {
     ) : AnkiStudyEvent
     data class SelectRating(val epoch: Long, val turnId: ReviewTurnId, val rating: Rating) : AnkiStudyEvent
 
+    /**
+     * The transaction row is durable and the backend's guarantee has been frozen with it. This is
+     * correlation, not dispatch: the write has not been claimed and a preflight refusal must still
+     * be able to fail safe, so no phase or commit-state change depends on this event.
+     */
+    data class RatingCommitPrepared(
+        val epoch: Long,
+        val commitId: ReviewCommitId,
+        val guaranteeLevel: CommitGuaranteeLevel?
+    ) : AnkiStudyEvent {
+        val sessionId: String get() = commitId.studySessionId
+        val turnId: ReviewTurnId get() = commitId.turnId
+    }
+
     /** SUBMITTING/PREPARED is durable; backend preflight may still precede call entry. */
-    data class RatingCommitStarted(val epoch: Long, val commitId: ReviewCommitId, val attempt: Int) : AnkiStudyEvent {
+    data class RatingCommitStarted(
+        val epoch: Long,
+        val commitId: ReviewCommitId,
+        val attempt: Int,
+        /** Guarantee frozen when the transaction was created; diagnostics correlation only. */
+        val guaranteeLevel: CommitGuaranteeLevel? = null
+    ) : AnkiStudyEvent {
         val sessionId: String get() = commitId.studySessionId
         val turnId: ReviewTurnId get() = commitId.turnId
     }

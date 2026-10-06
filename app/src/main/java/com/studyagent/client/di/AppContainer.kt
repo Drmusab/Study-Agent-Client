@@ -408,10 +408,19 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             ankiEffects = com.studyagent.client.core.study.AnkiStudyEffectExecutor(
                 registry = ankiBackendRegistry,
                 ledger = reviewCommitLedger,
-                phases = com.studyagent.client.core.anki.CommitPhaseSink { phase, _ ->
+                phases = com.studyagent.client.core.anki.CommitPhaseSink { phase, attempt, commitId ->
+                    // Correlation only: identity hash, backend, rating names and attempt count.
                     AppDiagnostics.timeline.record(
                         category = com.studyagent.client.core.diagnostics.DiagnosticCategory.SESSION,
-                        event = "REVIEW_COMMIT_$phase"
+                        event = "REVIEW_COMMIT_$phase",
+                        turnId = commitId.turnId.value,
+                        metadata = mapOf(
+                            "commit" to Integer.toHexString(commitId.stableKey.hashCode()),
+                            "backend" to commitId.backendId.stableId,
+                            "session" to commitId.studySessionId.take(12),
+                            "attempt" to attempt.toString(),
+                            "phase" to phase
+                        )
                     )
                 }
             )

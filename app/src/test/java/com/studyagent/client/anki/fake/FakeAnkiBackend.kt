@@ -36,7 +36,9 @@ class FakeAnkiBackend(
     commitSteps: List<CommitStep> = emptyList(),
     private val maxLedgerEntries: Int = 10_000,
     private val instanceId: String = UUID.randomUUID().toString(),
-    private val guaranteeLevel: CommitGuaranteeLevel = CommitGuaranteeLevel.AT_MOST_ONCE_FAIL_CLOSED,
+    /** GATE 11 checkpoint 4 — deterministic scheduler behaviour for the failure laboratory. */
+    val mode: FakeCommitMode = FakeCommitMode.SUCCESS,
+    private val guaranteeLevel: CommitGuaranteeLevel = mode.guarantee,
     private val persistedEffectStore: FakeBackendCommitStore = FakeBackendCommitStore()
 ) : AnkiBackend {
     override val commitSemantics = CommitSemantics(guaranteeLevel,
@@ -137,6 +139,28 @@ class FakeAnkiBackend(
     val logicalCommitCount: Int get() = ledger.size
     val backendEffectCount: Int get() = ledger.values.sumOf { it.mutationCount }
     val deliveryCount: Int get() = invocations.get()
+
+    /**
+     * Deliveries that reached the fake's mutation step. GATE 11 checkpoint 4 requires this counter
+     * separately from [deliveryCount]: a dedup hit or a pre-dispatch refusal is a delivery but not a
+     * mutation attempt, and only this number may grow when a real effect is possible.
+     */
+    val mutationAttemptCount: Int get() = physicalCalls.get()
+
+    private val redeliveries = AtomicInteger(0)
+
+    /** Re-deliveries of a commit id that was already delivered (a resend, not a first attempt). */
+    val redeliveryCount: Int get() = redeliveries.get()
+
+    /** Scheduler queries answered with a card; the next-card barrier must keep this at zero. */
+    private val nextCards = AtomicInteger(0)
+    val nextCardCount: Int get() = nextCards.get()
+
+    /** Gate used by [FakeCommitMode.DELAYED_SUCCESS]: the effect waits here for the test. */
+    private val delayedSuccessGate = CompletableDeferred<Unit>()
+
+    /** Releases exactly the [FakeCommitMode.DELAYED_SUCCESS] delivery that is currently in flight. */
+    fun releaseDelayedSuccess() { delayedSuccessGate.complete(Unit) }
 
     /** When set, every commit suspends here (after the call started) until the test completes it. */
     @Volatile var commitGate: CompletableDeferred<Unit>? = null
@@ -257,7 +281,10 @@ class FakeAnkiBackend(
                     is CommitRatingResult.Committed -> Unit
                     is CommitRatingResult.Ambiguous, is CommitRatingResult.Rejected ->
                         return@withLock NextCardResult.Failure(AnkiError.CommitConflict(turn.cardRef))
-                    else -> return@withLock NextCardResult.Card(turn)
+                    else -> {
+                        nextCards.incrementAndGet()
+                        return@withLock NextCardResult.Card(turn)
+                    }
                 }
             }
             if (cursor == queue.size) return@withLock NextCardResult.Finished
@@ -272,6 +299,7 @@ class FakeAnkiBackend(
             )
             active = turn
             hydrationMemo = null // a new presentation resolves the old turn's cache (STEP 83)
+            nextCards.incrementAndGet()
             NextCardResult.Card(turn)
         }
     }
@@ -344,6 +372,10 @@ class FakeAnkiBackend(
     /** Evidence = the fixture card's applied-review count, so reconciliation is checkable. */
     override suspend fun prepareCommit(request: CommitRatingRequest): CommitPreparation {
         delay(latencyMs)
+        if (mode.refusesBeforeDispatch) {
+            prepareCalls += 1
+            return CommitPreparation.Refused(AnkiError.BackendUnavailable(), retryable = true)
+        }
         return mutex.withLock {
             prepareCalls += 1
             prepareRefusal?.let { return@withLock it }
@@ -404,6 +436,7 @@ class FakeAnkiBackend(
             }
             val previous = ledger[request.commitId]
             if (previous != null) {
+                redeliveries.incrementAndGet()
                 if (previous.request.card != request.card || previous.request.rating != request.rating ||
                     previous.request.deckRef != request.deckRef) {
                     return@withLock CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card))
@@ -440,10 +473,19 @@ class FakeAnkiBackend(
                 return@withLock CommitRatingResult.Rejected(AnkiError.QueryFailure("fake-ledger-full"))
             }
             val unavailable = usabilityError()
+            val scripted = if (unavailable == null && capabilities.value.review &&
+                !mode.refusesBeforeDispatch && mode != FakeCommitMode.FAIL_BEFORE_MUTATION)
+                commits.removeFirstOrNull() else null
             val step = when {
                 unavailable != null -> CommitStep(CommitRatingResult.RetryableFailure(unavailable))
                 !capabilities.value.review -> CommitStep(CommitRatingResult.Rejected(unsupported("review")))
-                else -> {
+                mode.refusesBeforeDispatch ->
+                    CommitStep(CommitRatingResult.RetryableFailure(AnkiError.BackendUnavailable()))
+                mode == FakeCommitMode.FAIL_BEFORE_MUTATION ->
+                    CommitStep(CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("fake_fail_before_mutation")))
+                // A scripted step always wins over the mode, so existing scenarios keep their
+                // exact sequencing.
+                scripted != null -> {
                     physicalCalls.incrementAndGet()
                     commitThrowable?.let { thrown ->
                         // Dispatched, then the transport failed: the stand-in records "unknown".
@@ -451,7 +493,34 @@ class FakeAnkiBackend(
                             (previous?.attempts ?: 0) + 1, if (applyBeforeThrow) 1 else 0)
                         throw thrown
                     }
-                    commits.removeFirstOrNull() ?: CommitStep(CommitRatingResult.Committed())
+                    scripted
+                }
+                mode == FakeCommitMode.OUTCOME_UNKNOWN -> {
+                    // Nothing applied, and the backend cannot prove it: still AMBIGUOUS for the
+                    // client. A pessimistic backend must never be upgraded into a safe retry.
+                    physicalCalls.incrementAndGet()
+                    CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("fake_outcome_unknown")))
+                }
+                else -> {
+                    physicalCalls.incrementAndGet()
+                    commitThrowable?.let { thrown ->
+                        ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
+                            (previous?.attempts ?: 0) + 1, if (applyBeforeThrow) 1 else 0)
+                        throw thrown
+                    }
+                    when (mode) {
+                        FakeCommitMode.MUTATE_THEN_DROP_RESPONSE -> {
+                            // The effect happens; the response never arrives.
+                            ledger[request.commitId] = RecordedCommit(request, CommitRatingResult.Ambiguous(),
+                                (previous?.attempts ?: 0) + 1, 1)
+                            throw FakeTransportLost("fake_response_dropped_after_effect")
+                        }
+                        FakeCommitMode.DELAYED_SUCCESS -> {
+                            delayedSuccessGate.await()
+                            CommitStep(CommitRatingResult.Committed())
+                        }
+                        else -> CommitStep(CommitRatingResult.Committed())
+                    }
                 }
             }
             val applied = step.result is CommitRatingResult.Committed || step.appliedWhenAmbiguous
@@ -481,3 +550,9 @@ class FakeAnkiBackend(
         }
     }
 }
+
+/**
+ * GATE 11 checkpoint 4 — the response is gone after the collection was already changed. This is a
+ * transport failure, not a scheduler answer, and the client must fail closed (AMBIGUOUS).
+ */
+class FakeTransportLost(message: String) : RuntimeException(message)

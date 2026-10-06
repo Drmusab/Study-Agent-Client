@@ -1,6 +1,7 @@
 package com.studyagent.client.study
 
 import com.studyagent.client.anki.fake.FakeAnkiBackend
+import com.studyagent.client.anki.fake.FakeCommitMode
 import com.studyagent.client.anki.fake.InMemoryReviewCommitStore
 import com.studyagent.client.core.anki.*
 import com.studyagent.client.core.models.Rating
@@ -29,14 +30,17 @@ class AnkiCommitHarness(
     private val faults: CommitFaultInjector = NoCommitFaults,
     /** Optional decorator around the fake (e.g. an ordered call recorder). Never changes semantics. */
     wrap: (FakeAnkiBackend) -> AnkiBackend = { it },
+    /** GATE 11 checkpoint 4 — deterministic scheduler failure mode for the fake backend. */
+    fakeMode: FakeCommitMode = FakeCommitMode.SUCCESS,
     /** LOCAL_DEDUP_ONLY makes the fake re-apply any repeated id that already had an effect. */
-    guarantee: CommitGuaranteeLevel = CommitGuaranteeLevel.AT_MOST_ONCE_FAIL_CLOSED
+    guarantee: CommitGuaranteeLevel = fakeMode.guarantee
 ) {
     var now: Long = 10_000L
     val clock: () -> Long = { now }
     val deck: AnkiDeckRef = deckFor(backendId)
     val fake = FakeAnkiBackend(id = backendId, decks = listOf(AnkiDeck(deck, "Deck")), cards = cards,
-        commitSteps = commitSteps, nextErrors = nextErrors, instanceId = "gate11", guaranteeLevel = guarantee)
+        commitSteps = commitSteps, nextErrors = nextErrors, instanceId = "gate11", mode = fakeMode,
+        guaranteeLevel = guarantee)
     val backend: AnkiBackend = wrap(fake)
     var ledger = ReviewCommitLedger(store, clock)
         private set

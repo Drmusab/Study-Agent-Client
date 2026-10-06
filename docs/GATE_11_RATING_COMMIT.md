@@ -973,3 +973,135 @@ catalogue) is **discharged**: the full suite is green. Still owed, both environm
 Production readiness for safe real rating commits is unchanged by this part: the commit state
 machine, ledger durability order, crash-window and chaos suites were green before it and remain
 green under it.
+
+---
+
+# PART XIV — GATE 11 checkpoint audit (2026-10-06, branch `arena/e9f6f9e5-study-agent-client`, from `22e5026`)
+
+> This part audits the implementation against the twenty execution checkpoints of the GATE 11
+> document, adds the evidence those checkpoints ask for, and re-runs everything from a rebuilt
+> harness. PARTs X–XIII are kept for history. Where they disagree with this part about *harness
+> numbers*, this part was measured on this branch with the harness inputs documented below.
+
+## XIV.0 Verdict
+
+**GATE 11 = BLOCKED**, for the same two environmental reasons PART XIII recorded, and no others:
+
+1. **Real AnkiDroid mutation not run.** No device, emulator, AnkiDroid install or `adb` in this
+   environment, so checkpoint 16 (real disposable mutation) and the whole-device half of
+   checkpoint 11 stay unexecuted.
+2. **Gradle/CI not available.** Every Maven mirror is still unreachable (`repo1.maven.org`,
+   `dl.google.com`, `maven.aliyun.com`, `repo.huaweicloud.com`, `mirrors.cloud.tencent.com`,
+   `jitpack.io`, `repo.spring.io`, `packages.jetbrains.team`, `plugins.gradle.org` all returned
+   `000`). The harness remains equivalence evidence, not CI evidence.
+
+What this part changes: the JVM-side evidence is now **1306/1306 green in 117 classes** (PART XIII
+had 1267/1267 in 111), six checkpoint-specific test classes were added, the fake backend gained
+the eight named failure modes and the counters checkpoint 4 requires, and the diagnostics surface
+now carries the full checkpoint 19 correlation. Checkpoints 1–15 and 17–20 are **implemented and
+evidenced on the JVM**; 16 is owed to a real device.
+
+## XIV.1 Harness rebuild in this sandbox (evidence class)
+
+The harness from PART XI could not simply be re-run: PyPI and GitHub are reachable here, Maven is
+not. Everything below is reproducible with `tools/jvm-harness/bin/bootstrap-sandbox.sh`, which is
+committed with this part (and `bin/prep-coroutines-test.py`, its one non-obvious step).
+
+| Input | Source used | Note |
+|---|---|---|
+| Java runtime | `jdk4py` wheel (Java 25) | `HARNESS_JAVA` |
+| Kotlin compiler 2.3.10-RC | `kotlin-jupyter-kernel` wheel (fat jar) | also ships coroutines-core 1.10.2 + serialization 1.9.0 + plugin |
+| `android.jar` (26,361,808 B) | GitHub `Sable/android-platforms`, sparse `android-34` | mockable jar 25,398,684 B via `mockgen` |
+| `kotlinx-coroutines-test` 1.10.2 | GitHub `Kotlin/kotlinx.coroutines` tag 1.10.2 | compiled from source; KMP `expect`/`actual` collapsed by the new script; **the jar must carry `jvm/resources/META-INF/services/*`** or every `runTest` fails with `Exception handler was not found via a ServiceLoader` |
+| `kotlinx-coroutines-core` 1.10.2 | carved out of the kernel fat jar | the carve must keep `META-INF/kotlinx-coroutines-core.kotlin_module`, or top-level factories resolve to nothing |
+| atomicfu | repo shim `shims/atomicfu` | compiled into its own jar; coroutines-test needs it at compile **and** run time |
+
+With those fixed, the three groups PART XI reported as "harness deviations" (79 failures there) are
+gone: the entire suite compiles and passes unchanged. The deviations that remain are the version
+skews (K2, coroutines 1.10.2, shimmed DataStore/JUnit), listed in the harness README.
+
+**Executed evidence (this branch, this environment):**
+
+| Suite | Result |
+|---|---|
+| Main compile | 194 files, **0 errors** |
+| Test compile | 136 files, **0 errors** |
+| Full JVM suite | **1306 tests / 117 classes / 1306 passed / 0 failed / 0 ignored** (14.6 s; the endurance test alone is 6.2 s) |
+| Commit surface (20 classes) | **199 / 199** |
+| `server/test_review_commit_store.py` | **21 / 21** |
+| Whole `server/` suite | **85 passed / 1 failed / 7 skipped** (`python3 -m pytest server -q -o asyncio_mode=auto`, after `pip install pytest-asyncio 'websockets<14'` per the CI job in `docs/GATE_00_BASELINE.md`). The single failure is `test_client.py::test_full_loop`, which is a manual protocol client script rather than a unit test: it connects to a live agent at `ws://127.0.0.1:8765` and fails with `ConnectionRefusedError` when none is running. The 7 skips are 3 integration tests needing a running server and 4 live-provider tests needing API keys. **PART XIII's 26 failures were all the missing pytest-asyncio plugin**, not product defects. |
+
+The earlier `FileNotFoundError` on the mock agent's store file is not reproducible with the async
+plugin installed: `server/test_review_commit_store.py` runs `21 passed` in isolation and in the full
+suite. It was an artefact of the missing-plugin cascade, not a port collision.
+
+## XIV.2 What this part added
+
+| File | Checkpoint | What it proves |
+|---|---|---|
+| `app/src/test/.../anki/ReviewCommitTransitionTest.kt` (16 tests) | 2 | the pure transition table, including every forbidden move: COMMITTED terminal, AMBIGUOUS↛SUBMITTING, no downgrade, attempt count strictly +1 |
+| `app/src/test/.../anki/fake/FakeCommitMode.kt` | 4 | the eight named modes, each with the guarantee it implies |
+| `app/src/test/.../study/FakeCommitLaboratoryTest.kt` (10 tests) | 4 | the mandatory *mutation happens → response disappears* case, plus one test per mode and the counter contract |
+| `app/src/test/.../study/ReviewCommitConcurrencyTest.kt` (6 tests) | 8 | 100 simultaneous rating events → 1 accepted / 1 row / 1 effect; 10 racing executors → 1 dispatch; GOOD+HARD → exactly one accepted; 100 racing claims → 1 `Claimed` + 99 `InFlight` |
+| `app/src/test/.../study/ReviewCommitPropertyTest.kt` (3 tests) | 15 | the five global properties over 12 seeds × 24 steps of mixed actions, plus the frozen-ambiguity case |
+| `app/src/test/.../study/CommitDiagnosticsCorrelationTest.kt` (2 tests) | 19 | phase markers carry the transaction identity; a safe failure never claims a committed result |
+| `study/ReviewCommitEnduranceTest.kt` (1 test) | 17 | 1000 transactions: the four zeros measured end to end, including the restart behaviour of an unresolved row |
+| `FakeAnkiBackend` (`mode`, counters) | 4 | `deliveryCount`, `mutationAttemptCount`, `backendEffectCount`, `nextCardCount`, `redeliveryCount` |
+| `CommitPhaseSink`, `RatingCommitStarted`, `RatingCommitPrepared`, `AnkiRatingCommit`, `commitMetadata` | 19 | `REVIEW_COMMIT_*` markers with commit/backend/session/attempt, frozen guarantee on the event, and exactly the eight correlation keys the timeline keeps |
+| `AnkiStudyEvent.RatingCommitPrepared` + `ANKI_RATING_SELECTED` | 19 | the durable row publishes the guarantee the ledger froze with it, so a preflight refusal — which never claims the write and therefore never emits `RatingCommitStarted` — is still diagnosed against its real guarantee, and "prepared" now means *durably persisted*, not "the user tapped a rating" |
+
+## XIV.3 Checkpoint audit
+
+| # | Checkpoint | Status | Evidence (code → proof) |
+|---|---|---|---|
+| 1 | Transaction domain only | ✅ | `ReviewCommitId` `core/anki/AnkiSessionContext.kt:42`; `ReviewCommitState`/`CommitAttemptPhase`/`ReviewCommitRecord` `core/anki/ReviewCommit.kt`; `CommitGuaranteeLevel`/`CommitSemantics`/`CommitReceipt` `core/anki/CommitSemantics.kt`; coordinator outcome `AnkiCommitOutcome` `core/study/AnkiStudyInteraction.kt:78` (the roadmap's `ReviewCommitOutcome`, named once for the whole commit surface — `Committed` / `Failed` / `Ambiguous` / `PersistenceFailure`). No Android/UI imports (`AnkiDomainIsolationTest`, 4 tests). Suggested (`Evaluation.suggestedRating`) / selected (`AnkiStudyInteraction.selectedRating`) / committed (`ReviewCommitRecord.state == COMMITTED`) are three different facts. **Deviation:** the files live in `core/anki/`, not `core/anki/commit/` — one commit surface, no parallel package (PART XI §XI.1 "no parallel concepts"). |
+| 2 | Pure transition engine | ✅ | `ReviewCommitTransitions.apply/allowed` `core/anki/ReviewCommitTransition.kt:74/135`; the whole required table plus rejections is now pinned by `ReviewCommitTransitionTest` (16). Unreachable commands return a typed `null` (never a state change), and `allowed` refuses a write before storage. |
+| 3 | Durable commit ledger | ✅ | `ReviewCommitLedger` `core/anki/ReviewCommitLedger.kt:161` behind `ReviewCommitStore`; production `DataStoreReviewCommitStore` `data/anki/DataStoreReviewCommitStore.kt:29`; ordering asserted by `ReviewCommitDurabilityOrderTest`; process recreation, one-commit-per-turn, unique ids, serialized writes and "storage failure before mutation ⇒ zero backend calls" in `ReviewCommitLedgerTest` (23). Content-free: `ReviewCommitLedgerCodec` stores identity, rating, counters and timing only. |
+| 4 | Fake failure laboratory | ✅ | `FakeCommitMode` (8 modes) + counters; `FakeCommitLaboratoryTest` (10) including the mandatory case: 1 delivery, 1 mutation attempt, 1 physical effect, state AMBIGUOUS, `redeliveryCount == 0`, `nextCardCount` frozen. `OUTCOME_UNKNOWN` (no effect, unknown) still fails closed; `IDEMPOTENT_REPLAY` re-delivers with no second effect; `NON_IDEMPOTENT_REPLAY` would re-apply and only the ledger stops it. |
+| 5 | Coordinator | ✅ | `AnkiStudyEffectExecutor.commit` `core/study/AnkiStudyEffectExecutor.kt:144-286`: prepare → evidence → claim → `markMutationEntered` → backend → durable response → durable terminal → outcome. It calls no `nextCard`, writes no machine state, renders nothing, starts no TTS/STT (architecture test + `AnkiRatingCommitArchitectureTest`). Duplicate/conflict/ambiguous replays answered from the ledger before any call. |
+| 6 | Next-card barrier | ✅ | The only `Next` effect after a commit is `StudyReducer.kt:566` (`if (outcome is AnkiCommitOutcome.Committed)`), and the resolver only emits it after the durable record; `ReviewCommitDurabilityOrderTest` shows `backend:nextCard` strictly after `durable:COMMITTED`; `AnkiRatingCommitMachineTest` proves rating selection and SUBMITTING never advance; the new property test asserts `nextCardCount ≤ COMMITTED rows + 1` after every step. |
+| 7 | StudySessionMachine integration | ✅ | Backend-neutral phases `SubmittingRating` / `RatingCommitFailed` / `ReconciliationRequired` / `CommitPersistenceFailure` (`SessionPhase.kt`); touch, voice, headset and keyboard all reach the same `StudyEvent.UserRateCard` → same pipeline (harness D, machine test "touch voice and keyboard bursts"). AI suggestion cannot bypass selection: only `AnkiStudyEvent.SelectRating` for a scheduler-offered rating creates a commit (`P only ratings the scheduler offered can be committed`). |
+| 8 | Concurrency protection | ✅ | Ledger mutex + version CAS `ReviewCommitLedger.kt:335/512`; 100-event, 10-executor, GOOD+HARD, 100-claim and 50-prepare races all in `ReviewCommitConcurrencyTest`; the losing rating is never delivered (asserted against `recordedCommits`). No reliance on disabled buttons, debounce or recomposition. |
+| 9 | Recovery policy | ✅ | `ReviewCommitRecoveryPolicy.classify` `core/anki/ReviewCommitRecoveryPolicy.kt:15` implements the decision model; v1 rows cannot masquerade as PREPARED; `ReviewCommitRecoveryPolicyTest` (4) + `ReviewCommitCrashWindowTest` (4) + restart tests in the ledger and flow suites. |
+| 10 | Reconciliation | ✅ | `AnkiStudyEffectExecutor.reconcile` `:295` → `backend.reconcileCommit` `:342`; result space is exactly `Applied` / `NotApplied` / `StillAmbiguous` / `Unsupported` / `Unavailable` (no "probably"); AnkiDroid identity is refused reconciliation (`H2b`) and stays AMBIGUOUS (Unresolved); timeout bounded (`H5`). |
+| 11 | Real AnkiDroid adapter | ✅ (JVM) / ⛔ (device) | One entry point: `AnkiDroidRatingCommitter.commit` → `gateway.submitAnswer` `data/anki/ankidroid/AnkiDroidRatingCommitter.kt:112` → `safeUpdate` → the single `contentResolver.update` `data/anki/ankidroid/AnkiDroidProviderClient.kt:340`. No retry loop (an `attempt` is executed once), no direct UI-provider call, no DB access, no exception-text guessing (`AnkiDroidErrorMapper`/`AnkiDroidFailureClassifier` + `AnkiDroidRatingCommitTest` 18). The AGAIN/HARD/GOOD/EASY→1/2/3/4 mapping is pinned to API v2.24.1 and asserted; **still owed:** confirmation against a real install. |
+| 12 | Guarantee declaration | ✅ | `CommitSemantics.ANKIDROID = AT_MOST_ONCE_FAIL_CLOSED` `core/anki/CommitSemantics.kt:38`; `CommitSemanticsValidation` clamps any adapter that over-claims for an AnkiDroid identity; docs and diagnostics use the same four-level vocabulary. `END_TO_END_EXACTLY_ONCE` is never claimed for AnkiDroid or for the PC link. |
+| 13 | PC backend audit | ✅ | Client sends `review_commit_id` + `review_turn_id` + card + rating (`ProtocolMessages.kt:176`, `StudyReducer.kt:975`); server table `server/review_commit_store.py` returns the previous result for same id+payload and rejects a different payload with `COMMIT_CONFLICT`; 21/21 tests including a real-process restart. The server→Anki window is documented, not claimed: PC stays "whatever the welcome advertises, never END_TO_END_EXACTLY_ONCE". |
+| 14 | Process-crash matrix | ✅ | `CommitFaultPoint` (10 points, `core/anki/CommitFaultInjection.kt`) + `ReviewCommitCrashWindowTest`, `ReviewCommitDurabilityOrderTest`, chaos with a crash injected at every point, and the PART XI §XI.4 table. The "before nextCard" case is covered by the durable-COMMITTED restart tests (`L2`, `M`) and the new property invariant. |
+| 15 | Property tests | ✅ | `ReviewCommitPropertyTest`: `logicalCommitCount(turn) ≤ 1`, `activeMutationAttempts(session) ≤ 1`, `nextCard → COMMITTED`, `AMBIGUOUS → no new attempt`, `COMMITTED → always COMMITTED`, re-checked after every step of seeded sequences. |
+| 16 | Real disposable AnkiDroid test | ⛔ BLOCKED | No device/emulator/adb/AnkiDroid here. The test plan (test profile/deck/cards, duplicate input, barrier, scheduler progression, AGAIN/HARD/GOOD/EASY) is unchanged from PART XI and remains the gate's outstanding item. |
+| 17 | Endurance & chaos | ✅ (JVM) | `ReviewCommitEnduranceTest` runs **1000 transactions** literally (800 committed with all four scheduler ratings and a duplicate input each, 200 ambiguous in process-like harnesses) and asserts the gate's four zeros: no duplicate logical commit, no blind ambiguous retry (each ambiguous turn keeps `attempts == 1`, survives a restart, and blocks the next session without re-delivering), no next card before a durable COMMITTED, no conflicting ledger state. `ReviewCommitChaosTest` adds 150 seeds × 2 identities with injected crashes, and `ReviewCommitPropertyTest` 12 deterministic mixed-action sequences. |
+| 18 | UI safety | ✅ | `RatingCommitRecoveryUi` (`core/study/RatingCommitRecoveryUi.kt`): "Saving rating", "Could not save the rating. Nothing was changed in Anki. Retry is safe…" (only after a proven-not-applied failure), "The rating may already have been saved. Study-Agent will not submit it again until the review state is verified."; rating controls stay disabled (`ratingControlsEnabled = false` default) for SAVING, UNCONFIRMED, CHECKING and PERSISTENCE_FAULT, and there is no blind Retry for ambiguity. (The Compose-facing `RatingControlsPolicyTest` is outside the harness — stated, not implied; the wording and the enable/disable policy are additionally asserted through the machine's `ratingCommitRecovery` in `AnkiRatingCommitMachineTest`.) |
+| 19 | Diagnostics | ✅ | New correlation: `commitMetadata` now emits exactly the eight keys the timeline keeps — commit, session, backend, guarantee, rating, committed, state(+failure token), attempt — plus the event's own `turnId`; `REVIEW_COMMIT_CREATED/PREPARED/CALL_ENTERED/LOCAL_COMMIT_PERSISTED` markers carry the transaction identity; events `ANKI_RATING_SELECTED` (intent, nothing frozen yet), `ANKI_COMMIT_PREPARED` (durable row + frozen guarantee), `ANKI_COMMIT_STARTED`, `ANKI_COMMIT_COMMITTED`, `ANKI_COMMIT_SAFE_FAILURE`, `ANKI_COMMIT_FAILED`, `ANKI_COMMIT_AMBIGUOUS`, `ANKI_COMMIT_PERSISTENCE_FAILURE`, `ANKI_RECONCILIATION_STARTED/RESULT`, `ANKI_NEXT_CARD_AFTER_COMMIT_STARTED`. The guarantee is read from the frozen ledger value (and clamped fail-closed for an AnkiDroid identity that over-claims), never restated from configuration. No card content (`AnkiRatingCommitMachineTest`, `CommitDiagnosticsCorrelationTest`). |
+| 20 | Final code audit | ✅ | The ten-item location map below. |
+
+## XIV.4 Checkpoint 20 — locate in one minute
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | Where `ReviewCommitId` is created | `AnkiReviewTurn.commitId` — `core/anki/AnkiBackend.kt:222` (`backend + study session + review turn`); `stableKey` in `core/anki/AnkiSessionContext.kt:42-49` |
+| 2 | Where transaction intent is persisted | `ReviewCommitLedger.prepare` — `core/anki/ReviewCommitLedger.kt:298`, called by the coordinator at `core/study/AnkiStudyEffectExecutor.kt:157`; the durable row is then published with its frozen guarantee at `:175` |
+| 3 | Where `CALL_ENTERED` is persisted | `ReviewCommitLedger.markMutationEntered` — `core/anki/ReviewCommitLedger.kt:363`, invoked from the boundary callback at `core/study/AnkiStudyEffectExecutor.kt:237` (AnkiDroid adapter calls it at `AnkiDroidRatingCommitter.kt:110`) |
+| 4 | The exact irreversible AnkiDroid mutation | `appContext.contentResolver.update(uri, contentValues, null, null)` — `data/anki/ankidroid/AnkiDroidProviderClient.kt:340`, reached only through `AnkiDroidRatingCommitter.commit` → `gateway.submitAnswer` (`:112`) |
+| 5 | Where an unknown outcome becomes AMBIGUOUS | `classifyCommitFailure` `core/anki/CommitFailureClassification.kt:34-52` + the coordinator's post-boundary mapping `core/study/AnkiStudyEffectExecutor.kt:257,263-291` + `ReviewCommitLedger.markAmbiguous` `:438`; restart case in `ReviewCommitRecoveryPolicy` `:27` |
+| 6 | Where COMMITTED becomes durable | `ReviewCommitLedger.complete` `core/anki/ReviewCommitLedger.kt:387` (from `AnkiStudyEffectExecutor.kt:287`), classification in `ReviewCommitTransitions.terminalFromResponse` `core/anki/ReviewCommitTransition.kt:56` |
+| 7 | Where `nextCard` is gated | `StudyReducer.kt:573` — the only post-commit `AnkiStudyEffect.Next`, emitted only for a durable `AnkiCommitOutcome.Committed`; recovery blocking in `ReviewCommitLedger.recoveryBlocker` `:281` |
+| 8 | Where duplicate input is rejected | `StudyReducer.handleRateCard`/`selectRating` (`StudyReducer.kt:430,958`) via `ledger.canBeginRating`, then `ReviewCommitLedger.prepare` conflict `:308` and the one-winner claim CAS `claim` `:335`; legal state moves only in `ReviewCommitTransitions.allowed` `:135` |
+| 9 | Where restart recovery occurs | `ReviewCommitLedger.loadedLocked` `:562` (classifies every non-COMMITTED row through `ReviewCommitRecoveryPolicy`) and the executor's in-process recovery in `reconcile` `core/study/AnkiStudyEffectExecutor.kt:295-325` |
+| 10 | Where reconciliation occurs | `AnkiStudyEffectExecutor.reconcile` `:295` → `backend.reconcileCommit` `:342` → AnkiDroid evidence in `data/anki/ankidroid/AnkiDroidCommitEvidence.kt`; server-phase reconciliation in `core/study/SessionReconciler.kt:13` |
+
+## XIV.5 GO / NO-GO checklist (this part)
+
+**GO items — met:** domain stable ✅ · ledger durable ✅ · coordinator tested ✅ · AMBIGUOUS blocks
+replay ✅ · next-card barrier proven ✅ · recovery survives restart ✅ · chaos + property suites pass ✅
+
+**NO-GO items — none triggered:** post-boundary failure is never retryable by default ✅ · no
+next-card race with persistence ✅ · two rating events cannot reach the backend ✅ · AMBIGUOUS cannot
+be resubmitted (no UI path; ledger refuses) ✅ · restart does not lose an unresolved transaction
+(persisted, surfaced, blocking) ✅ · guarantee level matches evidence ✅
+
+**Still owed to close the gate (unchanged):** AnkiDroid adapter verified on a real disposable
+collection (checkpoint 16 / INV-48) and Gradle/CI evidence. Until then the AnkiDroid guarantee
+stays **AT_MOST_ONCE_FAIL_CLOSED**, which is a statement about local duplicate suppression, one
+mutation path, safe pre-mutation retry and no blind uncertain retry — not about crash-safe
+exactly-once execution on the device.
