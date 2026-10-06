@@ -167,6 +167,7 @@ class AnkiStudyEffectExecutor(
             is ReviewCommitLedger.PrepareResult.Conflict -> return refused("commit_payload_conflict", safe = false)
             ReviewCommitLedger.PrepareResult.Full -> return storageFault("ledger_full")
             is ReviewCommitLedger.PrepareResult.StoreFailed -> return storageFault("commit_persistence_failure")
+            is ReviewCommitLedger.PrepareResult.Rejected -> return storageFault("invalid_commit_record")
             is ReviewCommitLedger.PrepareResult.Unavailable -> return storageFault("ledger_unavailable")
         }
         // The durable row exists (or already existed): publish the guarantee the ledger froze with
@@ -179,7 +180,8 @@ class AnkiStudyEffectExecutor(
             ReviewCommitState.COMMITTED -> return resolved(AnkiCommitOutcome.Committed("ledger_replay"))
             ReviewCommitState.AMBIGUOUS -> return resolved(AnkiCommitOutcome.Ambiguous(record.failure?.category ?: "ambiguous"))
             ReviewCommitState.SUBMITTING -> return null // in flight in this process; that attempt reports
-            ReviewCommitState.FAILED -> if (!effect.retry || !record.safeToRetry) return resolved(record.toOutcome())
+            ReviewCommitState.FAILED_SAFE_TO_RETRY -> if (!effect.retry) return resolved(record.toOutcome())
+            ReviewCommitState.FAILED_NOT_RETRYABLE -> return resolved(record.toOutcome())
             ReviewCommitState.NOT_STARTED -> Unit
         }
 
@@ -195,7 +197,7 @@ class AnkiStudyEffectExecutor(
             val preparation = try {
                 backend.prepareCommit(record.toRequest())
             } catch (cancelled: CancellationException) {
-                throw cancelled // nothing dispatched; the record stays NOT_STARTED / FAILED-safe
+                throw cancelled // read-only preparation; NOT_STARTED/FAILED_SAFE_TO_RETRY remains safe
             } catch (_: Exception) {
                 CommitPreparation.Refused(AnkiError.Unknown("prepare_threw"), retryable = true)
             }
@@ -217,6 +219,7 @@ class AnkiStudyEffectExecutor(
             is ReviewCommitLedger.ClaimResult.NotClaimable -> return resolved(claim.record.toOutcome())
             ReviewCommitLedger.ClaimResult.Missing -> return storageFault("ledger_record_missing")
             is ReviewCommitLedger.ClaimResult.StoreFailed -> return storageFault("commit_persistence_failure")
+            is ReviewCommitLedger.ClaimResult.Rejected -> return storageFault("invalid_commit_transition")
             is ReviewCommitLedger.ClaimResult.Unavailable -> return storageFault("ledger_unavailable")
         }
         phases.onPhase("PREPARED", claimed.attemptCount, commitId)
@@ -365,8 +368,8 @@ class AnkiStudyEffectExecutor(
 
     private fun ReviewCommitRecord.toOutcome(committedSource: String = "ledger_replay"): AnkiCommitOutcome = when (state) {
         ReviewCommitState.COMMITTED -> AnkiCommitOutcome.Committed(committedSource)
-        ReviewCommitState.FAILED -> AnkiCommitOutcome.Failed(
-            failure?.category ?: "failed", safeToRetry, dispatched = attemptCount > 0
+        ReviewCommitState.FAILED_SAFE_TO_RETRY, ReviewCommitState.FAILED_NOT_RETRYABLE -> AnkiCommitOutcome.Failed(
+            failure?.category ?: "not_applied", safeToRetry, dispatched = attemptCount > 0
         )
         // A record still NOT_STARTED/SUBMITTING here was never resolved: never claim success.
         ReviewCommitState.AMBIGUOUS, ReviewCommitState.SUBMITTING, ReviewCommitState.NOT_STARTED ->

@@ -19,8 +19,8 @@ sealed interface NextCardResult {
  * | Result | Scheduler state | Ledger | Next card | Retry |
  * |---|---|---|---|---|
  * | [Committed] | applied (proven) | COMMITTED | exactly once | never |
- * | [RetryableFailure] | NOT applied (proven) | FAILED, safeToRetry | no | manual, same commit id + rating |
- * | [Rejected] | NOT applied (proven) | FAILED, not safe | no | no — end the session |
+ * | [RetryableFailure] | NOT applied (proven) | FAILED_SAFE_TO_RETRY | no | manual, same commit id + rating |
+ * | [Rejected] | NOT applied (proven) | FAILED_NOT_RETRYABLE | no | no — end the session |
  * | [Ambiguous] | unknown | AMBIGUOUS | blocked | never blind; reconcile first |
  */
 sealed interface CommitRatingResult {

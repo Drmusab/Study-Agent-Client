@@ -67,16 +67,16 @@ class CommitDiagnosticsCorrelationTest {
         harness.drain()
 
         val row = harness.ledger.snapshot().single()
-        assertEquals(ReviewCommitState.FAILED, row.state)
+        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, row.state)
         assertTrue(row.safeToRetry)
         assertEquals("the backend was called once and never mutated", 1, harness.fake.deliveryCount)
         assertEquals(0, harness.fake.mutationAttemptCount)
         assertEquals(0, harness.fake.backendEffectCount)
         assertEquals("every marker belongs to this transaction",
             listOf(row.commitId), marks.map { it.commitId }.distinct())
-        // The fake answers on the post-marker side of the boundary (like a provider that inspects
-        // and then refuses the write), so CALL_ENTERED exists. What matters for checkpoint 19 is
-        // that the ledger — not a marker — is the authority, and it says FAILED/safe-to-retry.
+        // This mode returns a typed refusal before the mutation-boundary callback. A delivery
+        // alone therefore does not count as a mutation attempt; only the validated ledger state
+        // authorizes retrying with this same commit identity.
         assertEquals("CREATED first", "CREATED", marks.first().phase)
     }
 }

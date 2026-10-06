@@ -48,8 +48,9 @@ data class RatingCommitRecoveryUi(
                         "Saving \u201c$label\u201d to Anki\u2026",
                         canRetry = false, canCheckAgain = false, canEndSession = true)
 
-                commit != null && commit.state == ReviewCommitState.FAILED &&
-                    machine.phase is SessionPhase.RatingCommitFailed -> {
+                commit != null && commit.state in setOf(
+                    ReviewCommitState.FAILED_SAFE_TO_RETRY, ReviewCommitState.FAILED_NOT_RETRYABLE
+                ) && machine.phase is SessionPhase.RatingCommitFailed -> {
                     val retryable = commit.safeToRetry && local.turn != null && !local.restoredCommit
                     RatingCommitRecoveryUi(Status.NOT_SAVED, rating, "Rating not saved",
                         if (retryable) "Could not save the rating. Nothing was changed in Anki. " +

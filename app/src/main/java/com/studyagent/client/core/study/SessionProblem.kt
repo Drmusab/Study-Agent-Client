@@ -23,7 +23,7 @@ enum class SessionProblem {
     VOICE_ONLY_FAILURE,
     RECOGNIZER_UNAVAILABLE,
     TTS_UNAVAILABLE,
-    /** GATE 11 — the Anki rating is known NOT to have been saved (ledger FAILED). */
+    /** GATE 11 — the rating is known not applied (ledger FAILED_SAFE_TO_RETRY or FAILED_NOT_RETRYABLE). */
     ANKI_RATING_NOT_SAVED,
     /** GATE 11 — whether the Anki rating was saved cannot be confirmed (ledger AMBIGUOUS). */
     ANKI_RATING_UNCONFIRMED,

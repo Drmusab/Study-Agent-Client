@@ -38,8 +38,8 @@ class ReviewCommitRecoveryPolicy {
             }
             ReviewCommitState.COMMITTED -> if (record.phase == CommitAttemptPhase.LOCAL_RESULT_PERSISTED ||
                 record.phase == null) CommitRecoveryAction.ResumeCommitted else CommitRecoveryAction.IntegrityError
-            ReviewCommitState.FAILED -> if (record.safeToRetry) CommitRecoveryAction.RetryAllowed
-                else CommitRecoveryAction.BlockedUnresolved
+            ReviewCommitState.FAILED_SAFE_TO_RETRY -> CommitRecoveryAction.RetryAllowed
+            ReviewCommitState.FAILED_NOT_RETRYABLE -> CommitRecoveryAction.BlockedUnresolved
             ReviewCommitState.AMBIGUOUS -> CommitRecoveryAction.BlockedUnresolved
         }
     }

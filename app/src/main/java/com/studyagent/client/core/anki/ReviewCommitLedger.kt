@@ -7,6 +7,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /** One atomic durable cell. `write` must finish the replacement before returning true. */
 interface ReviewCommitStore {
@@ -25,16 +32,23 @@ sealed interface ReviewCommitStoreRead {
  * second mutation. It is not a backend receipt and not card content.
  */
 @Serializable
-data class CommitIdentityTombstone(val commitKey: String, val prunedAtEpochMs: Long) {
+data class CommitIdentityTombstone(
+    val commitKey: String,
+    val prunedAtEpochMs: Long,
+    /** New schemas retain turn uniqueness after the committed payload is pruned. */
+    val backendId: AnkiBackendId? = null,
+    val turnId: ReviewTurnId? = null
+) {
     init {
         require(commitKey.isNotBlank())
         require(prunedAtEpochMs >= 0)
+        require((backendId == null) == (turnId == null))
     }
 }
 
-/** Schema 1 had no attempt phase: its SUBMITTING rows are conservatively treated as CALL_ENTERED. */
+/** Schemas 1/2 are migrated conservatively; v1 SUBMITTING means CALL_ENTERED, never PREPARED. */
 object ReviewCommitLedgerCodec {
-    const val SCHEMA_VERSION = 2
+    const val SCHEMA_VERSION = 3
 
     @Serializable
     private data class Envelope(
@@ -61,19 +75,28 @@ object ReviewCommitLedgerCodec {
     )
 
     fun decode(snapshot: String): Decoded {
-        val envelope = runCatching { json.decodeFromString(Envelope.serializer(), snapshot) }.getOrNull()
+        val root = runCatching { json.parseToJsonElement(snapshot) as? JsonObject }.getOrNull()
             ?: return Decoded.Unreadable("malformed_snapshot")
-        if (envelope.schemaVersion !in 1..SCHEMA_VERSION) {
-            return Decoded.Unreadable("unsupported_schema_${envelope.schemaVersion}")
+        val schemaVersion = runCatching { root["schemaVersion"]?.jsonPrimitive?.intOrNull }.getOrNull()
+            ?: return Decoded.Unreadable("malformed_snapshot")
+        if (schemaVersion !in 1..SCHEMA_VERSION) {
+            return Decoded.Unreadable("unsupported_schema_$schemaVersion")
         }
-        val records = if (envelope.schemaVersion == 1) envelope.records.map { record ->
-            record.copy(phase = when (record.state) {
-                ReviewCommitState.SUBMITTING -> CommitAttemptPhase.MUTATION_CALL_ENTERED
-                ReviewCommitState.NOT_STARTED -> null
-                ReviewCommitState.FAILED -> if (record.attemptCount == 0) null else CommitAttemptPhase.LOCAL_RESULT_PERSISTED
-                ReviewCommitState.COMMITTED, ReviewCommitState.AMBIGUOUS -> CommitAttemptPhase.LOCAL_RESULT_PERSISTED
-            })
-        } else envelope.records
+        // Schema 1/2 used a single FAILED wire state plus a retryability bit. Normalize that
+        // ambiguous legacy spelling before constructing the invariant-checked domain record.
+        val normalizedRoot = if (schemaVersion < SCHEMA_VERSION) {
+            normalizeLegacyFailures(root) ?: return Decoded.Unreadable("malformed_legacy_records")
+        } else root
+        val envelope = runCatching {
+            json.decodeFromJsonElement(Envelope.serializer(), normalizedRoot)
+        }.getOrNull() ?: return Decoded.Unreadable("malformed_snapshot")
+        val records = runCatching {
+            when (schemaVersion) {
+                1 -> envelope.records.map { migrateLegacy(it, hasAttemptPhase = false) }
+                2 -> envelope.records.map { migrateLegacy(it, hasAttemptPhase = true) }
+                else -> envelope.records
+            }
+        }.getOrNull() ?: return Decoded.Unreadable("contradictory_commit_metadata")
         if (records.map { it.commitId.stableKey }.distinct().size != records.size) {
             return Decoded.Unreadable("duplicate_commit_ids")
         }
@@ -81,39 +104,129 @@ object ReviewCommitLedgerCodec {
         if (unresolved.map { it.backendId to it.sessionId }.distinct().size != unresolved.size) {
             return Decoded.Unreadable("multiple_unresolved_per_session")
         }
-        if (records.map { it.backendId to (it.sessionId to it.turnId) }.distinct().size != records.size) {
+        if (records.map { it.backendId to it.turnId }.distinct().size != records.size) {
             return Decoded.Unreadable("multiple_commits_per_turn")
         }
         if (records.any { !valid(it) }) return Decoded.Unreadable("contradictory_commit_metadata")
         if (envelope.tombstones.map { it.commitKey }.distinct().size != envelope.tombstones.size) {
             return Decoded.Unreadable("duplicate_tombstones")
         }
+        val tombstones = envelope.tombstones.map { tombstone ->
+            if (tombstone.backendId != null && tombstone.turnId != null) tombstone
+            else parseTombstoneIdentity(tombstone.commitKey)?.let { (backendId, turnId) ->
+                tombstone.copy(backendId = backendId, turnId = turnId)
+            } ?: return Decoded.Unreadable("unreadable_tombstone_identity")
+        }
+        val knownTurnKeys = tombstones.map { it.backendId!! to it.turnId!! }
+        if (knownTurnKeys.distinct().size != knownTurnKeys.size ||
+            records.any { record -> knownTurnKeys.any { it.first == record.backendId && it.second == record.turnId } }) {
+            return Decoded.Unreadable("tombstone_turn_conflict")
+        }
         val liveKeys = records.map { it.commitId.stableKey }.toSet()
-        if (envelope.tombstones.any { it.commitKey in liveKeys }) {
+        if (tombstones.any { it.commitKey in liveKeys }) {
             return Decoded.Unreadable("tombstone_overlaps_record")
         }
-        return Decoded.Records(records, envelope.tombstones)
+        return Decoded.Records(records, tombstones)
+    }
+
+    private fun normalizeLegacyFailures(root: JsonObject): JsonObject? = runCatching {
+        val updated = root.toMutableMap()
+        val records = root.getValue("records").jsonArray.map { entry ->
+            val record = entry.jsonObject.toMutableMap()
+            val legacyState = record["state"]?.jsonPrimitive?.content
+            val safeToRetry = record["failure"]?.jsonObject?.get("safeToRetry")
+                ?.jsonPrimitive?.booleanOrNull
+            if (legacyState == "FAILED") {
+                // Both outcomes are explicit. A missing/invalid legacy bit cannot safely choose.
+                val retryable = safeToRetry ?: error("legacy_failed_retryability_missing")
+                record["state"] = JsonPrimitive(
+                    if (retryable) ReviewCommitState.FAILED_SAFE_TO_RETRY.name
+                    else ReviewCommitState.FAILED_NOT_RETRYABLE.name
+                )
+            }
+            JsonObject(record)
+        }
+        updated["records"] = kotlinx.serialization.json.JsonArray(records)
+        JsonObject(updated)
+    }.getOrNull()
+
+    private fun parseTombstoneIdentity(commitKey: String): Pair<AnkiBackendId, ReviewTurnId>? {
+        val parts = parseIdentityParts(commitKey, 3) ?: return null
+        if (parts[1].isBlank()) return null
+        val backend = AnkiBackendId.fromStableId(parts[0]) ?: return null
+        val turn = runCatching { ReviewTurnId(parts[2]) }.getOrNull() ?: return null
+        return backend to turn
+    }
+
+    private fun parseIdentityParts(encoded: String, count: Int): List<String>? {
+        var offset = 0
+        val values = ArrayList<String>(count)
+        repeat(count) {
+            val separator = encoded.indexOf(':', offset)
+            if (separator < 0) return null
+            val length = encoded.substring(offset, separator).toIntOrNull() ?: return null
+            if (length < 0) return null
+            val start = separator + 1
+            val end = start + length
+            if (end > encoded.length) return null
+            values += encoded.substring(start, end)
+            offset = end
+        }
+        return values.takeIf { offset == encoded.length }
+    }
+
+    private fun migrateLegacy(record: ReviewCommitRecord, hasAttemptPhase: Boolean): ReviewCommitRecord {
+        val phase = if (hasAttemptPhase) record.phase else when (record.state) {
+            ReviewCommitState.SUBMITTING -> CommitAttemptPhase.MUTATION_CALL_ENTERED
+            ReviewCommitState.NOT_STARTED -> null
+            ReviewCommitState.FAILED_SAFE_TO_RETRY, ReviewCommitState.FAILED_NOT_RETRYABLE ->
+                if (record.attemptCount == 0) null else CommitAttemptPhase.LOCAL_RESULT_PERSISTED
+            ReviewCommitState.COMMITTED, ReviewCommitState.AMBIGUOUS -> CommitAttemptPhase.LOCAL_RESULT_PERSISTED
+        }
+        return record.copy(
+            phase = phase,
+            committedRating = if (record.state == ReviewCommitState.COMMITTED) record.rating else null
+        )
     }
 
     private fun valid(record: ReviewCommitRecord): Boolean {
         if (record.card.backendId != record.backendId ||
             (record.deckRef != null && (record.deckRef.backendId != record.backendId ||
                 (record.deckRef.collectionKey != null && record.card.collectionKey != null &&
-                    record.deckRef.collectionKey != record.card.collectionKey)))) return false
+                    record.deckRef.collectionKey != record.card.collectionKey))) ||
+            (record.collectionRef != null && record.collectionRef.backendId != record.backendId) ||
+            (record.collectionRef?.collectionKey != null && record.card.collectionKey != null &&
+                record.collectionRef.collectionKey != record.card.collectionKey) ||
+            (record.collectionRef?.collectionKey != null && record.deckRef?.collectionKey != null &&
+                record.collectionRef.collectionKey != record.deckRef.collectionKey)) return false
         if (record.phase == CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED && record.response == null) return false
         if (record.response != null && record.phase != CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED &&
             record.phase != CommitAttemptPhase.LOCAL_RESULT_PERSISTED) return false
         if (record.response?.kind == CommitResponseKind.CONFIRMED_COMMITTED &&
-            record.state in setOf(ReviewCommitState.AMBIGUOUS, ReviewCommitState.FAILED)) return false
+            record.state in setOf(ReviewCommitState.AMBIGUOUS, ReviewCommitState.FAILED_SAFE_TO_RETRY,
+                ReviewCommitState.FAILED_NOT_RETRYABLE)) return false
+        if (record.state == ReviewCommitState.FAILED_SAFE_TO_RETRY &&
+            record.response?.kind?.let { it != CommitResponseKind.CONFIRMED_NOT_APPLIED } == true) return false
+        if (record.state == ReviewCommitState.FAILED_NOT_RETRYABLE &&
+            record.response?.kind?.let { it != CommitResponseKind.CONFIRMED_NOT_APPLIED } == true) return false
+        if (record.state == ReviewCommitState.AMBIGUOUS &&
+            (record.failure?.safeToRetry != false ||
+                record.response?.kind?.let { it != CommitResponseKind.OUTCOME_UNKNOWN } == true)) return false
         return when (record.state) {
-            ReviewCommitState.NOT_STARTED -> record.attemptCount == 0 && record.phase == null && record.response == null
-            ReviewCommitState.SUBMITTING -> record.attemptCount > 0 && record.phase in setOf(
+            ReviewCommitState.NOT_STARTED -> record.attemptCount == 0 && record.phase == null &&
+                record.response == null && record.failure == null && record.submittedAtEpochMs == null &&
+                record.resolvedAtEpochMs == null
+            ReviewCommitState.SUBMITTING -> record.attemptCount > 0 && record.failure == null &&
+                record.committedRating == null && record.phase in setOf(
                 CommitAttemptPhase.PREPARED, CommitAttemptPhase.MUTATION_CALL_ENTERED,
                 CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED)
             ReviewCommitState.COMMITTED -> record.attemptCount > 0 &&
                 record.phase == CommitAttemptPhase.LOCAL_RESULT_PERSISTED && record.failure == null &&
+                record.committedRating == record.selectedRating &&
                 (record.response == null || record.response.kind == CommitResponseKind.CONFIRMED_COMMITTED)
-            ReviewCommitState.FAILED -> record.failure != null &&
+            ReviewCommitState.FAILED_SAFE_TO_RETRY -> record.failure?.safeToRetry == true &&
+                record.phase == (if (record.attemptCount == 0) null else CommitAttemptPhase.LOCAL_RESULT_PERSISTED)
+            ReviewCommitState.FAILED_NOT_RETRYABLE -> record.failure?.safeToRetry == false &&
                 record.phase == (if (record.attemptCount == 0) null else CommitAttemptPhase.LOCAL_RESULT_PERSISTED)
             ReviewCommitState.AMBIGUOUS -> record.attemptCount > 0 &&
                 record.phase == CommitAttemptPhase.LOCAL_RESULT_PERSISTED && !record.safeToRetry
@@ -179,6 +292,7 @@ class ReviewCommitLedger(
         data class Tombstoned(val commitKey: String) : PrepareResult
         data object Full : PrepareResult
         data class StoreFailed(val reason: String) : PrepareResult
+        data class Rejected(val reason: ReviewCommitTransitionRejection) : PrepareResult
         data class Unavailable(val reason: String) : PrepareResult
     }
 
@@ -186,7 +300,11 @@ class ReviewCommitLedger(
         data class Applied(val record: ReviewCommitRecord) : TransitionResult
         data class StateMismatch(val actual: ReviewCommitRecord) : TransitionResult
         data class VersionMismatch(val actual: ReviewCommitRecord) : TransitionResult
-        data class Rejected(val actual: ReviewCommitRecord) : TransitionResult
+        data class Rejected(
+            val actual: ReviewCommitRecord,
+            val reason: ReviewCommitTransitionRejection
+        ) : TransitionResult
+        data class StoreFailed(val reason: String) : TransitionResult
         data object Missing : TransitionResult
         data class Unavailable(val reason: String) : TransitionResult
     }
@@ -196,9 +314,16 @@ class ReviewCommitLedger(
         data class InFlight(val record: ReviewCommitRecord) : ClaimResult
         data class AlreadyCommitted(val record: ReviewCommitRecord) : ClaimResult
         data class NotClaimable(val record: ReviewCommitRecord) : ClaimResult
+        data class Rejected(val record: ReviewCommitRecord, val reason: ReviewCommitTransitionRejection) : ClaimResult
         data object Missing : ClaimResult
         data class StoreFailed(val reason: String) : ClaimResult
         data class Unavailable(val reason: String) : ClaimResult
+    }
+
+    private sealed interface PersistRecordResult {
+        data class Saved(val record: ReviewCommitRecord) : PersistRecordResult
+        data class Rejected(val reason: ReviewCommitTransitionRejection) : PersistRecordResult
+        data class StoreFailed(val reason: String) : PersistRecordResult
     }
 
     private val mutex = Mutex()
@@ -256,12 +381,13 @@ class ReviewCommitLedger(
 
     /**
      * Unresolved transactions in a deterministic order: collection, session, createdAt.
-     * Includes NOT_STARTED, SUBMITTING, FAILED and AMBIGUOUS. Never includes COMMITTED.
+     * Includes NOT_STARTED, SUBMITTING, both explicit not-applied states, and AMBIGUOUS.
+     * Never includes COMMITTED.
      * More than one unresolved record for one session is an integrity error at decode time.
      */
     suspend fun unresolved(): List<ReviewCommitRecord> = mutex.withLock {
         loadedLocked()?.values?.filter { it.state != ReviewCommitState.COMMITTED }
-            ?.sortedWith(compareBy({ it.card.collectionKey ?: "" }, { it.sessionId }, { it.createdAtEpochMs }, { it.commitId.stableKey }))
+            ?.sortedWith(compareBy({ it.collectionKey ?: "" }, { it.sessionId }, { it.createdAtEpochMs }, { it.commitId.stableKey }))
             .orEmpty()
     }
 
@@ -286,19 +412,22 @@ class ReviewCommitLedger(
                         (record.state == ReviewCommitState.AMBIGUOUS ||
                             (record.state == ReviewCommitState.SUBMITTING &&
                                 record.phase != CommitAttemptPhase.PREPARED)) &&
-                        (collectionKey == null || record.card.collectionKey == null ||
-                            record.card.collectionKey == collectionKey))
+                        (collectionKey == null || record.collectionKey == null ||
+                            record.collectionKey == collectionKey))
             }
         }
 
     /**
-     * First durable intent. Enforces one logical commit per session/turn before any backend call.
+     * First durable intent. Enforces one logical commit per backend-qualified turn before any backend call.
      * [semantics] is frozen onto a newly created record and is not rewritten if the record exists.
      */
     suspend fun prepare(request: CommitRatingRequest, semantics: CommitSemantics? = null): PrepareResult = mutex.withLock {
         val current = loadedLocked() ?: return@withLock PrepareResult.Unavailable(reason())
-        tombstones[request.commitId.stableKey]?.let { return@withLock PrepareResult.Tombstoned(it.commitKey) }
-        current[request.commitId.stableKey]?.let { existing ->
+        val identity = request.commitId
+        tombstones[identity.stableKey]?.let { return@withLock PrepareResult.Tombstoned(it.commitKey) }
+        tombstones.values.firstOrNull { it.backendId == identity.backendId && it.turnId == identity.turnId }
+            ?.let { return@withLock PrepareResult.Tombstoned(it.commitKey) }
+        current[identity.stableKey]?.let { existing ->
             return@withLock if (existing.samePayload(request)) PrepareResult.Existing(existing)
             else {
                 conflictTotal += 1
@@ -306,66 +435,73 @@ class ReviewCommitLedger(
                 PrepareResult.Conflict(existing)
             }
         }
-        current.values.firstOrNull { it.backendId == request.commitId.backendId &&
-            it.sessionId == request.sessionId &&
-            (it.turnId == request.turnId || it.state != ReviewCommitState.COMMITTED) }?.let {
+        current.values.firstOrNull { it.backendId == identity.backendId && it.turnId == identity.turnId }?.let {
+            conflictTotal += 1
+            publishDiagnostics(current)
+            return@withLock PrepareResult.Conflict(it)
+        }
+        current.values.firstOrNull {
+            it.backendId == identity.backendId && it.sessionId == request.sessionId &&
+                it.state != ReviewCommitState.COMMITTED
+        }?.let {
             conflictTotal += 1
             publishDiagnostics(current)
             return@withLock PrepareResult.Conflict(it)
         }
         if (current.size >= maxRecords) return@withLock PrepareResult.Full
         val now = clock()
-        val frozen = semantics?.enforced(request.commitId.backendId)
+        val frozen = semantics?.enforced(identity.backendId)
         val record = ReviewCommitRecord(
-            commitId = request.commitId, card = request.card, rating = request.rating,
+            commitId = identity, card = request.card, rating = request.rating,
             state = ReviewCommitState.NOT_STARTED, attemptCount = 0, deckRef = request.deckRef,
             createdAtEpochMs = now, updatedAtEpochMs = now,
             ratedAtEpochMs = request.ratedAtEpochMs, answerDurationMs = request.answerDurationMs,
-            evidence = request.evidence,
+            evidence = request.evidence, collectionRef = request.collectionRef,
             frozenGuarantee = frozen?.guaranteeLevel,
             frozenIdempotentReplay = frozen?.supportsIdempotentReplay == true,
             frozenAuthoritativeReconciliation = frozen?.supportsAuthoritativeReconciliation == true
         )
-        val next = LinkedHashMap(current).apply { put(request.commitId.stableKey, record) }
+        when (val initial = ReviewCommitTransitions.validateInitial(record)) {
+            is ReviewCommitTransitionResult.Rejected -> return@withLock PrepareResult.Rejected(initial.reason)
+            is ReviewCommitTransitionResult.Applied -> Unit
+        }
+        val next = LinkedHashMap(current).apply { put(identity.stableKey, record) }
         persistLocked(next)?.let { return@withLock PrepareResult.StoreFailed(it) }
         PrepareResult.Prepared(record)
     }
 
-    /** NOT_STARTED / proven-not-applied FAILED → SUBMITTING+PREPARED; only one claimant wins. */
+    /** NOT_STARTED / FAILED_SAFE_TO_RETRY → SUBMITTING/PREPARED; only one claimant wins. */
     suspend fun claim(commitId: ReviewCommitId, evidence: ReviewCommitEvidence?, allowRetry: Boolean): ClaimResult =
         mutex.withLock {
             val current = loadedLocked() ?: return@withLock ClaimResult.Unavailable(reason())
             val record = current[commitId.stableKey] ?: return@withLock ClaimResult.Missing
-            when (record.state) {
-                ReviewCommitState.NOT_STARTED -> Unit
-                ReviewCommitState.FAILED -> if (!(record.safeToRetry && allowRetry))
-                    return@withLock ClaimResult.NotClaimable(record)
+            val command = when (record.state) {
+                ReviewCommitState.NOT_STARTED -> ReviewCommitTransition.Prepare(evidence)
+                ReviewCommitState.FAILED_SAFE_TO_RETRY -> {
+                    if (!allowRetry) return@withLock ClaimResult.NotClaimable(record)
+                    ReviewCommitTransition.RetryPrepared(evidence)
+                }
                 ReviewCommitState.SUBMITTING -> {
                     duplicateRejectedTotal += 1
                     publishDiagnostics(current)
                     return@withLock ClaimResult.InFlight(record)
                 }
                 ReviewCommitState.COMMITTED -> return@withLock ClaimResult.AlreadyCommitted(record)
-                ReviewCommitState.AMBIGUOUS -> return@withLock ClaimResult.NotClaimable(record)
+                ReviewCommitState.AMBIGUOUS, ReviewCommitState.FAILED_NOT_RETRYABLE ->
+                    return@withLock ClaimResult.NotClaimable(record)
             }
-            val now = clock()
-            val claimed = record.copy(state = ReviewCommitState.SUBMITTING,
-                attemptCount = record.attemptCount + 1, phase = CommitAttemptPhase.PREPARED,
-                response = null, evidence = record.evidence ?: evidence, submittedAtEpochMs = now,
-                updatedAtEpochMs = now, resolvedAtEpochMs = null, failure = null, resolution = null)
-            persistLocked(LinkedHashMap(current).apply { put(commitId.stableKey, claimed) })?.let {
-                return@withLock ClaimResult.StoreFailed(it)
+            when (val saved = persistTransitionLocked(current, record, command)) {
+                is PersistRecordResult.Saved -> ClaimResult.Claimed(saved.record)
+                is PersistRecordResult.StoreFailed -> ClaimResult.StoreFailed(saved.reason)
+                is PersistRecordResult.Rejected -> ClaimResult.Rejected(record, saved.reason)
             }
-            ClaimResult.Claimed(claimed)
         }
 
     /** Must durably complete at the callback immediately before the real scheduler mutation. */
     suspend fun markMutationEntered(commitId: ReviewCommitId): ReviewCommitRecord? = mutex.withLock {
         val current = loadedLocked() ?: return@withLock null
         val record = current[commitId.stableKey] ?: return@withLock null
-        if (record.state != ReviewCommitState.SUBMITTING || record.phase != CommitAttemptPhase.PREPARED) return@withLock null
-        persistRecordLocked(current, record.copy(phase = CommitAttemptPhase.MUTATION_CALL_ENTERED,
-            updatedAtEpochMs = clock()))
+        applyTransitionLocked(current, record, ReviewCommitTransition.MarkMutationCallEntered)
     }
 
     /** Durably record the actual classified backend answer before any terminal state transition. */
@@ -373,11 +509,7 @@ class ReviewCommitLedger(
         mutex.withLock {
             val current = loadedLocked() ?: return@withLock null
             val record = current[commitId.stableKey] ?: return@withLock null
-            if (record.state != ReviewCommitState.SUBMITTING ||
-                record.phase != CommitAttemptPhase.MUTATION_CALL_ENTERED) return@withLock null
-            val proof = responseFor(record, result) ?: return@withLock null
-            persistRecordLocked(current, record.copy(phase = CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED,
-                response = proof, updatedAtEpochMs = clock()))
+            applyTransitionLocked(current, record, ReviewCommitTransition.MarkResponseReceived(result))
         }
 
     /**
@@ -388,63 +520,47 @@ class ReviewCommitLedger(
         mutex.withLock {
             val current = loadedLocked() ?: return@withLock null
             val record = current[commitId.stableKey] ?: return@withLock null
-            if (record.state != ReviewCommitState.SUBMITTING ||
-                record.phase != CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED ||
-                record.response != responseFor(record, result)) return@withLock null
-            persistRecordLocked(current, terminalFromResponse(record, ReviewCommitResolution.BACKEND_CONFIRMED))
+            applyTransitionLocked(current, record,
+                ReviewCommitTransition.MarkCommitted(result, ReviewCommitResolution.BACKEND_CONFIRMED))
         }
 
     /** Finish a previously persisted response (e.g. after a COMMITTED write failed). No backend call. */
     suspend fun finalizeRecordedResponse(commitId: ReviewCommitId): ReviewCommitRecord? = mutex.withLock {
         val current = loadedLocked() ?: return@withLock null
         val record = current[commitId.stableKey] ?: return@withLock null
-        if (record.state != ReviewCommitState.SUBMITTING ||
-            record.phase != CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED || record.response == null) return@withLock null
-        persistRecordLocked(current, terminalFromResponse(record, ReviewCommitResolution.RECOVERED_RESPONSE))
+        applyTransitionLocked(current, record, ReviewCommitTransition.FinalizeRecordedResponse)
     }
 
-    /** PREPARED -> FAILED-safe, but only because the marker proves no mutation call began. */
+    /** PREPARED → explicit not-applied state, only because no mutation call began. */
     suspend fun markPreparedFailure(
         commitId: ReviewCommitId, category: String = "mutation_not_entered", safeToRetry: Boolean = true
     ): ReviewCommitRecord? = mutex.withLock {
         val current = loadedLocked() ?: return@withLock null
         val record = current[commitId.stableKey] ?: return@withLock null
-        if (record.state != ReviewCommitState.SUBMITTING ||
-            record.phase != CommitAttemptPhase.PREPARED) return@withLock null
-        persistRecordLocked(current, record.copy(state = ReviewCommitState.FAILED,
-            phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
-            failure = ReviewCommitFailure(category.take(96), safeToRetry),
-            resolution = ReviewCommitResolution.RECOVERED_PREPARED,
-            updatedAtEpochMs = clock(), resolvedAtEpochMs = clock()))
+        if (record.state != ReviewCommitState.SUBMITTING || record.phase != CommitAttemptPhase.PREPARED) return@withLock null
+        applyTransitionLocked(current, record,
+            ReviewCommitTransition.MarkSafeToRetry(category, safeToRetry))
     }
 
-    /** A backend violated its boundary callback contract, or reported unknown before entry. No safe retry. */
+    /** A backend violated its boundary callback contract, or reported unknown before entry. */
     suspend fun markBoundaryViolation(
         commitId: ReviewCommitId,
         category: String = "backend_boundary_violation"
     ): ReviewCommitRecord? = mutex.withLock {
         val current = loadedLocked() ?: return@withLock null
         val record = current[commitId.stableKey] ?: return@withLock null
-        if (record.state != ReviewCommitState.SUBMITTING ||
-            record.phase != CommitAttemptPhase.PREPARED) return@withLock null
-        persistRecordLocked(current, record.copy(state = ReviewCommitState.AMBIGUOUS,
-            phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
-            failure = ReviewCommitFailure(category.take(96), false),
-            resolution = ReviewCommitResolution.INTERRUPTED_AFTER_DISPATCH,
-            updatedAtEpochMs = clock(), resolvedAtEpochMs = clock()))
+        if (record.phase != CommitAttemptPhase.PREPARED) return@withLock null
+        applyTransitionLocked(current, record,
+            ReviewCommitTransition.MarkAmbiguous(category, ReviewCommitResolution.INTERRUPTED_AFTER_DISPATCH))
     }
 
-    /** Known interruption after entering a backend method; never mark PREPARED as ambiguous. */
+    /** Known interruption after entering a backend method; never mark PREPARED as safe. */
     suspend fun markAmbiguous(commitId: ReviewCommitId, category: String): ReviewCommitRecord? = mutex.withLock {
         val current = loadedLocked() ?: return@withLock null
         val record = current[commitId.stableKey] ?: return@withLock null
-        if (record.state != ReviewCommitState.SUBMITTING ||
-            record.phase != CommitAttemptPhase.MUTATION_CALL_ENTERED) return@withLock null
-        persistRecordLocked(current, record.copy(state = ReviewCommitState.AMBIGUOUS,
-            phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
-            failure = ReviewCommitFailure(category.take(96), false),
-            resolution = ReviewCommitResolution.INTERRUPTED_AFTER_DISPATCH,
-            updatedAtEpochMs = clock(), resolvedAtEpochMs = clock()))
+        if (record.phase != CommitAttemptPhase.MUTATION_CALL_ENTERED) return@withLock null
+        applyTransitionLocked(current, record,
+            ReviewCommitTransition.MarkAmbiguous(category, ReviewCommitResolution.INTERRUPTED_AFTER_DISPATCH))
     }
 
     /** Read-only preparation failed; no mutation was dispatched in this attempt. */
@@ -452,12 +568,7 @@ class ReviewCommitLedger(
         mutex.withLock {
             val current = loadedLocked() ?: return@withLock null
             val record = current[commitId.stableKey] ?: return@withLock null
-            if (record.state != ReviewCommitState.NOT_STARTED && !record.safeToRetry) return@withLock null
-            persistRecordLocked(current, record.copy(state = ReviewCommitState.FAILED,
-                phase = if (record.attemptCount == 0) null else CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
-                response = null, failure = ReviewCommitFailure(category.take(96), safeToRetry),
-                resolution = ReviewCommitResolution.REFUSED_BEFORE_DISPATCH,
-                updatedAtEpochMs = clock(), resolvedAtEpochMs = clock()))
+            applyTransitionLocked(current, record, ReviewCommitTransition.MarkNotApplied(category, safeToRetry))
         }
 
     /** Only the backend adapter may supply authoritative reconciliation; callers gate on its semantics. */
@@ -467,63 +578,46 @@ class ReviewCommitLedger(
             val record = current[commitId.stableKey] ?: return@withLock null
             if (record.state != ReviewCommitState.AMBIGUOUS) return@withLock record
             val action = recoveryPolicy.classify(record, result)
-            val now = clock()
-            val next = when (action) {
-                CommitRecoveryAction.ResumeCommitted -> record.copy(state = ReviewCommitState.COMMITTED,
-                    response = null, failure = null, resolution = ReviewCommitResolution.RECONCILED_APPLIED)
-                CommitRecoveryAction.RetryAllowed -> record.copy(state = ReviewCommitState.FAILED,
-                    response = null, failure = ReviewCommitFailure("reconciled_not_applied", true),
-                    resolution = ReviewCommitResolution.RECONCILED_NOT_APPLIED)
-                CommitRecoveryAction.BlockedUnresolved -> if (result is ReconcileCommitResult.NotApplied)
-                    record.copy(state = ReviewCommitState.FAILED, response = null,
-                        failure = ReviewCommitFailure("reconciled_not_applied", false),
-                        resolution = ReviewCommitResolution.RECONCILED_NOT_APPLIED)
-                    else record.copy(failure = ReviewCommitFailure("reconciliation_inconclusive", false),
-                        resolution = ReviewCommitResolution.RECONCILIATION_INCONCLUSIVE)
-                else -> return@withLock null
-            }.copy(phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
-                updatedAtEpochMs = now, resolvedAtEpochMs = now)
-            persistRecordLocked(current, next)
+            applyTransitionLocked(current, record, ReviewCommitTransition.MarkReconciled(result, action))
         }
 
     /** Acknowledging never changes the truth, allows a retry or makes this record prunable. */
     suspend fun acknowledge(commitId: ReviewCommitId): ReviewCommitRecord? = mutex.withLock {
         val current = loadedLocked() ?: return@withLock null
         val record = current[commitId.stableKey] ?: return@withLock null
-        if (record.state != ReviewCommitState.AMBIGUOUS && record.state != ReviewCommitState.FAILED) return@withLock record
-        persistRecordLocked(current, record.copy(acknowledged = true, updatedAtEpochMs = clock()))
+        if (record.state != ReviewCommitState.AMBIGUOUS && record.state !in FAILED_REVIEW_COMMIT_STATES) {
+            return@withLock record
+        }
+        applyTransitionLocked(current, record, ReviewCommitTransition.Acknowledge)
     }
 
-    /**
-     * Records that the UI left the transaction. Does not change [ReviewCommitState] and does not
-     * make an ambiguous or in-flight mutation retryable.
-     */
+    /** Leaving the UI is metadata only; it never infers that a mutation did not happen. */
     suspend fun noteAbandoned(commitId: ReviewCommitId, abandonedAtEpochMs: Long): ReviewCommitRecord? = mutex.withLock {
         val current = loadedLocked() ?: return@withLock null
         val record = current[commitId.stableKey] ?: return@withLock null
-        persistRecordLocked(current, record.copy(abandonedAtEpochMs = abandonedAtEpochMs, updatedAtEpochMs = clock()))
+        applyTransitionLocked(current, record, ReviewCommitTransition.NoteAbandoned(abandonedAtEpochMs))
     }
 
-    /**
-     * Optimistic transition. Rejected before any write when the state or version is stale, or when
-     * [ReviewCommitTransitions.apply] says the command is illegal. In-process callers are also
-     * serialized by [mutex]; the version check is the explicit concurrency token.
-     */
+    /** Optimistic transition through the single pure engine, then durable versioned storage. */
     suspend fun transition(
         commitId: ReviewCommitId,
         expectedState: ReviewCommitState,
         expectedVersion: Long,
         transition: ReviewCommitTransition
-    ): TransitionResult {
-        return mutex.withLock {
-            val current = loadedLocked() ?: return@withLock TransitionResult.Unavailable(reason())
-            val record = current[commitId.stableKey] ?: return@withLock TransitionResult.Missing
-            if (record.state != expectedState) return@withLock TransitionResult.StateMismatch(record)
-            if (record.version != expectedVersion) return@withLock TransitionResult.VersionMismatch(record)
-            val next = ReviewCommitTransitions.apply(record, transition, clock())
-                ?: return@withLock TransitionResult.Rejected(record)
-            val saved = persistRecordLocked(current, next) ?: return@withLock TransitionResult.Rejected(record)
-            TransitionResult.Applied(saved)
+    ): TransitionResult = mutex.withLock {
+        val current = loadedLocked() ?: return@withLock TransitionResult.Unavailable(reason())
+        val record = current[commitId.stableKey] ?: return@withLock TransitionResult.Missing
+        if (record.state != expectedState) return@withLock TransitionResult.StateMismatch(record)
+        if (record.version != expectedVersion) return@withLock TransitionResult.VersionMismatch(record)
+        val applied = ReviewCommitTransitions.transition(record, transition, clock())
+        if (applied is ReviewCommitTransitionResult.Rejected) {
+            return@withLock TransitionResult.Rejected(record, applied.reason)
+        }
+        val proposed = (applied as ReviewCommitTransitionResult.Applied).record
+        when (val saved = persistRecordLocked(current, proposed)) {
+            is PersistRecordResult.Saved -> TransitionResult.Applied(saved.record)
+            is PersistRecordResult.Rejected -> TransitionResult.Rejected(record, saved.reason)
+            is PersistRecordResult.StoreFailed -> TransitionResult.StoreFailed(saved.reason)
         }
     }
 
@@ -541,7 +635,9 @@ class ReviewCommitLedger(
         }
         if (victims.isEmpty() || tombstones.size + victims.size > MAX_TOMBSTONES) return@withLock 0
         val now = clock()
-        val added = victims.map { CommitIdentityTombstone(it.commitId.stableKey, now) }
+        val added = victims.map { CommitIdentityTombstone(
+            it.commitId.stableKey, now, backendId = it.backendId, turnId = it.turnId
+        ) }
         added.forEach { tombstones[it.commitKey] = it }
         val next = LinkedHashMap(current).apply { victims.forEach { remove(it.commitId.stableKey) } }
         if (persistLocked(next) != null) {
@@ -581,77 +677,99 @@ class ReviewCommitLedger(
             }
         }
         val map = LinkedHashMap<String, ReviewCommitRecord>()
+        val recoveredTransitions = mutableListOf<Pair<ReviewCommitRecord, ReviewCommitRecord>>()
         val interrupted = initial.count { it.state == ReviewCommitState.SUBMITTING }
         val now = clock()
         for (record in initial) {
-            val recovered = if (record.state == ReviewCommitState.SUBMITTING) when (recoveryPolicy.classify(record)) {
-                CommitRecoveryAction.RetryAllowed -> if (record.phase == CommitAttemptPhase.PREPARED)
-                    record.copy(state = ReviewCommitState.FAILED, phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
-                        failure = ReviewCommitFailure("interrupted_before_mutation", true),
-                        resolution = ReviewCommitResolution.RECOVERED_PREPARED,
-                        updatedAtEpochMs = now, resolvedAtEpochMs = now)
-                    else terminalFromResponse(record, ReviewCommitResolution.RECOVERED_RESPONSE)
-                CommitRecoveryAction.ResumeCommitted -> terminalFromResponse(record, ReviewCommitResolution.RECOVERED_RESPONSE)
-                CommitRecoveryAction.ReconciliationRequired -> record.copy(state = ReviewCommitState.AMBIGUOUS,
-                    phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED,
-                    failure = ReviewCommitFailure("interrupted_after_mutation_entry", false),
-                    resolution = ReviewCommitResolution.PROCESS_RESTART_WHILE_SUBMITTING,
-                    updatedAtEpochMs = now, resolvedAtEpochMs = now)
-                CommitRecoveryAction.BlockedUnresolved -> terminalFromResponse(record, ReviewCommitResolution.RECOVERED_RESPONSE)
-                CommitRecoveryAction.IntegrityError -> return disable("invalid_attempt_phase")
-            } else record
+            val recovered = if (record.state != ReviewCommitState.SUBMITTING) record else {
+                val action = recoveryPolicy.classify(record)
+                val command = when (action) {
+                    CommitRecoveryAction.RetryAllowed -> if (record.phase == CommitAttemptPhase.PREPARED)
+                        ReviewCommitTransition.MarkSafeToRetry("interrupted_before_mutation", safeToRetry = true,
+                            resolution = ReviewCommitResolution.RECOVERED_PREPARED)
+                        else ReviewCommitTransition.FinalizeRecordedResponse
+                    CommitRecoveryAction.ResumeCommitted, CommitRecoveryAction.BlockedUnresolved ->
+                        ReviewCommitTransition.FinalizeRecordedResponse
+                    CommitRecoveryAction.ReconciliationRequired -> if (record.phase == CommitAttemptPhase.MUTATION_CALL_ENTERED)
+                        ReviewCommitTransition.MarkAmbiguous("interrupted_after_mutation_entry",
+                            ReviewCommitResolution.PROCESS_RESTART_WHILE_SUBMITTING)
+                        else ReviewCommitTransition.FinalizeRecordedResponse
+                    CommitRecoveryAction.IntegrityError -> return disable("invalid_attempt_phase")
+                }
+                val proposed = when (val result = ReviewCommitTransitions.transition(record, command, now)) {
+                    is ReviewCommitTransitionResult.Applied -> result.record
+                    is ReviewCommitTransitionResult.Rejected -> return disable("invalid_attempt_transition")
+                }
+                val stamped = proposed.copy(version = record.version + 1)
+                if (!ReviewCommitTransitions.allowed(record, stamped)) return disable("invalid_attempt_transition")
+                stamped
+            }
+            if (recovered != record) recoveredTransitions += record to recovered
             map[recovered.commitId.stableKey] = recovered
         }
-        if (interrupted > 0 || (raw != null && raw.contains("\"schemaVersion\":1"))) {
+        val schemaNeedsMigration = raw != null && Regex("\"schemaVersion\"\s*:\s*[12]").containsMatchIn(raw)
+        if (interrupted > 0 || schemaNeedsMigration) {
             if (writeLocked(map) != null) return disable("recovery_write_failed")
         }
+        recoveredTransitions.forEach { (before, after) -> countTransition(before, after) }
         recoveryTotal = interrupted.toLong()
         report = ReviewCommitRecoveryReport(
             interruptedSubmissions = interrupted,
             restorable = map.values.count { it.state == ReviewCommitState.NOT_STARTED },
             unresolvedAmbiguous = map.values.count { it.state == ReviewCommitState.AMBIGUOUS },
             committed = map.values.count { it.state == ReviewCommitState.COMMITTED },
-            failed = map.values.count { it.state == ReviewCommitState.FAILED })
+            failed = map.values.count { it.state in FAILED_REVIEW_COMMIT_STATES })
         records = map
         publishDiagnostics(map)
         return map
     }
 
-    private fun responseFor(record: ReviewCommitRecord, result: CommitRatingResult): CommitResponseEvidence? =
-        ReviewCommitTransitions.responseEvidence(record, result)
+    /** Applies exactly one domain transition before any durable write. */
+    private suspend fun applyTransitionLocked(
+        current: LinkedHashMap<String, ReviewCommitRecord>,
+        record: ReviewCommitRecord,
+        command: ReviewCommitTransition
+    ): ReviewCommitRecord? = when (val result = persistTransitionLocked(current, record, command)) {
+        is PersistRecordResult.Saved -> result.record
+        is PersistRecordResult.Rejected, is PersistRecordResult.StoreFailed -> null
+    }
 
-    private fun terminalFromResponse(record: ReviewCommitRecord, resolution: String): ReviewCommitRecord =
-        ReviewCommitTransitions.terminalFromResponse(record, resolution, clock())
+    private suspend fun persistTransitionLocked(
+        current: LinkedHashMap<String, ReviewCommitRecord>,
+        record: ReviewCommitRecord,
+        command: ReviewCommitTransition
+    ): PersistRecordResult {
+        val proposed = when (val result = ReviewCommitTransitions.transition(record, command, clock())) {
+            is ReviewCommitTransitionResult.Applied -> result.record
+            is ReviewCommitTransitionResult.Rejected -> return PersistRecordResult.Rejected(result.reason)
+        }
+        return persistRecordLocked(current, proposed)
+    }
 
     private suspend fun persistRecordLocked(
         current: LinkedHashMap<String, ReviewCommitRecord>, record: ReviewCommitRecord
-    ): ReviewCommitRecord? {
+    ): PersistRecordResult {
         val previous = current[record.commitId.stableKey]
-        val stamped = if (previous == null) {
-            // First durable intent. Anything else appearing without a predecessor is a bug, not a write.
-            if (record.state != ReviewCommitState.NOT_STARTED || record.attemptCount != 0 || record.response != null) {
-                return null
-            }
-            record.copy(version = 1)
-        } else {
-            record.copy(version = previous.version + 1)
+        if (previous == null) return PersistRecordResult.Rejected(
+            ReviewCommitTransitionRejection.INVALID_RESULT_RECORD)
+        val stamped = record.copy(version = previous.version + 1)
+        if (!ReviewCommitTransitions.allowed(previous, stamped)) {
+            return PersistRecordResult.Rejected(ReviewCommitTransitionRejection.ILLEGAL_STATE_TRANSITION)
         }
-        if (previous != null && !ReviewCommitTransitions.allowed(previous, stamped)) return null
-        if (previous != null) countTransition(previous, stamped)
-        return if (persistLocked(LinkedHashMap(current).apply { put(stamped.commitId.stableKey, stamped) }) == null) {
-            stamped
-        } else {
-            if (previous != null) undoTransitionCount(previous, stamped)
-            null
+        countTransition(previous, stamped)
+        val failure = persistLocked(LinkedHashMap(current).apply { put(stamped.commitId.stableKey, stamped) })
+        return if (failure == null) PersistRecordResult.Saved(stamped) else {
+            undoTransitionCount(previous, stamped)
+            publishDiagnostics(requireNotNull(records), writeFailed = true)
+            PersistRecordResult.StoreFailed(failure)
         }
     }
 
     private fun countTransition(before: ReviewCommitRecord, after: ReviewCommitRecord) {
         if (before.state != ReviewCommitState.SUBMITTING && after.state == ReviewCommitState.SUBMITTING) attemptTotal += 1
         if (before.state != ReviewCommitState.COMMITTED && after.state == ReviewCommitState.COMMITTED) successTotal += 1
-        if (before.state != ReviewCommitState.FAILED && after.state == ReviewCommitState.FAILED && after.safeToRetry) {
-            safeFailureTotal += 1
-        }
+        if (before.state != ReviewCommitState.FAILED_SAFE_TO_RETRY &&
+            after.state == ReviewCommitState.FAILED_SAFE_TO_RETRY) safeFailureTotal += 1
         if (before.state != ReviewCommitState.AMBIGUOUS && after.state == ReviewCommitState.AMBIGUOUS) ambiguousTotal += 1
         if (before.state == ReviewCommitState.AMBIGUOUS && after.state == ReviewCommitState.AMBIGUOUS &&
             after.resolution == ReviewCommitResolution.RECONCILIATION_INCONCLUSIVE) {
@@ -662,9 +780,8 @@ class ReviewCommitLedger(
     private fun undoTransitionCount(before: ReviewCommitRecord, after: ReviewCommitRecord) {
         if (before.state != ReviewCommitState.SUBMITTING && after.state == ReviewCommitState.SUBMITTING) attemptTotal -= 1
         if (before.state != ReviewCommitState.COMMITTED && after.state == ReviewCommitState.COMMITTED) successTotal -= 1
-        if (before.state != ReviewCommitState.FAILED && after.state == ReviewCommitState.FAILED && after.safeToRetry) {
-            safeFailureTotal -= 1
-        }
+        if (before.state != ReviewCommitState.FAILED_SAFE_TO_RETRY &&
+            after.state == ReviewCommitState.FAILED_SAFE_TO_RETRY) safeFailureTotal -= 1
         if (before.state != ReviewCommitState.AMBIGUOUS && after.state == ReviewCommitState.AMBIGUOUS) ambiguousTotal -= 1
         if (before.state == ReviewCommitState.AMBIGUOUS && after.state == ReviewCommitState.AMBIGUOUS &&
             after.resolution == ReviewCommitResolution.RECONCILIATION_INCONCLUSIVE) {

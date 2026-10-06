@@ -2,6 +2,7 @@ package com.studyagent.client.anki
 
 import com.studyagent.client.anki.fake.FakeAnkiBackend
 import com.studyagent.client.anki.fake.FakeBackendCommitStore
+import com.studyagent.client.anki.fake.FakeCommitMode
 import com.studyagent.client.core.anki.*
 import com.studyagent.client.core.models.Rating
 import kotlinx.coroutines.test.runTest
@@ -42,6 +43,38 @@ class ReviewCommitBackendContractTest {
         backend.commitRating(r)
         assertEquals(1, backend.logicalCommitCount)
         assertEquals(2, backend.physicalCommitCalls)
+        assertEquals(2, backend.backendEffectCount)
+    }
+
+    @Test fun `idempotent replay mode records a delivery without a second boundary or effect`() = runTest {
+        val store = FakeBackendCommitStore()
+        val backend = FakeAnkiBackend(fakeId, listOf(deck()), listOf(card("A")), instanceId = "mode-idempotent",
+            mode = FakeCommitMode.IDEMPOTENT_REPLAY, persistedEffectStore = store)
+        val request = request(backend)
+        backend.commitThrowable = IllegalStateException("response lost")
+        backend.applyBeforeThrow = true
+        try { backend.commitRating(request); fail("expected lost response") } catch (_: IllegalStateException) {}
+        assertEquals(1, backend.deliveryCount)
+        assertEquals(1, backend.mutationBoundaryCrossingCount)
+        assertEquals(1, backend.backendEffectCount)
+
+        val recreated = FakeAnkiBackend(fakeId, listOf(deck()), listOf(card("A")), instanceId = "mode-idempotent-2",
+            mode = FakeCommitMode.IDEMPOTENT_REPLAY, persistedEffectStore = store)
+        assertTrue(recreated.commitRating(request) is CommitRatingResult.Committed)
+        assertEquals(1, recreated.deliveryCount)
+        assertEquals("backend table answered without a new mutation boundary", 0,
+            recreated.mutationBoundaryCrossingCount)
+        assertEquals(1, recreated.backendEffectCount)
+    }
+
+    @Test fun `non-idempotent replay mode counts both delivered boundary attempts and effects`() = runTest {
+        val backend = FakeAnkiBackend(fakeId, listOf(deck()), listOf(card("A")), instanceId = "mode-non-idempotent",
+            mode = FakeCommitMode.NON_IDEMPOTENT_REPLAY)
+        val request = request(backend)
+        assertTrue(backend.commitRating(request) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(request) is CommitRatingResult.Committed)
+        assertEquals(2, backend.deliveryCount)
+        assertEquals(2, backend.mutationBoundaryCrossingCount)
         assertEquals(2, backend.backendEffectCount)
     }
 

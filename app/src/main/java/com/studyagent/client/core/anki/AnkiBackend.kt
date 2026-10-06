@@ -239,7 +239,9 @@ data class CommitRatingRequest(
     val answerDurationMs: Long? = null,
     val evidence: ReviewCommitEvidence? = null,
     /** The deck bound to the turn; identity only, for restore/integrity checks. */
-    val deckRef: AnkiDeckRef? = null
+    val deckRef: AnkiDeckRef? = null,
+    /** Collection identity from the bound review context, when available. */
+    val collectionRef: AnkiCollectionIdentity? = null
 ) {
     val sessionId: String get() = commitId.studySessionId
     val turnId: ReviewTurnId get() = commitId.turnId
@@ -248,6 +250,11 @@ data class CommitRatingRequest(
         require(commitId.backendId == card.backendId)
         require(deckRef == null || (deckRef.backendId == card.backendId &&
             (deckRef.collectionKey == null || card.collectionKey == null || deckRef.collectionKey == card.collectionKey)))
+        require(collectionRef == null || collectionRef.backendId == commitId.backendId)
+        require(collectionRef?.collectionKey == null || card.collectionKey == null ||
+            collectionRef.collectionKey == card.collectionKey)
+        require(collectionRef?.collectionKey == null || deckRef?.collectionKey == null ||
+            collectionRef.collectionKey == deckRef.collectionKey)
         require(ratedAtEpochMs >= 0)
         require(answerDurationMs == null || answerDurationMs >= 0)
     }

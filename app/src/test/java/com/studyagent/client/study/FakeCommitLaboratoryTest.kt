@@ -49,9 +49,10 @@ class FakeCommitLaboratoryTest {
         harness.commitOnce()
 
         assertEquals(ReviewCommitState.AMBIGUOUS, harness.commit?.state)
+        assertEquals(1, harness.ledger.snapshot().single().attemptCount)
         assertEquals(SessionPhase.ReconciliationRequired, harness.state.phase)
         assertEquals("delivered exactly once", 1, harness.fake.deliveryCount)
-        assertEquals("one mutation attempt", 1, harness.fake.mutationAttemptCount)
+        assertEquals("one durable mutation-boundary crossing", 1, harness.fake.mutationBoundaryCrossingCount)
         assertEquals("the physical effect is observable", 1, harness.fake.backendEffectCount)
         harness.assertNoAutomaticResend(nextCardsBefore)
 
@@ -73,8 +74,10 @@ class FakeCommitLaboratoryTest {
         harness.commitOnce()
 
         assertEquals(ReviewCommitState.AMBIGUOUS, harness.commit?.state)
+        assertEquals(1, harness.ledger.snapshot().single().attemptCount)
         assertEquals(0, harness.fake.backendEffectCount)
-        assertEquals(1, harness.fake.mutationAttemptCount)
+        assertEquals(1, harness.fake.deliveryCount)
+        assertEquals(1, harness.fake.mutationBoundaryCrossingCount)
         harness.assertNoAutomaticResend(nextCardsBefore)
     }
 
@@ -87,18 +90,24 @@ class FakeCommitLaboratoryTest {
         val original = harness.commit!!.commitId
         harness.commitOnce()
 
-        assertEquals(ReviewCommitState.FAILED, harness.commit?.state)
+        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, harness.commit?.state)
         assertTrue(harness.commit!!.safeToRetry)
         assertEquals(SessionPhase.RatingCommitFailed, harness.state.phase)
-        assertEquals(0, harness.fake.mutationAttemptCount)
+        assertEquals("the request was delivered", 1, harness.fake.deliveryCount)
+        assertEquals("pre-mutation failure never crossed the durable boundary", 0,
+            harness.fake.mutationBoundaryCrossingCount)
         assertEquals(0, harness.fake.backendEffectCount)
+        assertEquals("one durable prepared attempt", 1,
+            harness.ledger.snapshot().single().attemptCount)
         harness.assertNoAutomaticResend(nextCardsBefore)
 
         // The retry is explicit, keeps the identity, and the same turn stays active.
         val retry = harness.send(AnkiStudyEvent.RetryRatingCommit(harness.state.epoch, original))
         assertTrue(retry.accepted)
         harness.drain()
-        assertEquals(ReviewCommitState.FAILED, harness.commit?.state)
+        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, harness.commit?.state)
+        assertEquals("attempt count grows only when a new prepared submission is durable", 2,
+            harness.ledger.snapshot().single().attemptCount)
         assertEquals("the retry re-sent the same logical commit", 2, harness.fake.deliveryCount)
         assertEquals(original, harness.commit!!.commitId)
         assertEquals("the resend was the user's, not an automatic retry", 1, harness.fake.redeliveryCount)
@@ -113,10 +122,12 @@ class FakeCommitLaboratoryTest {
         harness.rate(Rating.GOOD)
         harness.commitOnce()
 
-        assertEquals(ReviewCommitState.FAILED, harness.commit?.state)
+        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, harness.commit?.state)
         assertTrue(harness.commit!!.safeToRetry)
+        assertEquals("read-only preparation refused before a safe submission attempt", 0,
+            harness.ledger.snapshot().single().attemptCount)
         assertEquals("refused in prepare, so commitRating was never called", 0, harness.fake.deliveryCount)
-        assertEquals(0, harness.fake.mutationAttemptCount)
+        assertEquals(0, harness.fake.mutationBoundaryCrossingCount)
         assertEquals(0, harness.fake.backendEffectCount)
     }
 
@@ -135,7 +146,9 @@ class FakeCommitLaboratoryTest {
         assertEquals(SessionPhase.SubmittingRating, harness.state.phase)
         assertFalse("COMMITTED is not claimed while the response is missing",
             harness.commit?.state == ReviewCommitState.COMMITTED)
-        assertEquals("the mutation was entered", 1, harness.fake.mutationAttemptCount)
+        assertEquals("one durable prepared submission", 1, harness.ledger.snapshot().single().attemptCount)
+        assertEquals("the delivery occurred", 1, harness.fake.deliveryCount)
+        assertEquals("the mutation boundary was entered", 1, harness.fake.mutationBoundaryCrossingCount)
         assertEquals("but no effect is visible until the response arrives", 0, harness.fake.backendEffectCount)
 
         harness.fake.releaseDelayedSuccess()
@@ -163,7 +176,8 @@ class FakeCommitLaboratoryTest {
         // Re-delivering the identical request (a resend, not a new turn) applies nothing new.
         val replay = harness.executor.execute(effect)
         assertEquals(1, harness.fake.backendEffectCount)
-        assertEquals(1, harness.fake.mutationAttemptCount)
+        assertEquals(1, harness.fake.deliveryCount)
+        assertEquals(1, harness.fake.mutationBoundaryCrossingCount)
         assertNotNull(replay)
     }
 
@@ -199,7 +213,7 @@ class FakeCommitLaboratoryTest {
 
         assertEquals(ReviewCommitState.COMMITTED, harness.ledger.snapshot().single().state)
         assertEquals(1, harness.fake.deliveryCount)
-        assertEquals(1, harness.fake.mutationAttemptCount)
+        assertEquals(1, harness.fake.mutationBoundaryCrossingCount)
         assertEquals(1, harness.fake.backendEffectCount)
         assertEquals("exactly one next card, after COMMITTED", nextCardsBefore + 1, harness.fake.nextCardCount)
         assertEquals(0, harness.fake.redeliveryCount)
@@ -216,6 +230,7 @@ class FakeCommitLaboratoryTest {
         assertEquals(CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED, FakeCommitMode.IDEMPOTENT_REPLAY.guarantee)
         assertFalse(FakeCommitMode.FAIL_BEFORE_MUTATION.appliesEffect)
         assertFalse(FakeCommitMode.OUTCOME_UNKNOWN.appliesEffect)
+        assertFalse(FakeCommitMode.BACKEND_UNAVAILABLE.appliesEffect)
         assertTrue(FakeCommitMode.MUTATE_THEN_DROP_RESPONSE.appliesEffect)
     }
 

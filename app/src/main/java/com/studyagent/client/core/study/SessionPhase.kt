@@ -45,7 +45,8 @@ sealed interface SessionPhase {
     data object SubmittingRating : SessionPhase
 
     /**
-     * GATE 11 — the rating is known NOT applied (ledger FAILED). The turn stays unresolved: the
+     * GATE 11 — the rating is known NOT applied (ledger FAILED_SAFE_TO_RETRY or FAILED_NOT_RETRYABLE).
+     * The turn stays unresolved:
      * user may retry the *same* commit when it is safe, or end the session. Never advances.
      */
     data object RatingCommitFailed : SessionPhase
