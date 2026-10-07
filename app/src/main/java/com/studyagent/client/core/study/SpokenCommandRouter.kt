@@ -32,6 +32,8 @@ object SpokenCommandRouter {
         VoiceCommand.Easy -> cardId?.let { StudyEvent.UserRateCard(Rating.EASY, it) }
 
         VoiceCommand.Repeat -> StudyEvent.UserRequestRepeat(cardId)
+        VoiceCommand.RepeatAnswer -> StudyEvent.RepeatAnswerRequested(cardId = cardId)
+        VoiceCommand.RepeatFeedback -> StudyEvent.RepeatFeedbackRequested(cardId = cardId)
         VoiceCommand.Hint -> StudyEvent.UserRequestHint(cardId)
         VoiceCommand.Explain -> StudyEvent.UserRequestExplanation(cardId)
         VoiceCommand.ShowAnswer -> StudyEvent.UserRequestAnswer(cardId)

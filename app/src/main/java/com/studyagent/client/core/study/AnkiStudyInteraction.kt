@@ -1,6 +1,7 @@
 package com.studyagent.client.core.study
 
 import com.studyagent.client.core.anki.*
+import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
 
 /**
@@ -31,12 +32,32 @@ data class AnkiStudyInteraction(
      * [CommitTruthDiagnostics.EVENT_COMMIT_STATE_PROJECTION_MISMATCH]. It is a fact *about* the
      * projection, not a second commit state.
      */
-    val projectionMismatch: CommitProjectionMismatch? = null
+    val projectionMismatch: CommitProjectionMismatch? = null,
+    // ---- GATE 12 answer reveal, reference answer, evaluation & compare state ----
+    val revealState: AnswerRevealState = AnswerRevealState.HIDDEN,
+    val compareMode: AnswerCompareMode = request.defaultCompareMode,
+    val evaluation: Evaluation? = null,
+    val evaluationStatus: AnswerEvaluationStatus = AnswerEvaluationStatus.NOT_REQUESTED,
+    val evaluationFailureReason: String? = null,
+    val activeEvaluationRequestId: String? = null,
+    val audioSequencePhase: AnswerAudioSequencePhase = AnswerAudioSequencePhase.IDLE,
+    val renderFallbackReason: String? = null,
+    val showRawReferenceAnswer: Boolean = false
 ) {
+    /** Canonical final user answer transcript for comparison (STEP 3). */
+    val userAnswerText: String? get() = transcript
+    /** Advisory AI suggestion only; never auto-selected or auto-committed (STEP 16, 17). */
+    val suggestedRating: Rating? get() = evaluation?.suggestedRating
     /** User choice only; before durable COMMITTED it is not a scheduler fact. */
     val selectedRating: Rating? get() = commit?.selectedRating
     /** Non-null only after the durable transaction is COMMITTED. */
     val committedRating: Rating? get() = commit?.committedRating
+
+    /** Projects this interaction into the pure GATE 12 [AnswerReviewModel]. */
+    fun toAnswerReviewModel(
+        phase: SessionPhase = SessionPhase.WaitingForRating,
+        cardTurn: CardTurn? = null
+    ): AnswerReviewModel? = AnswerReviewModel.from(this, phase, cardTurn)
 }
 
 /**
@@ -87,7 +108,11 @@ data class AnkiStudyRequest(
     val studySessionId: String,
     val preference: AnkiBackendMode,
     val deck: AnkiDeckRef,
-    val speakQuestion: Boolean = true
+    val speakQuestion: Boolean = true,
+    val evaluateAnswers: Boolean = false,
+    val speakFeedback: Boolean = true,
+    val speakAnswer: Boolean = false,
+    val defaultCompareMode: AnswerCompareMode = AnswerCompareMode.ORIGINAL
 ) {
     init { require(studySessionId.isNotBlank()) }
 }
@@ -224,6 +249,63 @@ sealed interface AnkiStudyEvent : StudyEvent {
 
     /** User intent: the next-card *read* failed after a COMMITTED rating; ask the scheduler again. */
     data class RetryNextCard(val epoch: Long) : AnkiStudyEvent
+
+    // ---- GATE 12 answer evaluation & review events ----
+
+    data class AnswerEvaluationCompleted(
+        val epoch: Long,
+        val sessionId: String,
+        val turnId: ReviewTurnId,
+        val cardRef: AnkiCardRef,
+        val requestId: String,
+        val evaluation: Evaluation,
+        val speakFeedback: Boolean = true
+    ) : AnkiStudyEvent
+
+    data class AnswerEvaluationFailed(
+        val epoch: Long,
+        val sessionId: String,
+        val turnId: ReviewTurnId,
+        val cardRef: AnkiCardRef,
+        val requestId: String,
+        val reason: String
+    ) : AnkiStudyEvent
+
+    companion object {
+        fun RevealAnswerRequested(
+            turnId: ReviewTurnId? = null,
+            epoch: Long? = null,
+            cardId: String? = null
+        ): StudyEvent.RevealAnswerRequested = StudyEvent.RevealAnswerRequested(turnId, epoch, cardId)
+
+        fun SelectCompareMode(
+            turnId: ReviewTurnId? = null,
+            mode: AnswerCompareMode,
+            epoch: Long? = null
+        ): StudyEvent.SelectAnswerCompareMode = StudyEvent.SelectAnswerCompareMode(turnId, mode, epoch)
+
+        fun RepeatAnswerRequested(
+            turnId: ReviewTurnId? = null,
+            cardId: String? = null,
+            epoch: Long? = null
+        ): StudyEvent.RepeatAnswerRequested = StudyEvent.RepeatAnswerRequested(turnId, cardId, epoch)
+
+        fun RepeatFeedbackRequested(
+            turnId: ReviewTurnId? = null,
+            cardId: String? = null,
+            epoch: Long? = null
+        ): StudyEvent.RepeatFeedbackRequested = StudyEvent.RepeatFeedbackRequested(turnId, cardId, epoch)
+
+        fun AnswerRenderFallbackTriggered(
+            turnId: ReviewTurnId,
+            reason: String,
+            epoch: Long? = null,
+            sessionId: String? = null,
+            cardRef: AnkiCardRef? = null,
+            generation: Long? = null
+        ): StudyEvent.AnswerRenderFallbackTriggered =
+            StudyEvent.AnswerRenderFallbackTriggered(turnId, reason, epoch, sessionId, cardRef, generation)
+    }
 }
 
 /**
@@ -236,6 +318,11 @@ sealed interface AnkiStudyEffect : StudyEffect {
     data class Begin(val epoch: Long, val request: AnkiStudyRequest, val startedAtMs: Long) : AnkiStudyEffect
     data class Next(val epoch: Long, val session: AnkiReviewSession) : AnkiStudyEffect
     data class Hydrate(val epoch: Long, val turn: AnkiReviewTurn) : AnkiStudyEffect
+    data class EvaluateAnswer(
+        val epoch: Long,
+        val request: AnkiAnswerEvaluationRequest,
+        val speakFeedback: Boolean = true
+    ) : AnkiStudyEffect
     data object CancelReads : AnkiStudyEffect
 
     /** The single rating mutation path. [retry] = explicit retry of RETRY_ALLOWED. */

@@ -12,6 +12,8 @@ import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudySession
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.models.VoiceCommand
+import com.studyagent.client.core.study.AnswerCompareMode
+import com.studyagent.client.core.study.AnswerReviewModel
 import com.studyagent.client.core.study.RatingCommitRecoveryUi
 import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
@@ -84,6 +86,36 @@ class StudyViewModel(
     /** Read-only reconciliation of an unconfirmed rating. Never re-sends the rating. */
     fun onCheckRatingCommit() {
         viewModelScope.launch { studySessionRepository.reconcileRatingCommit() }
+    }
+
+    /**
+     * GATE 12 — backend-neutral answer reveal, reference comparison, evaluation & rating model.
+     * `null` when no Anki review turn is active.
+     */
+    val answerReview: StateFlow<AnswerReviewModel?>? = studySessionRepository.answerReview
+
+    fun onRevealAnswer() {
+        viewModelScope.launch { studySessionRepository.revealAnswer() }
+    }
+
+    fun onSelectAnswerCompareMode(mode: AnswerCompareMode) {
+        viewModelScope.launch { studySessionRepository.selectAnswerCompareMode(mode) }
+    }
+
+    fun onToggleRawReferenceAnswer(showRaw: Boolean) {
+        viewModelScope.launch { studySessionRepository.setShowRawReferenceAnswer(showRaw) }
+    }
+
+    fun onRepeatAnswer() {
+        viewModelScope.launch { studySessionRepository.repeatAnswer() }
+    }
+
+    fun onRepeatFeedback() {
+        viewModelScope.launch { studySessionRepository.repeatFeedback() }
+    }
+
+    fun onAnswerRenderFallback(reason: String) {
+        viewModelScope.launch { studySessionRepository.reportAnswerRenderFallback(reason) }
     }
 
     fun onRepeatQuestion() {

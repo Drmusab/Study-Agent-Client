@@ -310,6 +310,22 @@ class VoiceCommandGrammar {
                     ))
                 ),
                 CommandEntry(
+                    command = VoiceCommand.RepeatAnswer,
+                    phrases = n(listOf(
+                        "repeat answer", "repeat the answer", "say the answer", "say answer again",
+                        "read answer", "read the answer", "repeat reference answer",
+                        "أعد الجواب", "اعد الجواب", "كرر الجواب", "اقرأ الجواب", "اقرا الجواب"
+                    ))
+                ),
+                CommandEntry(
+                    command = VoiceCommand.RepeatFeedback,
+                    phrases = n(listOf(
+                        "repeat feedback", "repeat the feedback", "say feedback", "say the feedback",
+                        "repeat evaluation", "repeat the evaluation",
+                        "أعد التقييم", "اعد التقييم", "كرر التقييم", "أعد الملاحظات", "اعد الملاحظات"
+                    ))
+                ),
+                CommandEntry(
                     command = VoiceCommand.Hint,
                     phrases = n(listOf(
                         "hint", "give me a hint", "need a hint", "give hint", "a hint please",
@@ -332,12 +348,12 @@ class VoiceCommandGrammar {
                     command = VoiceCommand.ShowAnswer,
                     phrases = n(listOf(
                         "show answer", "show the answer", "give answer", "what is the answer",
-                        "what's the answer", "reveal answer", "answer",
+                        "what's the answer", "reveal answer", "reveal the answer", "answer",
                         "اظهر الجواب", "أظهر الجواب", "ما هو الجواب", "الجواب", "الحل", "اظهر الحل"
                     )),
                     safeDuringAnswer = n(listOf(
                         "show answer", "show the answer", "give answer", "what is the answer",
-                        "what's the answer", "reveal answer",
+                        "what's the answer", "reveal answer", "reveal the answer",
                         "اظهر الجواب", "أظهر الجواب", "ما هو الجواب", "اظهر الحل"
                     ))
                 ),

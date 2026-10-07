@@ -1,5 +1,7 @@
 package com.studyagent.client.core.study
 
+import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.ReviewTurnId
 import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.ServerMessage
@@ -34,6 +36,55 @@ sealed interface StudyEvent {
     data class UserRequestExplanation(val cardId: String?) : StudyEvent
     data class UserRequestAnswer(val cardId: String?) : StudyEvent
     data class UserRequestRepeat(val cardId: String?) : StudyEvent
+
+    // -- GATE 12 answer reveal, compare & repeat intents (STEP 7, 24, 28, 29)
+    data class RevealAnswerRequested(
+        val turnId: ReviewTurnId? = null,
+        val epoch: Long? = null,
+        val cardId: String? = null
+    ) : AnkiStudyEvent {
+        constructor(epoch: Long, turnId: ReviewTurnId) : this(turnId = turnId, epoch = epoch, cardId = null)
+    }
+
+    data class SelectAnswerCompareMode(
+        val turnId: ReviewTurnId? = null,
+        val mode: AnswerCompareMode,
+        val epoch: Long? = null
+    ) : AnkiStudyEvent {
+        constructor(mode: AnswerCompareMode) : this(null, mode, null)
+        constructor(epoch: Long, turnId: ReviewTurnId, mode: AnswerCompareMode) : this(turnId, mode, epoch)
+    }
+
+    data class SetShowRawReferenceAnswer(
+        val turnId: ReviewTurnId? = null,
+        val showRaw: Boolean,
+        val epoch: Long? = null
+    ) : AnkiStudyEvent
+
+    data class RepeatAnswerRequested(
+        val turnId: ReviewTurnId? = null,
+        val cardId: String? = null,
+        val epoch: Long? = null
+    ) : AnkiStudyEvent {
+        constructor(epoch: Long, turnId: ReviewTurnId) : this(turnId = turnId, cardId = null, epoch = epoch)
+    }
+
+    data class RepeatFeedbackRequested(
+        val turnId: ReviewTurnId? = null,
+        val cardId: String? = null,
+        val epoch: Long? = null
+    ) : AnkiStudyEvent {
+        constructor(epoch: Long, turnId: ReviewTurnId) : this(turnId = turnId, cardId = null, epoch = epoch)
+    }
+
+    data class AnswerRenderFallbackTriggered(
+        val turnId: ReviewTurnId,
+        val reason: String,
+        val epoch: Long? = null,
+        val sessionId: String? = null,
+        val cardRef: AnkiCardRef? = null,
+        val generation: Long? = null
+    ) : AnkiStudyEvent
     data class UserSkipRequested(val cardId: String?) : StudyEvent
     /**
      * @param routeLoss true when the pause is the disconnect policy's reaction to a lost audio
@@ -91,6 +142,7 @@ sealed interface StudyEvent {
     // -- Voice subsystem completions (§64 §65)
     data class QuestionSpeechCompleted(val cardId: String, val effectId: String, val success: Boolean) : StudyEvent
     data class FeedbackSpeechCompleted(val cardId: String, val effectId: String, val success: Boolean) : StudyEvent
+    data class AnswerSpeechCompleted(val cardId: String, val effectId: String, val success: Boolean) : StudyEvent
     data class HintSpeechCompleted(val cardId: String, val effectId: String, val success: Boolean) : StudyEvent
     data class ExplanationSpeechCompleted(val cardId: String, val effectId: String, val success: Boolean) : StudyEvent
     data class SpeechCancelled(val reason: String, val effectId: String?) : StudyEvent
@@ -205,3 +257,10 @@ object StudyEventMapper {
         else -> ServerSessionPhase.UNKNOWN
     }
 }
+
+typealias RevealAnswerRequested = StudyEvent.RevealAnswerRequested
+typealias RepeatAnswerRequested = StudyEvent.RepeatAnswerRequested
+typealias RepeatFeedbackRequested = StudyEvent.RepeatFeedbackRequested
+typealias SelectAnswerCompareMode = StudyEvent.SelectAnswerCompareMode
+typealias AnswerRenderFallbackTriggered = StudyEvent.AnswerRenderFallbackTriggered
+

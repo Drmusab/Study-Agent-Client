@@ -87,6 +87,9 @@ sealed interface AnkiCardRenderPlan {
 
         /** A Compose-text mode was requested but no text channel exists: degraded to ORIGINAL. */
         const val TOKEN_CLEAN_TEXT_UNAVAILABLE: String = "clean_text_unavailable"
+
+        /** The clean-text channel exists but is legitimately empty (`""`), distinct from `null`. */
+        const val TOKEN_CLEAN_TEXT_EMPTY: String = "clean_text_empty"
     }
 }
 
@@ -159,11 +162,26 @@ object AnkiCardRenderPlanner {
         text: String?,
         degradations: List<String>
     ): AnkiCardRenderPlan = when {
-        text != null -> AnkiCardRenderPlan.CleanText(
+        text != null && text.isNotEmpty() -> AnkiCardRenderPlan.CleanText(
             side = side,
             text = text,
             reason = AnkiCardRenderPlan.TOKEN_MODE_CLEAN,
             tokens = degradations + modeToken(mode)
+        )
+        // GATE 12 STEP 25 — if clean text is legitimately empty ("") and original HTML is
+        // available, use original HTML rather than treating it as loading/error; keep the
+        // empty-text token distinct from missing (null).
+        text != null && !html.isNullOrBlank() -> AnkiCardRenderPlan.Original(
+            side = side,
+            html = html,
+            fallbackText = text,
+            tokens = degradations + modeToken(mode) + AnkiCardRenderPlan.TOKEN_CLEAN_TEXT_EMPTY
+        )
+        text != null -> AnkiCardRenderPlan.CleanText(
+            side = side,
+            text = text,
+            reason = AnkiCardRenderPlan.TOKEN_MODE_CLEAN,
+            tokens = degradations + modeToken(mode) + AnkiCardRenderPlan.TOKEN_CLEAN_TEXT_EMPTY
         )
         // A CLEAN/VOICE_FOCUS request for a card the backend only rendered visually: degrade to the
         // channel that *does* exist rather than showing nothing (STEP 121, marked, never invented).

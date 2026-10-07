@@ -5,6 +5,7 @@ import com.studyagent.client.core.models.ClientMessage
 import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudyCard
+import com.studyagent.client.core.voice.stt.CommandNormalizer
 import com.studyagent.client.core.voice.stt.RecognitionPurpose
 import com.studyagent.client.core.voice.tts.QueuePolicy
 import com.studyagent.client.core.voice.tts.SpeechIds
@@ -63,9 +64,11 @@ object StudyReducer {
 
         // Voice effect ownership guard §64 §79
         if (event is StudyEvent.QuestionSpeechCompleted || event is StudyEvent.FeedbackSpeechCompleted ||
+            event is StudyEvent.AnswerSpeechCompleted ||
             event is StudyEvent.HintSpeechCompleted || event is StudyEvent.ExplanationSpeechCompleted) {
             val isStale = state.activeSpeechEffectId != (event as? StudyEvent.QuestionSpeechCompleted)?.effectId &&
                 state.activeSpeechEffectId != (event as? StudyEvent.FeedbackSpeechCompleted)?.effectId &&
+                state.activeSpeechEffectId != (event as? StudyEvent.AnswerSpeechCompleted)?.effectId &&
                 state.activeSpeechEffectId != (event as? StudyEvent.HintSpeechCompleted)?.effectId &&
                 state.activeSpeechEffectId != (event as? StudyEvent.ExplanationSpeechCompleted)?.effectId
             // If effectId does not match current, it's stale (§15)
@@ -157,16 +160,88 @@ object StudyReducer {
                 activeSpeechEffectId = null, activeRecognitionEffectId = null
             ), cancelVoice + AnkiStudyEffect.CancelReads)
         }
-        fun reveal(transcript: String? = local.transcript): Transition {
-            if (local.turn?.renderedCard == null || state.phase !in setOf(
+        fun reveal(transcript: String? = local.transcript, cancelEval: Boolean = false): Transition {
+            val card = local.turn?.renderedCard ?: return reject("illegal-reveal")
+            if (state.phase !in setOf(
                     SessionPhase.SpeakingQuestion, SessionPhase.WaitingForAnswer,
-                    SessionPhase.PendingAnswerReview, SessionPhase.WaitingForRating)) return reject("illegal-reveal")
+                    SessionPhase.PendingAnswerReview, SessionPhase.WaitingForEvaluation,
+                    SessionPhase.WaitingForRating)) return reject("illegal-reveal")
+            if (state.phase == SessionPhase.WaitingForRating &&
+                local.revealState == AnswerRevealState.REVEALED &&
+                transcript == local.transcript) {
+                return reject("answer-already-revealed")
+            }
+            val autoFallbackToClean = card.answerHtml == null && card.answerText != null &&
+                local.compareMode == AnswerCompareMode.ORIGINAL
+            val speakAns = local.request.speakAnswer && !card.answerText.isNullOrBlank()
+            val ansSpeechId = if (speakAns) EffectIds.next("anki-answer") else null
+            val effects = buildList {
+                addAll(cancelVoice)
+                if (cancelEval) add(AnkiStudyEffect.CancelReads)
+                if (ansSpeechId != null && !card.answerText.isNullOrBlank()) {
+                    add(StudyEffect.Voice.Speak(speechRequestForAnswer(state.currentCardId ?: "", card.answerText), ansSpeechId))
+                }
+            }
             return moved(state.copy(
                 phase = SessionPhase.WaitingForRating,
-                anki = local.copy(transcript = transcript),
+                anki = local.copy(
+                    transcript = transcript,
+                    revealState = AnswerRevealState.REVEALED,
+                    compareMode = if (autoFallbackToClean) AnswerCompareMode.CLEAN else local.compareMode,
+                    renderFallbackReason = if (autoFallbackToClean) "html_unavailable" else local.renderFallbackReason,
+                    activeEvaluationRequestId = null,
+                    evaluationStatus = if (cancelEval) AnswerEvaluationStatus.UNAVAILABLE else local.evaluationStatus,
+                    evaluationFailureReason = if (cancelEval) "cancelled_by_manual_reveal" else local.evaluationFailureReason,
+                    audioSequencePhase = if (ansSpeechId != null) AnswerAudioSequencePhase.SPEAKING_ANSWER else AnswerAudioSequencePhase.VISUAL_REVEALED
+                ),
                 cardTurn = state.cardTurn?.withAnswerRevealed(),
-                activeSpeechEffectId = null, activeRecognitionEffectId = null
-            ), cancelVoice)
+                activeSpeechEffectId = ansSpeechId,
+                activeRecognitionEffectId = null
+            ), effects)
+        }
+        fun submitAnswer(rawAnswer: String): Transition {
+            val turn = local.turn ?: return reject("no-turn")
+            val card = turn.renderedCard ?: return reject("no-rendered-card")
+            val answer = rawAnswer.trim()
+            if (answer.isBlank()) return reject("blank-anki-answer")
+            val normalizedCmd = CommandNormalizer.forCommand(answer)
+            if (normalizedCmd in ANKI_REVEAL_VOICE_PHRASES) {
+                return reveal(transcript = local.transcript)
+            }
+            if (!local.request.evaluateAnswers) {
+                return reveal(transcript = answer)
+            }
+            val reqId = EffectIds.next("anki-eval")
+            val evalRequest = AnkiAnswerEvaluationRequest.fromCard(
+                requestId = reqId,
+                sessionId = local.request.studySessionId,
+                turnId = turn.turnId,
+                card = card,
+                userAnswerText = answer
+            )
+            // STEP 13 & 23: Never send answerHtml to AI evaluator; if pure/clean answer text is
+            // absent, degrade cleanly to manual review on the same turn.
+            if (evalRequest == null) {
+                val revealed = reveal(transcript = answer)
+                val updatedLocal = revealed.newState.anki?.copy(
+                    evaluationStatus = AnswerEvaluationStatus.UNAVAILABLE,
+                    evaluationFailureReason = "reference_answer_text_unavailable"
+                )
+                return revealed.copy(newState = revealed.newState.copy(anki = updatedLocal))
+            }
+            return moved(state.copy(
+                phase = SessionPhase.WaitingForEvaluation,
+                anki = local.copy(
+                    transcript = answer,
+                    evaluationStatus = AnswerEvaluationStatus.EVALUATING,
+                    evaluationFailureReason = null,
+                    activeEvaluationRequestId = reqId,
+                    audioSequencePhase = AnswerAudioSequencePhase.STOPPING_QUESTION_AND_STT
+                ),
+                activeSpeechEffectId = null,
+                activeRecognitionEffectId = null,
+                error = null
+            ), cancelVoice + AnkiStudyEffect.EvaluateAnswer(state.epoch, evalRequest, local.request.speakFeedback))
         }
         fun speak(): Transition {
             val turn = state.cardTurn ?: return reject("no-card")
@@ -260,8 +335,23 @@ object StudyReducer {
                         // A new presentation starts a new transaction: the previous (COMMITTED)
                         // commit is gone, so a late duplicate result for it is stale by identity.
                         // Any recorded divergence belonged to that transaction and retires with it.
-                        moved(state.copy(anki = local.copy(turn = turn, commit = null, transcript = null,
-                            turnPresentedAtMs = null, failure = null, projectionMismatch = null)),
+                        moved(state.copy(anki = local.copy(
+                            turn = turn,
+                            commit = null,
+                            transcript = null,
+                            turnPresentedAtMs = null,
+                            failure = null,
+                            projectionMismatch = null,
+                            revealState = AnswerRevealState.HIDDEN,
+                            compareMode = local.request.defaultCompareMode,
+                            evaluation = null,
+                            evaluationStatus = AnswerEvaluationStatus.NOT_REQUESTED,
+                            evaluationFailureReason = null,
+                            activeEvaluationRequestId = null,
+                            audioSequencePhase = AnswerAudioSequencePhase.IDLE,
+                            renderFallbackReason = null,
+                            showRawReferenceAnswer = false
+                        )),
                             listOf(AnkiStudyEffect.Hydrate(state.epoch, turn)))
                     }
                 }
@@ -312,7 +402,7 @@ object StudyReducer {
                     event.cardId != state.currentCardId || event.requestId == null ||
                     event.requestId != state.activeRecognitionEffectId || event.isCommand || event.transcript.isBlank()) {
                     reject("stale-or-empty-anki-transcript")
-                } else reveal(event.transcript)
+                } else submitAnswer(event.transcript)
             }
             is StudyEvent.RecognitionFailed -> {
                 if (state.phase != SessionPhase.WaitingForAnswer || event.requestId == null ||
@@ -321,11 +411,240 @@ object StudyReducer {
                     SessionProblem.RECOGNIZER_UNAVAILABLE, "Recognition failed; repeat or reveal the card.", true, now)))
             }
             is StudyEvent.UserSubmitAnswer -> {
-                if (state.phase != SessionPhase.WaitingForAnswer || event.cardId != state.currentCardId ||
-                    event.transcript.isBlank()) reject("illegal-anki-answer") else reveal(event.transcript)
+                if (state.phase !in setOf(SessionPhase.SpeakingQuestion, SessionPhase.WaitingForAnswer) ||
+                    event.cardId != state.currentCardId || event.transcript.isBlank()) {
+                    reject("illegal-anki-answer")
+                } else submitAnswer(event.transcript)
             }
             is StudyEvent.UserRequestAnswer -> {
-                if (event.cardId != state.currentCardId) reject("stale-card") else reveal()
+                if (event.cardId != null && event.cardId != state.currentCardId) reject("stale-card")
+                else reveal(cancelEval = state.phase == SessionPhase.WaitingForEvaluation)
+            }
+            is StudyEvent.RevealAnswerRequested -> {
+                val turn = local.turn ?: return reject("no-turn")
+                if ((event.epoch != null && event.epoch != state.epoch) ||
+                    (event.turnId != null && event.turnId != turn.turnId) ||
+                    (event.cardId != null && event.cardId != state.currentCardId)
+                ) {
+                    reject("stale-anki-reveal")
+                } else {
+                    reveal(cancelEval = state.phase == SessionPhase.WaitingForEvaluation)
+                }
+            }
+            is AnkiStudyEvent.AnswerEvaluationCompleted -> {
+                val turn = local.turn
+                if (event.epoch != state.epoch ||
+                    event.sessionId != local.request.studySessionId ||
+                    turn == null ||
+                    event.turnId != turn.turnId ||
+                    event.cardRef != turn.cardRef ||
+                    local.activeEvaluationRequestId == null ||
+                    event.requestId != local.activeEvaluationRequestId ||
+                    state.phase != SessionPhase.WaitingForEvaluation
+                ) {
+                    reject("stale-anki-evaluation")
+                } else {
+                    val eval = event.evaluation
+                    val card = turn.renderedCard
+                    val autoFallbackToClean = card?.answerHtml == null && card?.answerText != null &&
+                        local.compareMode == AnswerCompareMode.ORIGINAL
+                    val speakFb = event.speakFeedback && local.request.speakFeedback && eval.shortFeedback.isNotBlank()
+                    val fbId = if (speakFb) EffectIds.next("anki-feedback") else null
+                    val nextPhase = if (speakFb) SessionPhase.SpeakingFeedback else SessionPhase.WaitingForRating
+                    val audioPhase = if (speakFb) AnswerAudioSequencePhase.SPEAKING_FEEDBACK else AnswerAudioSequencePhase.VISUAL_REVEALED
+                    val effects = if (fbId != null) {
+                        cancelVoice + StudyEffect.Voice.Speak(
+                            speechRequestForFeedback(state.currentCardId ?: "", eval.shortFeedback),
+                            fbId
+                        )
+                    } else {
+                        cancelVoice
+                    }
+                    moved(state.copy(
+                        phase = nextPhase,
+                        anki = local.copy(
+                            revealState = AnswerRevealState.REVEALED,
+                            compareMode = if (autoFallbackToClean) AnswerCompareMode.CLEAN else local.compareMode,
+                            renderFallbackReason = if (autoFallbackToClean) "html_unavailable" else local.renderFallbackReason,
+                            evaluation = eval,
+                            evaluationStatus = AnswerEvaluationStatus.COMPLETED,
+                            evaluationFailureReason = null,
+                            activeEvaluationRequestId = null,
+                            audioSequencePhase = audioPhase
+                        ),
+                        cardTurn = state.cardTurn?.withEvaluation(eval)?.withAnswerRevealed(),
+                        session = state.session?.copy(lastEvaluation = eval),
+                        activeSpeechEffectId = fbId,
+                        activeRecognitionEffectId = null,
+                        error = null
+                    ), effects)
+                }
+            }
+            is AnkiStudyEvent.AnswerEvaluationFailed -> {
+                val turn = local.turn
+                if (event.epoch != state.epoch ||
+                    event.sessionId != local.request.studySessionId ||
+                    turn == null ||
+                    event.turnId != turn.turnId ||
+                    event.cardRef != turn.cardRef ||
+                    local.activeEvaluationRequestId == null ||
+                    event.requestId != local.activeEvaluationRequestId ||
+                    state.phase != SessionPhase.WaitingForEvaluation
+                ) {
+                    reject("stale-anki-evaluation")
+                } else {
+                    val card = turn.renderedCard
+                    val autoFallbackToClean = card?.answerHtml == null && card?.answerText != null &&
+                        local.compareMode == AnswerCompareMode.ORIGINAL
+                    // STEP 23: Keep user answer, reveal reference answer, allow manual rating,
+                    // show non-blocking status, do not fail the review turn.
+                    moved(state.copy(
+                        phase = SessionPhase.WaitingForRating,
+                        anki = local.copy(
+                            revealState = AnswerRevealState.REVEALED,
+                            compareMode = if (autoFallbackToClean) AnswerCompareMode.CLEAN else local.compareMode,
+                            renderFallbackReason = if (autoFallbackToClean) "html_unavailable" else local.renderFallbackReason,
+                            evaluationStatus = AnswerEvaluationStatus.UNAVAILABLE,
+                            evaluationFailureReason = event.reason,
+                            activeEvaluationRequestId = null,
+                            audioSequencePhase = AnswerAudioSequencePhase.VISUAL_REVEALED
+                        ),
+                        cardTurn = state.cardTurn?.withAnswerRevealed(),
+                        activeSpeechEffectId = null,
+                        activeRecognitionEffectId = null,
+                        error = null
+                    ), cancelVoice)
+                }
+            }
+            is StudyEvent.FeedbackSpeechCompleted -> {
+                if (state.phase !in setOf(SessionPhase.SpeakingFeedback, SessionPhase.WaitingForRating, SessionPhase.ShowingAnswer) ||
+                    state.activeSpeechEffectId == null ||
+                    event.effectId != state.activeSpeechEffectId ||
+                    event.cardId != state.currentCardId
+                ) {
+                    reject("stale-anki-speech")
+                } else {
+                    val openRatingMic = state.phase == SessionPhase.SpeakingFeedback &&
+                        event.success && local.request.speakQuestion
+                    val listenId = if (openRatingMic) EffectIds.next("anki-rate-listen") else null
+                    moved(state.copy(
+                        phase = SessionPhase.WaitingForRating,
+                        anki = local.copy(
+                            audioSequencePhase = if (listenId != null) {
+                                AnswerAudioSequencePhase.LISTENING_FOR_RATING
+                            } else {
+                                AnswerAudioSequencePhase.IDLE
+                            }
+                        ),
+                        activeSpeechEffectId = null,
+                        activeRecognitionEffectId = listenId,
+                        error = if (event.success) state.error else SessionProblemHolder(
+                            SessionProblem.TTS_UNAVAILABLE,
+                            "Feedback speech failed; review the feedback on screen and rate the card.",
+                            true,
+                            now
+                        )
+                    ), if (listenId == null) emptyList() else listOf(
+                        StudyEffect.Voice.StartRecognition(RecognitionPurpose.RATING, event.cardId, listenId)
+                    ))
+                }
+            }
+            is StudyEvent.AnswerSpeechCompleted -> {
+                if (state.phase !in setOf(SessionPhase.WaitingForRating, SessionPhase.ShowingAnswer, SessionPhase.SpeakingFeedback) ||
+                    state.activeSpeechEffectId == null ||
+                    event.effectId != state.activeSpeechEffectId ||
+                    event.cardId != state.currentCardId
+                ) {
+                    reject("stale-anki-speech")
+                } else {
+                    moved(state.copy(
+                        phase = SessionPhase.WaitingForRating,
+                        anki = local.copy(audioSequencePhase = AnswerAudioSequencePhase.IDLE),
+                        activeSpeechEffectId = null,
+                        error = if (event.success) state.error else SessionProblemHolder(
+                            SessionProblem.TTS_UNAVAILABLE,
+                            "Answer speech failed; read the reference answer on screen.",
+                            true,
+                            now
+                        )
+                    ))
+                }
+            }
+            is StudyEvent.RepeatAnswerRequested -> {
+                val turn = local.turn ?: return reject("no-turn")
+                if ((event.epoch != null && event.epoch != state.epoch) ||
+                    (event.turnId != null && event.turnId != turn.turnId) ||
+                    (event.cardId != null && event.cardId != state.currentCardId)
+                ) return reject("stale-anki-repeat-answer")
+                if (local.revealState != AnswerRevealState.REVEALED ||
+                    state.phase !in setOf(SessionPhase.WaitingForRating, SessionPhase.SpeakingFeedback, SessionPhase.ShowingAnswer)
+                ) return reject("answer-not-revealed")
+                val answerText = turn.renderedCard?.answerText?.takeIf { it.isNotBlank() }
+                    ?: return reject("no-answer-speech-text")
+                val id = EffectIds.next("anki-answer")
+                moved(state.copy(
+                    phase = SessionPhase.WaitingForRating,
+                    anki = local.copy(audioSequencePhase = AnswerAudioSequencePhase.SPEAKING_ANSWER),
+                    activeSpeechEffectId = id,
+                    activeRecognitionEffectId = null
+                ), cancelVoice + StudyEffect.Voice.Speak(speechRequestForAnswer(state.currentCardId ?: "", answerText), id))
+            }
+            is StudyEvent.RepeatFeedbackRequested -> {
+                val turn = local.turn ?: return reject("no-turn")
+                if ((event.epoch != null && event.epoch != state.epoch) ||
+                    (event.turnId != null && event.turnId != turn.turnId) ||
+                    (event.cardId != null && event.cardId != state.currentCardId)
+                ) return reject("stale-anki-repeat-feedback")
+                if (local.revealState != AnswerRevealState.REVEALED ||
+                    state.phase !in setOf(SessionPhase.WaitingForRating, SessionPhase.SpeakingFeedback, SessionPhase.ShowingAnswer)
+                ) return reject("answer-not-revealed")
+                val feedbackText = (local.evaluation ?: state.cardTurn?.evaluation)?.shortFeedback?.takeIf { it.isNotBlank() }
+                    ?: return reject("no-feedback-speech-text")
+                val id = EffectIds.next("anki-feedback")
+                moved(state.copy(
+                    phase = SessionPhase.WaitingForRating,
+                    anki = local.copy(audioSequencePhase = AnswerAudioSequencePhase.SPEAKING_FEEDBACK),
+                    activeSpeechEffectId = id,
+                    activeRecognitionEffectId = null
+                ), cancelVoice + StudyEffect.Voice.Speak(speechRequestForFeedback(state.currentCardId ?: "", feedbackText), id))
+            }
+            is StudyEvent.SelectAnswerCompareMode -> {
+                val turn = local.turn ?: return reject("no-turn")
+                if ((event.epoch != null && event.epoch != state.epoch) ||
+                    (event.turnId != null && event.turnId != turn.turnId)
+                ) reject("stale-anki-compare-mode")
+                else moved(state.copy(anki = local.copy(compareMode = event.mode)))
+            }
+            is StudyEvent.SetShowRawReferenceAnswer -> {
+                val turn = local.turn ?: return reject("no-turn")
+                if ((event.epoch != null && event.epoch != state.epoch) ||
+                    (event.turnId != null && event.turnId != turn.turnId)
+                ) reject("stale-anki-raw-reference")
+                else moved(state.copy(anki = local.copy(showRawReferenceAnswer = event.showRaw)))
+            }
+            is StudyEvent.AnswerRenderFallbackTriggered -> {
+                val turn = local.turn ?: return reject("no-turn")
+                if ((event.epoch != null && event.epoch != state.epoch) ||
+                    (event.sessionId != null && event.sessionId != local.request.studySessionId) ||
+                    event.turnId != turn.turnId ||
+                    (event.cardRef != null && event.cardRef != turn.cardRef) ||
+                    local.revealState != AnswerRevealState.REVEALED
+                ) {
+                    reject("stale-anki-render-callback")
+                } else {
+                    val hasCleanText = turn.renderedCard?.answerText != null
+                    val nextMode = if (local.compareMode == AnswerCompareMode.ORIGINAL && hasCleanText) {
+                        AnswerCompareMode.CLEAN
+                    } else {
+                        local.compareMode
+                    }
+                    moved(state.copy(
+                        anki = local.copy(
+                            compareMode = nextMode,
+                            renderFallbackReason = event.reason
+                        )
+                    ))
+                }
             }
             is AnkiStudyEvent.SelectRating -> selectRating(state, local, event, now, cancelVoice)
             is AnkiStudyEvent.RatingCommitPrepared -> {
@@ -417,16 +736,21 @@ object StudyReducer {
                         SessionPhase.SpeakingQuestion, SessionPhase.WaitingForAnswer)) reject("illegal-repeat") else speak()
             }
             is StudyEvent.UserPauseRequested -> {
-                if (state.phase !in setOf(SessionPhase.SpeakingQuestion, SessionPhase.WaitingForAnswer,
+                if (state.phase !in setOf(
+                        SessionPhase.SpeakingQuestion, SessionPhase.WaitingForAnswer,
+                        SessionPhase.SpeakingFeedback, SessionPhase.ShowingAnswer,
                         SessionPhase.WaitingForRating)) return reject("illegal-pause")
                 moved(state.copy(phase = SessionPhase.Paused,
+                    anki = local.copy(audioSequencePhase = AnswerAudioSequencePhase.IDLE),
                     pauseContext = ResumeContext(state.epoch, state.phase, state.cardTurn, capturedAtMs = now),
                     activeSpeechEffectId = null, activeRecognitionEffectId = null), cancelVoice)
             }
             is StudyEvent.UserResumeRequested -> {
                 if (state.phase != SessionPhase.Paused) reject("not-paused") else moved(state.copy(
-                    phase = if (state.cardTurn?.answerRevealed == true) SessionPhase.WaitingForRating
-                        else SessionPhase.WaitingForAnswer,
+                    phase = if (local.revealState == AnswerRevealState.REVEALED || state.cardTurn?.answerRevealed == true)
+                        SessionPhase.WaitingForRating
+                    else SessionPhase.WaitingForAnswer,
+                    anki = local.copy(audioSequencePhase = AnswerAudioSequencePhase.IDLE),
                     pauseContext = null
                 )) // Safe manual restart; explicit Repeat can restart audio without querying Anki.
             }
@@ -434,14 +758,27 @@ object StudyReducer {
             // late result is rejected as terminal/stale) and never sends another mutation.
             is StudyEvent.UserEndRequested -> moved(state.copy(
                 phase = SessionPhase.Finished,
-                anki = local.copy(completion = AnkiStudyCompletion.USER_ENDED),
+                anki = local.copy(
+                    completion = AnkiStudyCompletion.USER_ENDED,
+                    activeEvaluationRequestId = null,
+                    audioSequencePhase = AnswerAudioSequencePhase.IDLE
+                ),
                 activeSpeechEffectId = null, activeRecognitionEffectId = null
             ), cancelVoice + AnkiStudyEffect.CancelReads +
                 listOfNotNull(local.reviewSession?.let { AnkiStudyEffect.EndReview(it) }))
             is StudyEvent.UserStopSpeaking -> {
-                if (state.phase != SessionPhase.SpeakingQuestion) reject("not-speaking") else moved(state.copy(
-                    phase = SessionPhase.WaitingForAnswer, activeSpeechEffectId = null,
-                    activeRecognitionEffectId = null), cancelVoice)
+                when (state.phase) {
+                    SessionPhase.SpeakingQuestion -> moved(state.copy(
+                        phase = SessionPhase.WaitingForAnswer, activeSpeechEffectId = null,
+                        activeRecognitionEffectId = null), cancelVoice)
+                    SessionPhase.SpeakingFeedback,
+                    SessionPhase.ShowingAnswer -> moved(state.copy(
+                        phase = SessionPhase.WaitingForRating,
+                        anki = local.copy(audioSequencePhase = AnswerAudioSequencePhase.IDLE),
+                        activeSpeechEffectId = null,
+                        activeRecognitionEffectId = null), cancelVoice)
+                    else -> reject("not-speaking")
+                }
             }
             is StudyEvent.ConnectionLost, is StudyEvent.ConnectionRestored,
             is StudyEvent.SettingsChanged, StudyEvent.UiRecreated -> Transition(state)
@@ -474,7 +811,9 @@ object StudyReducer {
             return Transition.reject(state, event,
                 if (existing.rating == event.rating) "duplicate-anki-rating" else "anki-rating-locked-first-wins")
         }
-        if (state.phase != SessionPhase.WaitingForRating) return Transition.reject(state, event, "illegal-phase-for-anki-rating")
+        if (state.phase !in setOf(SessionPhase.WaitingForRating, SessionPhase.SpeakingFeedback, SessionPhase.ShowingAnswer) ||
+            local.revealState != AnswerRevealState.REVEALED
+        ) return Transition.reject(state, event, "illegal-phase-for-anki-rating")
         if (session == null) return Transition.reject(state, event, "no-anki-review-session")
         val options = turn.ratingOptions
         if (options !is AnkiRatingOptions.Known) return Transition.reject(state, event, "anki-rating-options-unmapped")
@@ -492,8 +831,11 @@ object StudyReducer {
         val next = state.copy(
             phase = SessionPhase.SubmittingRating,
             // A new transaction supersedes any divergence recorded for an older one.
-            anki = local.copy(commit = AnkiRatingCommit(request, ReviewCommitStatus.PREPARED),
-                projectionMismatch = null),
+            anki = local.copy(
+                commit = AnkiRatingCommit(request, ReviewCommitStatus.PREPARED),
+                projectionMismatch = null,
+                audioSequencePhase = AnswerAudioSequencePhase.IDLE
+            ),
             error = null,
             activeSpeechEffectId = null,
             activeRecognitionEffectId = null
@@ -637,10 +979,23 @@ object StudyReducer {
         val next = when (outcome) {
             is AnkiCommitOutcome.Committed -> state.copy(
                 phase = SessionPhase.WaitingForFirstCard,
-                anki = owner.copy(turn = null, transcript = null, turnPresentedAtMs = null,
+                anki = owner.copy(
+                    turn = null,
+                    transcript = null,
+                    turnPresentedAtMs = null,
+                    revealState = AnswerRevealState.HIDDEN,
+                    compareMode = owner.request.defaultCompareMode,
+                    evaluation = null,
+                    evaluationStatus = AnswerEvaluationStatus.NOT_REQUESTED,
+                    evaluationFailureReason = null,
+                    activeEvaluationRequestId = null,
+                    audioSequencePhase = AnswerAudioSequencePhase.IDLE,
+                    renderFallbackReason = null,
+                    showRawReferenceAnswer = false,
                     commit = commit.copy(status = ReviewCommitStatus.COMMITTED, reconciling = false,
                         failureCategory = null,
-                        verifiedByReconciliation = reconciliation)),
+                        verifiedByReconciliation = reconciliation)
+                ),
                 cardTurn = null,
                 // Counters move only after COMMITTED (never on selection, failure or ambiguity).
                 session = state.session?.copy(totalReviewedInSession = state.session.totalReviewedInSession + 1),
@@ -745,6 +1100,21 @@ object StudyReducer {
             priority = SpeechPriority.NORMAL,
             queuePolicy = QueuePolicy.REPLACE
         )
+
+    private fun speechRequestForAnswer(cardId: String, text: String): SpeechRequest =
+        SpeechRequest(
+            id = SpeechIds.forPurpose(SpeechPurpose.ANSWER, cardId),
+            text = text,
+            purpose = SpeechPurpose.ANSWER,
+            priority = SpeechPriority.NORMAL,
+            queuePolicy = QueuePolicy.REPLACE
+        )
+
+    private val ANKI_REVEAL_VOICE_PHRASES = setOf(
+        "show answer", "show the answer", "give answer", "what is the answer",
+        "whats the answer", "reveal answer", "reveal the answer",
+        "اظهر الجواب", "ما هو الجواب", "اظهر الحل"
+    )
 
     // ------------------------------------------------------------------ START
 
