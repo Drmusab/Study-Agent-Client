@@ -1,6 +1,11 @@
 # GATE 11C — AnkiDroid rating commit audit
 
 **Audit date:** 2026-10-07
+**Independently re-verified:** 2026-10-07 (second pass) — every claim below was re-checked against
+fresh fetches of the pinned sources: `Ease.kt`, `FlashCardsContract.kt`, `api/build.gradle.kts`,
+`CardContentProvider.kt`, and `gradle/libs.versions.toml` (`ankiBackend = '0.1.64-anki25.09.2'`)
+at tag `v2.24.1`. Confirmed without correction, including the debug-authority/permission variants
+and `shouldEnforceUpdateSecurity = true` (permission always enforced on `update`).
 **Pinned AnkiDroid release:** `v2.24.1`
 **Resolved AnkiDroid source commit:** `9f579c10bb151146728220729c510acbbd8faba7`
 **Pinned Anki backend:** `ankitects/anki` `25.09.2` (`rslib` scheduler source)
