@@ -1,5 +1,11 @@
 # GATE 11 — Rating Commit, Scheduler & Exactly-Once Reliability — PART X Final Report
 
+> **GATE 11E (2026-10-07) — aggregate audit & lock: see `docs/GATE_11E_REPORT.md`.** GATE 11E is
+> the final aggregate validation of 11A-11D and the authoritative statement of the locked
+> production flow, the recovery matrix, the guarantee level
+> (`AT_MOST_ONCE_FAIL_CLOSED`) and the remaining environment-blocked verification classes. The
+> parts below are history; where they disagree with 11E, 11E wins.
+
 **Repository:** Drmusab/Study-Agent-Client · **Branch:** `arena/01a0d3c9-study-agent-client` (from `master` @ `8e12262`, PR #28 merge)
 **Date:** 2026-09-24 · **Report revision:** final (supersedes the earlier NO-verdict draft in this file)
 **Counterpart:** AnkiDroid (ankidroid/Anki-Android), pinned API contract v2.24.1

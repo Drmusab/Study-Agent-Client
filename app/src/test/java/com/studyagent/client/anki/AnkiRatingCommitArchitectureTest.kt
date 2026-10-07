@@ -74,12 +74,21 @@ class AnkiRatingCommitArchitectureTest {
             canonical.all { it in named })
     }
 
-    @Test fun `only the COMMITTED branch of the reducer requests the next card after a rating`() {
+    /**
+     * GATE 11E PART I §6 — the next-card barrier. The reducer no longer compares the outcome to
+     * `AnkiCommitOutcome.Committed` itself: it asks the one shared barrier, so this check now
+     * asserts both halves of the freeze — selection never advances, and the commit branch advances
+     * only through [com.studyagent.client.core.study.allowsNextCard].
+     */
+    @Test fun `only the barrier allows the reducer to request the next card after a rating`() {
         val reducer = main.single { it.name == "StudyReducer.kt" }.code()
         val select = reducer.substringAfter("private fun selectRating(").substringBefore("private fun resolveAnkiCommit(")
         assertTrue("selection must not request a next card", !select.contains("AnkiStudyEffect.Next"))
         val resolve = reducer.substringAfter("private fun resolveAnkiCommit(").substringBefore("// ------------------------------------------------------------------ helpers")
-        assertTrue(Regex("outcome is AnkiCommitOutcome\\.Committed\\)\\s*listOf\\(AnkiStudyEffect\\.Next").containsMatchIn(resolve))
+        assertTrue("the commit branch must gate on the shared barrier",
+            Regex("outcome\\.allowsNextCard\\(\\)\\)\\s*listOf\\(AnkiStudyEffect\\.Next").containsMatchIn(resolve))
+        assertTrue("the branch must never name a status of its own",
+            !Regex("AnkiCommitOutcome\\.Committed\\)\\s*listOf\\(AnkiStudyEffect\\.Next").containsMatchIn(resolve))
     }
 
     @Test fun `the reducer and the executor stay in their lanes`() {

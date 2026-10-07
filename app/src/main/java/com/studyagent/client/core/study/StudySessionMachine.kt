@@ -9,6 +9,7 @@ import com.studyagent.client.core.audio.StudyAudioDisconnectPolicy
 import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
 import com.studyagent.client.core.audio.StudyAudioRouteEvent
+import com.studyagent.client.core.anki.nextCardAllowed
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.diagnostics.DiagnosticCategory
 import com.studyagent.client.core.diagnostics.DiagnosticTimeline
@@ -200,19 +201,30 @@ class StudySessionMachine(
             for (effect in ankiWriteLane) {
                 val executor = ankiEffects ?: AnkiStudyEffectExecutor(
                     com.studyagent.client.core.anki.AnkiBackendRegistry(emptyList()))
-                try {
-                    executor.execute(effect) { progress -> dispatch(progress) }?.let(::dispatch)
+                val finalEvent = try {
+                    executor.execute(effect) { progress -> dispatch(progress) }
                 } catch (cancelled: kotlinx.coroutines.CancellationException) {
                     throw cancelled
                 } catch (error: Exception) {
                     // The executor classifies every outcome itself; this only keeps the lane alive.
                     AppLogger.w(tag, "ANKI_WRITE_LANE_ERROR ${error::class.java.simpleName}")
+                    null
                 }
                 // GATE 11B PART V — after every rating transaction, compare what the session
                 // projects with what the ledger durably says, and say so when they disagree.
+                //
+                // GATE 11E PART I §8 — this runs *before* the outcome event is dispatched: the
+                // outcome's diagnostic record (ANKI_COMMIT_*) copies the durable phase and recovery
+                // action out of this snapshot, and a snapshot published after the event would race
+                // the reducer and could attribute a phase from the previous attempt.
                 if (effect is AnkiStudyEffect.CommitRating || effect is AnkiStudyEffect.ReconcileCommit) {
-                    refreshCommitTruth(executor, effect)
+                    runCatching { refreshCommitTruth(executor, effect) }.onFailure {
+                        // Diagnostics must never break the write lane: a failed snapshot costs one
+                        // correlation field, losing the lane would cost every later transaction.
+                        AppLogger.w(tag, "ANKI_COMMIT_TRUTH_REFRESH_FAILED ${it::class.java.simpleName}")
+                    }
                 }
+                finalEvent?.let(::dispatch)
             }
         }
         // Observe external async sources and map them to events (never mutate directly).
@@ -320,7 +332,9 @@ class StudySessionMachine(
             SessionPhase.Idle -> StudyState.Idle
             SessionPhase.Starting -> StudyState.Loading("Starting session...")
             SessionPhase.WaitingForFirstCard -> StudyState.Loading(
-                if (machine.anki?.commit?.status == com.studyagent.client.core.anki.ReviewCommitStatus.COMMITTED)
+                // GATE 11E PART I §6 — the copy follows the shared next-card rule, so the screen
+                // can never promise "saved" for a status that does not allow progression.
+                if (machine.anki?.commit?.status?.let { nextCardAllowed(it) } == true)
                     "Rating saved. Loading the next card..." else "Waiting for first card..."
             )
             SessionPhase.SpeakingQuestion -> {
@@ -493,8 +507,9 @@ class StudySessionMachine(
         // by a COMMITTED commit, and a commit always belongs to the live turn.
         machine.anki?.let { local ->
             val commit = local.commit
-            if (commit != null && !local.restoredCommit &&
-                commit.status != com.studyagent.client.core.anki.ReviewCommitStatus.COMMITTED) {
+            // GATE 11E PART I §6 — only the status that allows next-card progression may leave a
+            // turn behind, and this invariant now reads the same rule the reducer gates on.
+            if (commit != null && !local.restoredCommit && !nextCardAllowed(commit.status)) {
                 if (local.turn == null) {
                     recordInvariantViolation("anki-advanced-without-commit", "turn released while commit is ${commit.status}")
                 } else if (commit.commitId.turnId != local.turn.turnId) {
@@ -1288,20 +1303,30 @@ class StudySessionMachine(
      * attempt count. Never card content, transcripts, HTML or file paths.
      */
     private fun commitMetadata(commit: AnkiRatingCommit): Map<String, String> = buildMap {
-        // Exactly the eight correlation keys the timeline keeps (MAX_METADATA_ENTRIES), most
-        // important first: turn id travels in the event's own turnId field, and the attempt phase
-        // travels in the REVIEW_COMMIT_* markers, so neither needs a key here.
+        // GATE 11E PART I §8 — the canonical transaction timeline, most important first. The turn
+        // id travels in every event's own `turnId` field, so it is not repeated as a key.
+        //   StudySessionId=session · ReviewCommitId=commit · BackendId=backend
+        //   ReviewCommitStatus=state · ReviewCommitPhase=phase · AttemptCount=attempt
+        //   SelectedRating=rating · CommittedRating=committed · RecoveryAction=action
+        //   GuaranteeLevel=guarantee
+        // Eleven keys fit inside DiagnosticTimeline.MAX_METADATA_ENTRIES, so none is silently
+        // truncated away; content (question/answer text, HTML, transcripts, AI feedback) never
+        // enters this map, and neither does a raw exception or provider message.
         put("commit", commitHash(commit.commitId))
         put("session", commit.commitId.studySessionId.take(12))
         put("backend", commit.commitId.backendId.stableId)
         put("guarantee", commit.guaranteeLevel?.name ?: "unfrozen")
         put("rating", commit.rating.name.lowercase())
-        put("committed",
-            if (commit.status == com.studyagent.client.core.anki.ReviewCommitStatus.COMMITTED)
-                commit.rating.name.lowercase() else "-")
+        put("committed", commit.committedRating?.name?.lowercase() ?: "-")
         // The stable failure token is folded into the state so the fixed key budget cannot drop it.
         put("state", commit.status.name + (commit.failureCategory?.let { "($it)" } ?: ""))
         put("attempt", commit.attempt.toString())
+        // Phase and recovery action are owned by the ledger and by the recovery policy, never
+        // re-derived here: this copies what the last source-of-truth snapshot observed for *this*
+        // commit id, and reports `no_attempt` / `not_applicable` before any durable row exists.
+        val truth = lastCommitTruth.value?.takeIf { it.commitId == commit.commitId.stableKey }
+        put("phase", truth?.attemptPhase ?: CommitTruthSnapshot.NO_ATTEMPT)
+        put("action", truth?.recoveryAction ?: CommitTruthSnapshot.NO_RECOVERY)
     }
 
     private fun commitHash(id: com.studyagent.client.core.anki.ReviewCommitId): String =

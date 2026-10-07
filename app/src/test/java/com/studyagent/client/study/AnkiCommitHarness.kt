@@ -30,6 +30,12 @@ class AnkiCommitHarness(
     private val faults: CommitFaultInjector = NoCommitFaults,
     /** Optional decorator around the fake (e.g. an ordered call recorder). Never changes semantics. */
     wrap: (FakeAnkiBackend) -> AnkiBackend = { it },
+    /**
+     * GATE 11E — other backends installed alongside the session's own. A registry that holds more
+     * than one backend is what makes "the transaction is not redirected by a preference change"
+     * observable: a preference-driven resolution could pick another backend, and must not.
+     */
+    val extraBackends: List<AnkiBackend> = emptyList(),
     /** GATE 11 checkpoint 4 — deterministic scheduler failure mode for the fake backend. */
     fakeMode: FakeCommitMode = FakeCommitMode.SUCCESS,
     /** LOCAL_DEDUP_ONLY makes the fake re-apply any repeated id that already had an effect. */
@@ -44,7 +50,8 @@ class AnkiCommitHarness(
     val backend: AnkiBackend = wrap(fake)
     var ledger = ReviewCommitLedger(store, clock)
         private set
-    var executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(backend)), ledger, clock, faults)
+    var executor = AnkiStudyEffectExecutor(
+        AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults)
         private set
 
     var state = SessionMachineState.initial()
@@ -53,7 +60,8 @@ class AnkiCommitHarness(
 
     fun restartLedger() {
         ledger = store.restart(clock)
-        executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(backend)), ledger, clock, faults)
+        executor = AnkiStudyEffectExecutor(
+            AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults)
     }
 
     /**
