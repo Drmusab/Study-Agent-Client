@@ -12,6 +12,9 @@ package com.studyagent.client.core.anki
  * ```
  */
 sealed interface ReviewCommitRecoveryAction {
+    /** Stable, content-free name for diagnostics (`GATE 11B PART V`). */
+    val label: String get() = this::class.simpleName ?: "unknown"
+
     /** Durable success. Resume the study flow; never replay the mutation. */
     data object ResumeCommitted : ReviewCommitRecoveryAction
 
@@ -86,12 +89,32 @@ class ReviewCommitRecoveryPolicy {
             is ReconcileCommitResult.Unavailable -> ReviewCommitRecoveryAction.RemainBlocked
         }
         if (proof != null) return ReviewCommitRecoveryAction.IntegrityFailure("proof_for_${record.status.name.lowercase()}")
-        return when (record.status) {
-            ReviewCommitStatus.PREPARED -> ReviewCommitRecoveryAction.OfferRetry
-            ReviewCommitStatus.SUBMITTING -> ReviewCommitRecoveryAction.Reconcile
-            ReviewCommitStatus.RETRY_ALLOWED -> ReviewCommitRecoveryAction.OfferRetry
-            ReviewCommitStatus.AMBIGUOUS -> ReviewCommitRecoveryAction.Reconcile
-            ReviewCommitStatus.COMMITTED -> ReviewCommitRecoveryAction.ResumeCommitted
-        }
+        return classifyStatus(record.status)
+    }
+
+    /**
+     * The normative recovery table as a total function of the durable status alone
+     * (GATE 11B §45 / PART IV).
+     *
+     * Safety never reads [ReviewCommitPhase]: `SUBMITTING` means the mutation boundary was entered,
+     * `PREPARED` means it provably was not. Callers that hold only a status — diagnostics, the
+     * study projection, the recovery-matrix tests — use this instead of re-deriving the table, so
+     * there is exactly one recovery policy in the codebase (brief PART I PHASE 12: pure and deterministic). It is pure: same status,
+     * same decision, no clock, no I/O.
+     *
+     * | Durable status | Action | Why |
+     * |---|---|---|
+     * | `PREPARED` | `OfferRetry` | provably un-entered |
+     * | `SUBMITTING` | `Reconcile` | boundary entered; the outcome is unknown until proven |
+     * | `RETRY_ALLOWED` | `OfferRetry` | proven not applied |
+     * | `AMBIGUOUS` | `Reconcile` | unknown; read-only evidence may resolve it |
+     * | `COMMITTED` | `ResumeCommitted` | terminal; never replayed |
+     */
+    fun classifyStatus(status: ReviewCommitStatus): ReviewCommitRecoveryAction = when (status) {
+        ReviewCommitStatus.PREPARED -> ReviewCommitRecoveryAction.OfferRetry
+        ReviewCommitStatus.SUBMITTING -> ReviewCommitRecoveryAction.Reconcile
+        ReviewCommitStatus.RETRY_ALLOWED -> ReviewCommitRecoveryAction.OfferRetry
+        ReviewCommitStatus.AMBIGUOUS -> ReviewCommitRecoveryAction.Reconcile
+        ReviewCommitStatus.COMMITTED -> ReviewCommitRecoveryAction.ResumeCommitted
     }
 }

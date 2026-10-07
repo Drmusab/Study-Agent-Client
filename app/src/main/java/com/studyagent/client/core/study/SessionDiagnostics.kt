@@ -45,10 +45,19 @@ data class SessionDiagnosticsSnapshot(
     val inFlightRatings: Int = 0,
     /** Server error currently held by the machine, if any (message is sanitized by the caller). */
     val errorCode: String? = null,
-    val errorRecoverable: Boolean? = null
+    val errorRecoverable: Boolean? = null,
+    /**
+     * GATE 11B PART V — the three truth domains side by side (interaction, transaction, scheduler),
+     * so a divergence between the study projection and the durable ledger is visible in an export
+     * instead of being inferred from a screenshot. Null when no Anki transaction has been observed.
+     */
+    val commitTruth: CommitTruthSnapshot? = null
 )
 
-fun SessionMachineState.toDiagnostics(nowMs: Long = System.currentTimeMillis()): SessionDiagnosticsSnapshot {
+fun SessionMachineState.toDiagnostics(
+    nowMs: Long = System.currentTimeMillis(),
+    commitTruth: CommitTruthSnapshot? = null
+): SessionDiagnosticsSnapshot {
     val pending = pendingAction
     return SessionDiagnosticsSnapshot(
         sessionId = session?.sessionId,
@@ -78,7 +87,8 @@ fun SessionMachineState.toDiagnostics(nowMs: Long = System.currentTimeMillis()):
         inFlightAnswers = ledger.entries.values.count { it.answerState == SubmissionLedger.SubmissionState.IN_FLIGHT },
         inFlightRatings = ledger.entries.values.count { it.ratingState == SubmissionLedger.SubmissionState.IN_FLIGHT },
         errorCode = error?.problem?.name,
-        errorRecoverable = error?.recoverable
+        errorRecoverable = error?.recoverable,
+        commitTruth = commitTruth
     )
 }
 

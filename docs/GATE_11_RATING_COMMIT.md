@@ -1242,3 +1242,144 @@ CI evidence — see `tools/jvm-harness/README.md`.
 - Real AnkiDroid rating mutation on a disposable collection (out of scope here by design).
 - Gradle/CI evidence: `./gradlew --stop / clean / testDebugUnitTest / lint / assembleDebug /
   assembleRelease` on a machine that can run it.
+
+---
+
+# XVI. GATE 11B completion — source-of-truth enforcement, recovery matrix & diagnostics
+
+Branch `arena/240a6892-study-agent-client`, from `master` @ `2d27d07` (PR #36). This part records
+the GATE 11B brief (commit orchestration, StudySession rating flow, explicit source-of-truth
+mapping, recovery policy, startup/session recovery, fake-backend transaction tests) against what
+the tree already contained after PART XV, and what this session added to close the brief's
+PART I–IX. PART XV's canonical vocabulary is unchanged; nothing here renames anything.
+
+## XVI.0 Verdict
+
+**GATE 11B: PASS in the harness evidence class. Gradle/CI evidence still owed.**
+
+- All 19 mandated brief tests exist under their mandated names and pass (8 source-of-truth +
+  11 transaction), plus a 13-test recovery-matrix/diagnostics class.
+- Full suite: `RESULT classes=120 tests=1359 passed=1359 failed=0 ignored=0` (baseline 1326 + 33
+  new), `main errors: 0 (files: 197)`, `test errors: 0 (files: 140)`.
+- No real AnkiDroid mutation was added, touched, or exercised by this session (brief PART VI /
+  brief INV-11B-25). The pre-existing committer path (`AnkiDroidRatingCommitter` →
+  `AnkiDroidRatingGateway.submitAnswer` → `AnkiDroidProviderClient.safeUpdate` →
+  `contentResolver.update`) predates this session, is still unverified on a device, and remains
+  out of scope by design.
+- `./gradlew` cannot run in this sandbox (no JDK on `PATH`, Maven mirrors blocked), so PART VII is
+  owed on a machine that can run it — same caveat as PART XI/XV.
+
+## XVI.1 Phase-1 audit: what already existed (not duplicated)
+
+| Brief phase | Pre-existing implementation | File |
+|---|---|---|
+| PHASE 2 coordinator | `ReviewCommitCoordinator` (`commit`/`retry`/`recover`), implemented by `AnkiStudyEffectExecutor` | `core/anki/ReviewCommitCoordinator.kt`, `core/study/AnkiStudyEffectExecutor.kt` |
+| PHASE 3 new-commit order | prepare → prepareCommit → claim → boundary → response → complete | `AnkiStudyEffectExecutor.commitTransaction` |
+| PHASE 4 existing-record table | COMMITTED replay / SUBMITTING conflict / RETRY_ALLOWED→retry / AMBIGUOUS→recover | same |
+| PHASE 5 conflict detection | payload comparison on `prepare`, `CommitConflict` before dispatch | `core/anki/ReviewCommitLedger.kt` |
+| PHASE 6–11 machine flow | `SelectRating` → `CommitRating` effect → `Submitting` → outcome; first rating wins; all inputs converge on `UserRateCard`/`SelectRating` | `core/study/StudyReducer.kt`, `SpokenCommandRouter.kt` |
+| PHASE 12 policy | `ReviewCommitRecoveryPolicy.classify` (status-only table + AMBIGUOUS proof rules) | `core/anki/ReviewCommitRecoveryPolicy.kt` |
+| PHASE 13 startup recovery | pre-`beginReview` scan (`recoveryBlocker`) → `RecoveryBlocked` → machine projection, no scheduler query first | `AnkiStudyEffectExecutor.begin`, `StudyReducer` |
+| PHASE 14 fake reconciliation | `prepareCommit` baseline + `reconcileCommit` with `reconcileCalls`/`reconcileResults` counters | `anki/fake/FakeAnkiBackend.kt` |
+
+## XVI.2 What this session added (7 main files + 4 new files)
+
+1. **PART IV recovery matrix as a total function.** `ReviewCommitRecoveryPolicy.classifyStatus`
+   is the §45 table over the durable status alone; `classify` delegates to it. One policy, one
+   spelling — there is no second function with the same meaning.
+2. **PART V source-of-truth diagnostics.** New `core/study/CommitTruthDiagnostics.kt`:
+   `CommitTruthSnapshot` (study state, study projection, ledger state, attempt phase, scheduler
+   availability, recovery action), `CommitProjectionMismatch` (the recorded durable override),
+   pure `divergence` / `detectMismatch` / `newlyRecordedMismatch` helpers. The machine emits
+   `COMMIT_STATE_PROJECTION_MISMATCH` exactly on the reducer's introduction edge (log + timeline
+   + `commitProjectionMismatchCount`), and `DiagnosticsRepository` renders the snapshot rows only
+   when a transaction was actually observed.
+3. **Durable-override recording in the reducer.** Adopting ledger truth that contradicts the
+   current projection records `AnkiStudyInteraction.projectionMismatch` (restore scan, ledger
+   replay, reconciliation); a new turn or a resolved recovery retires it. Committed-source
+   constants (`backend_confirmed` / `ledger_replay` / `ledger_tombstone`) replace string literals
+   so "answered from the ledger" is checkable, not greppable.
+4. **Read-only diagnostics probes on the executor.** `durableRecord` and
+   `schedulerAvailabilityOf` let diagnostics *read* transaction truth and *observe* scheduler
+   truth; they cannot decide or write anything.
+5. **`recover()` distinguishes unknown from absent.** A corrupt/unreadable ledger yields
+   `Indeterminate`, never `NoTransaction` (PART IV, last row).
+6. **33 tests.** `Gate11bSourceOfTruthTest` (8, mandated names), `Gate11bTransactionTest` (11,
+   mandated names), `Gate11bRecoveryMatrixTest` (13: PART IV rows, policy purity, PART V
+   diagnostics). All run reducer + real executor + durable ledger + fake backend; none asserts a
+   UI field where a durable fact exists.
+
+## XVI.3 Source-of-truth ownership (normative mapping, with code locations)
+
+| Question | Owner | Projection / consumer | Location |
+|---|---|---|---|
+| What is the user doing? | `StudySessionMachine` / `StudyReducer` | UI, voice, effects | `core/study/StudySessionMachine.kt`, `StudyReducer.kt` |
+| Did Study-Agent durably commit this rating? | `ReviewCommitLedger` | coordinator, machine projection, recovery | `core/anki/ReviewCommitLedger.kt` |
+| What is the actual Anki schedule? | `AnkiBackend` / Anki | machine (via effect results) | `core/anki/AnkiBackend.kt` |
+| What should the screen show? | projection only | `RatingCommitUiState`, `RatingCommitRecoveryUi` | `core/study/RatingCommitUiState.kt`, `RatingCommitRecoveryUi.kt` |
+| What rating is suggested? | AI evaluation (advisory) | UI hint | `core/models/Evaluation.kt` |
+| What rating was selected / committed? | selection: machine turn; commitment: ledger record | coordinator, diagnostics | `AnkiRatingCommit`, `ReviewCommitRecord` |
+
+## XVI.4 Source-of-truth audit (brief PART IX)
+
+| Domain | Authority | Projection/Consumer | Verified |
+|---|---|---|---|
+| Interaction | StudySessionMachine | UI | PASS |
+| Commit transaction | ReviewCommitLedger | StudySessionMachine | PASS |
+| Scheduling | AnkiBackend | StudySessionMachine | PASS |
+| Presentation | Renderer/UI | user | PASS |
+| AI suggestion | Evaluation result | StudySessionMachine/UI | PASS |
+
+```text
+Can stale StudySession state override Ledger?                          NO
+Can Ledger calculate the next Anki card?                               NO
+Can UI trigger backend mutation directly?                              NO
+Can an AI suggestion become committed without RatingSelected?          NO
+Can scheduler change alone resolve an ambiguous ReviewCommitId?        NO
+```
+
+Evidence per question: (1) tests `stale_study_projection_is_overridden_by_committed_ledger`,
+`stale_submitting_projection_is_overridden_by_ambiguous_ledger`, reducer adoption code;
+(2)(5) `ledger_commit_does_not_predict_next_card`,
+`scheduler_change_does_not_mark_commit_committed`,
+`committed_ledger_allows_next_card_query_but_does_not_choose_card`; (3)
+`ui_state_cannot_create_commit_without_reducer_event`, reducer-only `CommitRating` effect
+creation; (4) `selected_rating_does_not_equal_committed_rating`, `SpokenCommandRouter` converging
+on the shared rating event.
+
+## XVI.5 Brief PART II invariants (brief numbering — see note below)
+
+| # | Invariant | Status | Evidence |
+|---|---|---|---|
+| 01–03 | machine / ledger / backend own their domains | PASS | §XVI.3 mapping; tests 1–8 |
+| 04 | UI owns no truth | PASS | test 4 (`ui_state_cannot_create_commit_without_reducer_event`) |
+| 05 | AI suggestion ≠ selected ≠ committed | PASS | test 5 |
+| 06–07 | study commit state is a projection; ledger wins on recovery | PASS | tests 1, 2; `projectionMismatch` + `LEDGER_WINS` |
+| 08–10 | ledger is not a scheduler; scheduler truth not inferred | PASS | tests 6, 7; `schedulerAvailabilityOf` observes the backend |
+| 11 | coordinator is the only transaction path | PASS | `ReviewCommitCoordinator`; test 12 exercises `retry()` directly |
+| 12 | reducer pure | PASS | `StudyReducer` object; diagnostics helpers pure; architecture tests |
+| 13–14 | one commit id per turn; one rating event path | PASS | tests 9, 10; `ReviewCommitId(backend, session, turn)` |
+| 15–17 | SUBMITTING/AMBIGUOUS refuse; only RETRY_ALLOWED retries | PASS | tests 9, 11, 12, 16; `claim`/`retry` guards |
+| 18 | retry preserves identity | PASS | tests 11, 18 |
+| 19–20 | COMMITTED durable before progression; `nextCard()` only after | PASS | tests 8, 13, 14, 19 |
+| 21–22 | restored COMMITTED/AMBIGUOUS never replay | PASS | tests 15, 16 |
+| 23 | recovery policy pure and deterministic | PASS | `classifyStatus` + matrix purity test |
+| 24 | reconciliation read-only | PASS | tests 17, 18 (`mutationAttemptCount`/`deliveryCount` frozen) |
+| 25 | no real AnkiDroid mutation in GATE 11B | PASS | diff touches no backend/gateway/provider file |
+
+Note on numbering: this table uses the *brief's* PART II numbering. The tree's pre-existing
+`INV-11B-NN` citations refer to the canonical 11B spec (§§) with different meanings, so this
+session's code cites brief items as "brief PART …" in words and never mints colliding `INV-11B-NN`
+references.
+
+## XVI.6 Still owed
+
+- Gradle/CI evidence: `./gradlew --stop / clean / testDebugUnitTest / lint / assembleDebug /
+  assembleRelease` (+ `connectedDebugAndroidTest` where appropriate) on a machine that can run it.
+- Real AnkiDroid mutation verification on a disposable collection (out of scope for 11B by design;
+  the pre-existing committer path is still device-unverified).
+- `tools/jvm-harness` continues to exclude Compose UI, instrumented tests, lint and APKs; the
+  androidTest/debug sources affected by this session were re-checked by grep (no positional
+  construction of changed types) but not compiled here.
+
+**GATE 11B LOCKED** (implementation; CI evidence owed).

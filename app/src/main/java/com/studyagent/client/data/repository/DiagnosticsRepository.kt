@@ -543,6 +543,20 @@ class DefaultDiagnosticsRepository(
      * - backend id, gateway state, capability matrix
      * - API support vs Study-Agent implementation status (§64/§65/§121)
      */
+    /**
+     * GATE 11B PART V — the source-of-truth rows.
+     *
+     * They are rendered **only** when a commit transaction has actually been observed, and every
+     * value comes from its own owner: the study state from the machine, the commit state from the
+     * durable ledger record, the scheduler availability from the backend. Nothing here is derived
+     * from the UI, and a projection that disagrees with the ledger says so instead of rendering the
+     * friendlier of the two (brief PART II: UI owns no business truth).
+     */
+    private fun commitSourceOfTruthRows(): List<Pair<String, String>> {
+        val truth = sessionDiagnostics?.invoke()?.commitTruth ?: return emptyList()
+        return listOf("Commit source of truth" to "observed") + truth.rows()
+    }
+
     private fun commitLedgerRows(): List<Pair<String, String>> = reviewCommitLedger?.diagnosticsSnapshot()?.let { data ->
         listOf(
             "Ledger health" to data.health,
@@ -563,7 +577,7 @@ class DefaultDiagnosticsRepository(
             "Reconciliation unresolved" to data.reconciliationUnresolvedTotal.toString(),
             "Exactly-once claim" to "Not claimed"
         )
-    } ?: emptyList()
+    }?.let { it + commitSourceOfTruthRows() } ?: commitSourceOfTruthRows()
 
     override fun ankiDroidDiagnosticsRows(): List<Pair<String, String>> {
         val repository = ankiDroidHealthRepository

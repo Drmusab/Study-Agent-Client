@@ -208,6 +208,11 @@ class StudySessionMachine(
                     // The executor classifies every outcome itself; this only keeps the lane alive.
                     AppLogger.w(tag, "ANKI_WRITE_LANE_ERROR ${error::class.java.simpleName}")
                 }
+                // GATE 11B PART V — after every rating transaction, compare what the session
+                // projects with what the ledger durably says, and say so when they disagree.
+                if (effect is AnkiStudyEffect.CommitRating || effect is AnkiStudyEffect.ReconcileCommit) {
+                    refreshCommitTruth(executor, effect)
+                }
             }
         }
         // Observe external async sources and map them to events (never mutate directly).
@@ -225,6 +230,64 @@ class StudySessionMachine(
         observeAudioRoute()
     }
 
+    /**
+     * GATE 11B PART V — the last observed source-of-truth snapshot: study state (interaction),
+     * durable commit state (transaction) and backend availability (scheduler), side by side.
+     *
+     * It is a *diagnostic*, not an authority: the fields come from their own owners, and reading it
+     * never decides anything. [commitTruthSnapshot] is filled after every rating transaction.
+     */
+    private val lastCommitTruth = MutableStateFlow<CommitTruthSnapshot?>(null)
+
+    /** Observed source-of-truth snapshot; null until a rating transaction has been observed. */
+    fun commitTruthSnapshot(): CommitTruthSnapshot? = lastCommitTruth.value
+
+    /** Divergences recorded as `COMMIT_STATE_PROJECTION_MISMATCH`. Never silently ignored. */
+    private val commitProjectionMismatches = AtomicLong(0)
+    val commitProjectionMismatchCount: Long get() = commitProjectionMismatches.get()
+
+    /**
+     * Fills [lastCommitTruth] from each domain's own owner after a rating transaction runs. Kept
+     * separate from divergence *reporting*: at this instant the reducer has not processed the
+     * outcome event yet, so a live disagreement here is reducer lag, not a divergence.
+     */
+    private suspend fun refreshCommitTruth(executor: AnkiStudyEffectExecutor, effect: AnkiStudyEffect) {
+        val commitId = when (effect) {
+            is AnkiStudyEffect.CommitRating -> effect.request.commitId
+            is AnkiStudyEffect.ReconcileCommit -> effect.commitId
+            else -> return
+        }
+        val record = runCatching { executor.durableRecord(commitId) }.getOrNull()
+        lastCommitTruth.value = CommitTruthDiagnostics.snapshot(
+            machine = _machineState.value,
+            record = record,
+            backendSchedulerAvailability = executor.schedulerAvailabilityOf(commitId.backendId)
+        )
+    }
+
+    /**
+     * Reports a divergence the reducer recorded on this transition — exactly once, on introduction.
+     * The reducer is the component that adopts durable truth into the projection, so it is the only
+     * component that can observe the adoption contradicting the previous projection.
+     */
+    private fun reportCommitProjectionMismatch(before: SessionMachineState, after: SessionMachineState) {
+        val mismatch = CommitTruthDiagnostics.newlyRecordedMismatch(before, after) ?: return
+        commitProjectionMismatches.incrementAndGet()
+        AppLogger.w(
+            tag,
+            "COMMIT_STATE_PROJECTION_MISMATCH projection=${mismatch.studyProjection} " +
+                "ledger=${mismatch.ledgerState} source=${mismatch.source} " +
+                "resolution=${CommitProjectionMismatch.LEDGER_WINS}"
+        )
+        timeline?.record(
+            com.studyagent.client.core.diagnostics.DiagnosticCategory.SESSION,
+            CommitTruthDiagnostics.EVENT_COMMIT_STATE_PROJECTION_MISMATCH,
+            sessionEpoch = after.epoch,
+            turnId = mismatch.turnId,
+            metadata = CommitTruthDiagnostics.metadata(mismatch)
+        )
+    }
+
     fun dispatch(event: StudyEvent) {
         eventsDispatched.incrementAndGet()
         val ok = eventChannel.trySend(event)
@@ -238,6 +301,7 @@ class StudySessionMachine(
         val transition = StudyReducer.reduce(before, event, clock())
         _machineState.value = transition.newState
         derivePublicFlows(transition.newState)
+        reportCommitProjectionMismatch(before, transition.newState)
         eventsProcessed.incrementAndGet()
         recordEventDiagnostics(event, before, transition)
         if (transition.accepted) {
@@ -1422,7 +1486,8 @@ class StudySessionMachine(
     }
 
     /** Sanitized session snapshot for Diagnostics (§59). */
-    fun diagnosticsSnapshot(): SessionDiagnosticsSnapshot = _machineState.value.toDiagnostics(clock())
+    fun diagnosticsSnapshot(): SessionDiagnosticsSnapshot =
+        _machineState.value.toDiagnostics(clock(), commitTruth = lastCommitTruth.value)
 
     companion object {
         /**
