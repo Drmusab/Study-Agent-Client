@@ -61,8 +61,12 @@ sealed interface CommitPreparation {
  * AMBIGUOUS commit; every other answer leaves it AMBIGUOUS (never fabricated certainty).
  */
 sealed interface ReconcileCommitResult {
-    /** Evidence shows exactly one answer attributable to this commit's mutation window. */
-    data class Applied(val detail: String) : ReconcileCommitResult
+    /**
+     * Evidence shows exactly one answer attributable to this commit's mutation window.
+     * [receipt] carries a backend-issued receipt when the backend provides one; it stays `null`
+     * (never fabricated) for backends with no public receipt concept.
+     */
+    data class Applied(val detail: String, val receipt: CommitReceipt? = null) : ReconcileCommitResult
     /** Evidence shows the rating was not applied, so the same logical commit may be submitted again. */
     data class NotApplied(val detail: String) : ReconcileCommitResult
     /** Evidence exists but cannot be attributed (external activity, missing baseline, ...). */

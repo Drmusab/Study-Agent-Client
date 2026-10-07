@@ -465,13 +465,21 @@ class AnkiRatingCommitFlowTest {
         h.send(StudyEvent.UserEndRequested("end"))
         h.drain() // EndReview releases the backend handle (never a mutation)
         assertEquals(1, h.fake.endReviewCalls)
+        val nextCardsBefore = h.fake.nextCardCount
         h.restartLedger() // a new process only has the durable record
         h.send(AnkiStudyEvent.Start(AnkiStudyRequest("study-2", AnkiBackendMode.ANKIDROID_LOCAL, AnkiCommitHarness.DECK)))
         h.drain()
         assertEquals(SessionPhase.ReconciliationRequired, h.state.phase)
         assertTrue(RatingCommitRecoveryUi.from(h.state)!!.commitUiState is RatingCommitUiState.VerificationRequired)
         assertFalse(RatingCommitRecoveryUi.from(h.state)!!.ratingControlsEnabled)
-        assertNull("do not start with nextCard()", h.turn)
+        // GATE 11D §29 — the unresolved turn is restored by identity, not re-queried: the record's
+        // ReviewTurnId is re-attached, and NO nextCard() runs while the mutation is unresolved.
+        val record = h.store.durableRecords().single()
+        assertNotNull("do not re-query the card; restore the interrupted turn by identity", h.turn)
+        assertEquals("the restored turn is the original one", record.turnId, h.turn!!.turnId)
+        assertTrue("the restore path is diagnostic, never claimed as fresh delivery",
+            h.turn!!.scheduledCard.degradations.contains("restored_from_ledger"))
+        assertEquals("no nextCard() query", nextCardsBefore, h.fake.nextCardCount)
         assertEquals("old commit is never re-sent", 1, h.fake.physicalCommitCalls)
     }
 

@@ -258,10 +258,13 @@ class StudySessionMachine(
             else -> return
         }
         val record = runCatching { executor.durableRecord(commitId) }.getOrNull()
+        val reconciliation = runCatching { executor.reconciliationDiagnostics(commitId) }.getOrNull()
         lastCommitTruth.value = CommitTruthDiagnostics.snapshot(
             machine = _machineState.value,
             record = record,
-            backendSchedulerAvailability = executor.schedulerAvailabilityOf(commitId.backendId)
+            backendSchedulerAvailability = executor.schedulerAvailabilityOf(commitId.backendId),
+            reconciliation = reconciliation?.resultToken,
+            reconciliationLatencyMs = reconciliation?.latencyMs
         )
     }
 

@@ -210,12 +210,17 @@ object StudyReducer {
                     unresolved -> SessionPhase.ReconciliationRequired
                     else -> SessionPhase.RatingCommitFailed
                 }
+                // GATE 11D §27-29 — the interrupted review turn stays the current one: its
+                // presentation identity is re-attached from the durable record (same ReviewTurnId,
+                // same ReviewCommitId) without any scheduler query (INV-11D-17).
+                val restoredTurn = restoredTurnFor(record)
                 moved(state.copy(
                     phase = phase,
                     session = StudySessionSnapshot(local.request.studySessionId, "Anki review", startedAtEpochMs = now),
                     anki = local.copy(commit = AnkiRatingCommit(record.toRequest(), record.status,
                         attempt = record.attemptCount.coerceAtLeast(1),
                         failureCategory = record.failure?.category),
+                        turn = restoredTurn,
                         restoredCommit = true,
                         blockedByPriorCommit = record.sessionId != local.request.studySessionId,
                         // PART V: the durable scan overrides whatever this session believed. A
@@ -229,11 +234,11 @@ object StudyReducer {
                         unresolved -> SessionProblem.ANKI_RATING_UNCONFIRMED
                         else -> SessionProblem.ANKI_RATING_NOT_SAVED
                     }, when {
-                        pendingWrite -> "The rating transaction has not been durably resolved. " +
-                            "Check the record again or end this session; do not re-submit the rating."
+                        pendingWrite -> "The rating may already have been saved in Anki. " +
+                            "Study-Agent will not submit it again until the review state can be verified."
                         unresolved -> "The rating may already have been saved in Anki. " +
                             "Study-Agent will not submit it again until the review state can be verified."
-                        else -> "The interrupted review cannot be resumed safely. End this session to start a new review."
+                        else -> "The rating was not saved. Nothing was changed in Anki."
                     },
                         true, now)
                 )) // Critically: no Begin/Next/Commit effect while recovery is unresolved.
@@ -349,21 +354,32 @@ object StudyReducer {
                 resolveAnkiCommit(state, local, event, event.epoch, event.commitId, event.outcome, reconciliation = true, now = now)
             is AnkiStudyEvent.RetryRatingCommit -> {
                 val commit = local.commit
-                when {
-                    event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ->
-                        reject("stale-anki-retry")
-                    state.phase != SessionPhase.RatingCommitFailed ||
-                        commit.status != ReviewCommitStatus.RETRY_ALLOWED ->
-                        reject("illegal-phase-for-anki-retry")
-                    // Explicit and only when proven safe: never after AMBIGUOUS, never automatic.
-                    // GATE 11B §22: the retry returns to PREPARED and repeats the whole sequence.
-                    local.restoredCommit || local.turn == null -> reject("anki-retry-not-safe")
-                    else -> moved(state.copy(
-                        phase = SessionPhase.SubmittingRating,
-                        anki = local.copy(commit = commit.copy(status = ReviewCommitStatus.PREPARED,
-                            attempt = commit.attempt + 1, failureCategory = null)),
-                        error = null
-                    ), listOf(AnkiStudyEffect.CommitRating(state.epoch, commit.request, retry = true)))
+                if (event.epoch != state.epoch || commit == null || commit.commitId != event.commitId) {
+                    reject("stale-anki-retry")
+                } else {
+                    val current = commit
+                    when {
+                        // GATE 11D §24 / INV-11D-06 — only proven-safe durable states may expose
+                        // a mutation retry: RETRY_ALLOWED (proven not applied) and a *restored*
+                        // PREPARED (provably un-entered — the durable status alone says so).
+                        // SUBMITTING and AMBIGUOUS never offer a retry, restored or not; the
+                        // retry is always explicit user intent, never automatic.
+                        state.phase != SessionPhase.RatingCommitFailed ||
+                            !(current.status == ReviewCommitStatus.RETRY_ALLOWED ||
+                                (local.restoredCommit && current.status == ReviewCommitStatus.PREPARED)) ->
+                            reject("illegal-phase-for-anki-retry")
+                        // INV-11D-07 / GATE 11D §27-28: the retry must target the *same* review
+                        // turn (the commit id embeds the turn id). A live turn or a turn
+                        // re-attached from the durable record is fine; no matching turn is not.
+                        local.turn == null || local.turn.turnId != current.commitId.turnId ->
+                            reject("anki-retry-not-safe")
+                        else -> moved(state.copy(
+                            phase = SessionPhase.SubmittingRating,
+                            anki = local.copy(commit = current.copy(status = ReviewCommitStatus.PREPARED,
+                                attempt = current.attempt + 1, failureCategory = null)),
+                            error = null
+                        ), listOf(AnkiStudyEffect.CommitRating(state.epoch, current.request, retry = true)))
+                    }
                 }
             }
             is AnkiStudyEvent.ReconcileRatingCommit -> {
@@ -490,6 +506,41 @@ object StudyReducer {
      * to the ledger, so a stale result updates the ledger but never the current turn. COMMITTED is
      * the only path to the next card, taken exactly once; a duplicate COMMITTED is rejected.
      */
+    /**
+     * GATE 11D §27-29 — re-attach the presentation identity of the interrupted review turn from
+     * the durable record, without any scheduler query (INV-11D-17). The turn id is the one the
+     * commit was made under (INV-11D-07), which is what lets a retry reuse the same
+     * ReviewCommitId end to end.
+     *
+     * The content is deliberately honest: scheduler metadata the ledger does not persist (rating
+     * options, position, scheduling labels) is marked [AnkiRatingOptions.Unmapped] instead of
+     * being fabricated, and the degradations token records the provenance. Nothing about this
+     * turn is a scheduler observation — the backend re-validates card, queue and state before any
+     * mutation a retry may dispatch.
+     *
+     * `null` when the durable record cannot carry a deck identity (nothing may be guessed) or
+     * when the record is COMMITTED (there is no interrupted turn to restore).
+     */
+    private fun restoredTurnFor(record: ReviewCommitRecord): AnkiReviewTurn? {
+        if (record.status == ReviewCommitStatus.COMMITTED) return null
+        val deckRef = record.deckRef ?: return null
+        return AnkiReviewTurn(
+            turnId = record.turnId,
+            studySessionId = record.sessionId,
+            content = AnkiReviewTurnContent.Scheduled(
+                AnkiScheduledCard(
+                    ref = record.card,
+                    noteRef = record.card.noteId?.let {
+                        AnkiNoteRef(record.backendId, it, record.card.collectionKey)
+                    },
+                    deckRef = deckRef,
+                    ratingOptions = AnkiRatingOptions.Unmapped(0),
+                    degradations = listOf("restored_from_ledger")
+                )
+            )
+        )
+    }
+
     private fun resolveAnkiCommit(
         state: SessionMachineState,
         local: AnkiStudyInteraction,
@@ -525,22 +576,54 @@ object StudyReducer {
             // A process cannot resurrect an AnkiDroid turn handle. Never create a fresh turn or
             // retry the old rating before resolving the durable transaction. Once resolved, begin
             // a *read-only* new scheduler session; never reissue the old CommitRating effect.
-            if (!reconciliation || !commit.reconciling || state.phase !in setOf(
-                    SessionPhase.ReconciliationRequired, SessionPhase.CommitPersistenceFailure)) {
-                return Transition.reject(state, event, "unrequested-anki-recovery")
-            }
-            return when (outcome) {
-                is AnkiCommitOutcome.Committed -> movedRecovery(state, event, local, now)
-                is AnkiCommitOutcome.Failed -> if (local.blockedByPriorCommit) movedRecovery(state, event, local, now)
-                    else Transition(state.copy(phase = SessionPhase.RatingCommitFailed,
-                        anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.RETRY_ALLOWED,
+            if (reconciliation) {
+                if (!commit.reconciling || state.phase !in setOf(
+                        SessionPhase.ReconciliationRequired, SessionPhase.CommitPersistenceFailure)) {
+                    return Transition.reject(state, event, "unrequested-anki-recovery")
+                }
+                return when (outcome) {
+                    is AnkiCommitOutcome.Committed -> movedRecovery(state, event, local, now)
+                    is AnkiCommitOutcome.Failed -> if (local.blockedByPriorCommit) movedRecovery(state, event, local, now)
+                        else Transition(state.copy(phase = SessionPhase.RatingCommitFailed,
+                            anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.RETRY_ALLOWED,
+                                reconciling = false))), emptyList())
+                    is AnkiCommitOutcome.Ambiguous -> Transition(state.copy(phase = SessionPhase.ReconciliationRequired,
+                        anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS,
                             reconciling = false))), emptyList())
-                is AnkiCommitOutcome.Ambiguous -> Transition(state.copy(phase = SessionPhase.ReconciliationRequired,
-                    anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS,
-                        reconciling = false))), emptyList())
-                is AnkiCommitOutcome.PersistenceFailure -> Transition(state.copy(phase = SessionPhase.CommitPersistenceFailure,
-                    anki = owner.copy(commit = commit.copy(reconciling = false))), emptyList())
+                    is AnkiCommitOutcome.PersistenceFailure -> Transition(state.copy(phase = SessionPhase.CommitPersistenceFailure,
+                        anki = owner.copy(commit = commit.copy(reconciling = false))), emptyList())
+                }
             }
+            // GATE 11D §27/§28 — an explicit user retry of a provably safe restored transaction
+            // (restored PREPARED or RETRY_ALLOWED, same commit id) was dispatched from
+            // SubmittingRating; accept its durable outcome. Anything else arriving for a
+            // restored commit is unrequested and rejected.
+            if (state.phase == SessionPhase.SubmittingRating && commit.status == ReviewCommitStatus.PREPARED) {
+                return when (outcome) {
+                    is AnkiCommitOutcome.Committed -> movedRecovery(state, event, local, now)
+                    is AnkiCommitOutcome.Failed -> Transition(state.copy(
+                        phase = SessionPhase.RatingCommitFailed,
+                        anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.RETRY_ALLOWED,
+                            reconciling = false, failureCategory = outcome.category)),
+                        error = SessionProblemHolder(SessionProblem.ANKI_RATING_NOT_SAVED,
+                            "Anki did not save this rating. Retry the same rating or end the session.",
+                            true, now)
+                    ), emptyList())
+                    is AnkiCommitOutcome.Ambiguous -> Transition(state.copy(
+                        phase = SessionPhase.ReconciliationRequired,
+                        anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS,
+                            reconciling = false, failureCategory = outcome.category)),
+                        error = SessionProblemHolder(SessionProblem.ANKI_RATING_UNCONFIRMED,
+                            "The rating may already have been saved in Anki. Study-Agent will not submit it " +
+                                "again until the review state can be verified.", true, now)
+                    ), emptyList())
+                    is AnkiCommitOutcome.PersistenceFailure -> Transition(state.copy(
+                        phase = SessionPhase.CommitPersistenceFailure,
+                        anki = owner.copy(commit = commit.copy(reconciling = false, failureCategory = outcome.category))
+                    ), emptyList())
+                }
+            }
+            return Transition.reject(state, event, "unrequested-anki-recovery")
         }
         if (session == null || turn == null || turn.turnId != commitId.turnId) {
             return Transition.reject(state, event, "stale-anki-commit-result")

@@ -132,6 +132,7 @@ class Gate11bRecoveryMatrixTest {
         h.drain()
         h.send(StudyEvent.UserEndRequested("end"))
         h.drain()
+        val nextCardsBefore = h.fake.nextCardCount
         h.restartLedger()
 
         h.send(AnkiStudyEvent.Start(AnkiStudyRequest("study-2", AnkiBackendMode.ANKIDROID_LOCAL, h.deck)))
@@ -142,7 +143,11 @@ class Gate11bRecoveryMatrixTest {
         assertEquals(SessionPhase.ReconciliationRequired, h.state.phase)
         assertTrue(RatingCommitRecoveryUi.from(h.state)!!.commitUiState is RatingCommitUiState.VerificationRequired)
         assertFalse(RatingCommitRecoveryUi.from(h.state)!!.ratingControlsEnabled)
-        assertNull("no scheduler query in a collection with an unresolved mutation", h.turn)
+        // GATE 11D §29 — the unresolved turn is restored by identity (same ReviewTurnId), not
+        // cleared and not re-queried: no new scheduler query while the mutation is unresolved.
+        assertNotNull("the unresolved turn is restored by identity", h.turn)
+        assertEquals("the restored turn is the original one", record.turnId, h.turn!!.turnId)
+        assertEquals("no scheduler query in a collection with an unresolved mutation", nextCardsBefore, h.fake.nextCardCount)
         assertEquals(1, h.fake.deliveryCount)
     }
 
@@ -254,7 +259,13 @@ class Gate11bRecoveryMatrixTest {
         assertEquals("ready", truth.backendSchedulerAvailability)                     // scheduler
         assertEquals(ReviewCommitRecoveryAction.ResumeCommitted.label, truth.recoveryAction)
         assertFalse(truth.divergent)
-        assertEquals(7, truth.rows().size)
+        // GATE 11D §35 — the snapshot additionally names the transaction-locked backend, the
+        // collection identity, and the reconciliation evidence (rows 7, 8, 9 of 10).
+        assertEquals(10, truth.rows().size)
+        assertEquals("the transaction-locked backend is named, not the current global preference",
+            "ankidroid_local", truth.backendId)
+        assertEquals("recorded", truth.collectionRef)
+        assertEquals("not_run", truth.reconciliation)
     }
 
     @Test fun `matrix a projection that contradicts the ledger is divergent and the ledger wins`() = runTest {

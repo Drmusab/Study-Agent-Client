@@ -58,6 +58,14 @@ sealed interface ReviewCommitRecoveryResult {
      * Distinct from [NoTransaction]: unknown is not the same as absent.
      */
     data class Indeterminate(val commitId: ReviewCommitId, val reason: String) : ReviewCommitRecoveryResult
+
+    /**
+     * GATE 11D §30 — the durable ledger contains a structural anomaly a valid ledger never
+     * writes (for example two unresolved commits for one active study session). Recovery must
+     * not choose one heuristically: no commit, no retry, no reconciliation is offered for any
+     * record, and the affected backend is refused until the anomaly is resolved.
+     */
+    data class IntegrityFailure(val reason: String) : ReviewCommitRecoveryResult
 }
 
 /**

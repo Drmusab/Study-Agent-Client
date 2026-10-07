@@ -66,6 +66,14 @@ data class CommitIdentityTombstone(
 object ReviewCommitLedgerCodec {
     const val SCHEMA_VERSION = 4
 
+    /**
+     * GATE 11D §30 — a stable ledger can never hold more than one unresolved commit per active
+     * study session; a snapshot that does is a structural integrity anomaly, not a decodable
+     * state. Recovery must treat it as [ReviewCommitRecoveryAction.IntegrityFailure] and never
+     * guess which record is "the" transaction.
+     */
+    const val MULTIPLE_UNRESOLVED_PER_SESSION: String = "multiple_unresolved_per_session"
+
     @Serializable
     private data class Envelope(
         val schemaVersion: Int,
@@ -118,7 +126,7 @@ object ReviewCommitLedgerCodec {
         }
         val unresolved = records.filter { it.status != ReviewCommitStatus.COMMITTED }
         if (unresolved.map { it.backendId to it.sessionId }.distinct().size != unresolved.size) {
-            return Decoded.Unreadable("multiple_unresolved_per_session")
+            return Decoded.Unreadable(MULTIPLE_UNRESOLVED_PER_SESSION)
         }
         if (records.map { it.backendId to it.turnId }.distinct().size != records.size) {
             return Decoded.Unreadable("multiple_commits_per_turn")
@@ -670,7 +678,10 @@ class ReviewCommitLedger(
             val record = current[commitId.stableKey] ?: return@withLock null
             if (record.status != ReviewCommitStatus.AMBIGUOUS) return@withLock record
             val command = when (recoveryPolicy.classify(record, result)) {
-                ReviewCommitRecoveryAction.ResumeCommitted -> ReviewCommitTransition.ReconciliationConfirmedCommitted()
+                ReviewCommitRecoveryAction.ResumeCommitted -> ReviewCommitTransition.ReconciliationConfirmedCommitted(
+                    // A backend-issued receipt travels through when the backend provided one; a
+                    // null receipt is never fabricated for backends without one (GATE 11D §9).
+                    (result as? ReconcileCommitResult.Applied)?.receipt)
                 ReviewCommitRecoveryAction.OfferRetry -> ReviewCommitTransition.ReconciliationConfirmedNotCommitted
                 ReviewCommitRecoveryAction.RemainBlocked ->
                     ReviewCommitTransition.ReconciliationInconclusive("reconciliation_inconclusive")
