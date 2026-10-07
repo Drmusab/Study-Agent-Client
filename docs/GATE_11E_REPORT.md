@@ -1,6 +1,6 @@
 # GATE 11E — Final End-to-End Commit Reliability Audit & Lock
 
-Session: `arena/901c5a5c-study-agent-client` · Branch base: `13718eb` · Date: 2026-10-07
+Session: `arena/d2809caf-study-agent-client` · Branch base: `0c9ea8f` · Date: 2026-10-07 · Re-verified: 2026-10-07
 
 > Scope: aggregate validation of the review-rating transaction pipeline built by
 > **GATE 11A** (domain / transition engine / ledger / fake failure harness),
@@ -28,7 +28,7 @@ as passes:
 | Blocked class | Why | Evidence it needs |
 |---|---|---|
 | Real AnkiDroid mutation on hardware | No device, emulator, Android SDK, `adb`, or runnable Gradle distribution (`services.gradle.org` unreachable, Google Maven blocked) | one run of `AnkiDroidDisposableCommitInstrumentedTest` against a disposable profile, plus the manual `docs/REAL_DEVICE_TEST_MATRIX.md` rows |
-| `./gradlew clean testDebugUnitTest lint assembleDebug assembleRelease` + `connectedDebugAndroidTest` | the wrapper cannot download its distribution: `SSL peer shut down incorrectly` on `services.gradle.org`; no JDK is installed in the sandbox | a CI run (the workflow already exists, `.github/workflows/android-ci.yml`) |
+| `./gradlew clean testDebugUnitTest lint assembleDebug assembleRelease` + `connectedDebugAndroidTest` | re-verified in this session: a temporary JDK was bootstrapped successfully, but the wrapper cannot download its distribution (`SSL peer shut down incorrectly` on blocked `services.gradle.org`); no Android device is attached | a CI run (the workflow already exists, `.github/workflows/android-ci.yml`) |
 
 Everything the gate can decide without those two is decided by the Gradle-free JVM harness
 (`tools/jvm-harness/`, bootstrapped from scratch this session): **129 classes, 1,462 tests, 0
