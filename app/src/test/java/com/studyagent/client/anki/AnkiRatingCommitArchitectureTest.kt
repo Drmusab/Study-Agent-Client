@@ -1,5 +1,6 @@
 package com.studyagent.client.anki
 
+import com.studyagent.client.core.anki.ReviewCommitStatus
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -9,7 +10,9 @@ import java.io.File
  *
  * Each check is the executable form of one review grep: numeric ease above the gateway, a UI
  * that knows which backend it talks to, input-specific commit paths, a commit retried from a
- * catch block, a ledger transition back to NOT_STARTED, and a reducer that advances on selection.
+ * catch block, a ledger that names a non-canonical commit status, and a reducer that advances on
+ * selection. The retired commit vocabulary itself is policed by
+ * [ReviewCommitVocabularyLockTest].
  */
 class AnkiRatingCommitArchitectureTest {
     private val appModuleDir: File = generateSequence(File("").absoluteFile) { it.parentFile }
@@ -58,10 +61,17 @@ class AnkiRatingCommitArchitectureTest {
         assertTrue("no blind retry after an exception: $found", found.isEmpty())
     }
 
-    @Test fun `the ledger has no transition back to NOT_STARTED`() {
+    @Test fun `the ledger only ever names a canonical ReviewCommitStatus`() {
         val ledger = main.single { it.name == "ReviewCommitLedger.kt" }
-        val back = Regex("copy\\([^)]*state\\s*=\\s*ReviewCommitStatus\\.NOT_STARTED").containsMatchIn(ledger.code())
-        assertTrue("SUBMITTING/RETRY_ALLOWED/RETRY_ALLOWED/AMBIGUOUS must never become NOT_STARTED in the ledger", !back)
+        // The ledger's only status vocabulary is the canonical five; the retired spellings survive
+        // solely inside the legacy schema adapter (asserted by ReviewCommitVocabularyLockTest).
+        val named = Regex("ReviewCommitStatus\\.([A-Z_]+)").findAll(ledger.code())
+            .map { it.groupValues[1] }.toSet()
+        val canonical = ReviewCommitStatus.entries.map { it.name }.toSet()
+        assertTrue("the ledger names a non-canonical status: ${named - canonical}",
+            named.all { it in canonical })
+        assertTrue("the ledger must be able to reach every durable status: ${canonical - named}",
+            canonical.all { it in named })
     }
 
     @Test fun `only the COMMITTED branch of the reducer requests the next card after a rating`() {

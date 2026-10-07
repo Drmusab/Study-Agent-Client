@@ -236,6 +236,12 @@ fake, the fake's own dedup hid the bug. That is why the chaos test uses the no-m
 
 # PART X (2026-09-24), kept for history; superseded by PART XI above
 
+> **Vocabulary warning.** PARTs X–XIV below are verbatim history: they are written in the
+> pre-GATE-11B vocabulary (`NOT_STARTED`, `FAILED_SAFE_TO_RETRY`, `MUTATION_CALL_ENTERED`,
+> `CommitRatingResult.RetryableFailure`, `AnkiCommitOutcome`, …). Do not copy those names into code
+> or into a living specification. The canonical vocabulary is PART XV, completed by PART XVII; the
+> rename map is in §XV.1 and the classification of every surviving legacy occurrence in §XVII.2.
+
 ## 0. Verdict (read this first)
 
 **OVERALL GATE 11 RESULT: BLOCKED** — not FAIL (the exactly-once machinery exists, is
@@ -1225,6 +1231,8 @@ Every legacy occurrence is now classified. Nothing is left "temporarily both":
 |---|---|
 | `FAILED_SAFE_TO_RETRY`, `FAILED_NOT_RETRYABLE`, `safeToRetry`, `NOT_STARTED` in `ReviewCommitLedger.normalizeLegacyVocabulary` / `migrateLegacy` | **TEMPORARY MIGRATION ADAPTER** — schema ≤ 3 rows only; output is canonical |
 | `SubmissionLedger.SubmissionState.NOT_STARTED` | **LEGITIMATE UNRELATED USE** — a different ledger (the PC submission), untouched by 11B |
+| retired names inside the GATE 01–GATE 14 gate reports and the ADRs (0007, 0008) | **HISTORICAL RECORD** — kept verbatim as history, each carrying a GATE 11B amendment banner/table; never a live specification |
+| retired names in the living specifications (`SESSION_STATE_MACHINE.md`, `ANKI_INTEGRATION_ARCHITECTURE.md`, `ANKIDROID_INTEGRATION.md`, `GATE_01_ANKI_CONTRACT.md`, `GATE_03_ANKI_DOMAIN.md`) | **RENAME** — done in PART XVII and enforced by `ReviewCommitVocabularyLockTest` |
 | everything else | **RENAME / REMOVE** — done; a grep for the fixed search list is clean |
 
 ## XV.7 Evidence (JVM harness)
@@ -1383,3 +1391,150 @@ references.
   construction of changed types) but not compiled here.
 
 **GATE 11B LOCKED** (implementation; CI evidence owed).
+
+---
+
+# XVII. GATE 11B lock — vocabulary migration, vocabulary lock & projection table
+
+Branch `arena/21069162-study-agent-client`, from `master` @ `c1765c7` (PR #37). PART XV/XVI
+implemented and documented the canonical model; this part records what was still open against the
+11B brief's **MIGRATION CHECK** and **BUILD VALIDATION** sections and closes it. No behaviour
+changed: the six implementation items of the brief were already green, so this part is the
+naming lock, not a redesign. PART XV's vocabulary is unchanged.
+
+## XVII.0 Verdict
+
+**GATE 11B naming lock: PASS in the JVM-harness evidence class. Gradle/CI evidence still owed.**
+
+- The brief's fixed search list (`ReviewCommitState`, `CommitAttemptPhase`,
+  `FAILED_SAFE_TO_RETRY`, `SafeToRetry`, `RetryableFailure`, `Retryable(`, `AnkiRatingAmbiguous`,
+  `AnkiRatingCommitted`, `SubmittingAnkiRating`) plus `NOT_STARTED` and the retired attempt-phase
+  names is now clean across `app/src/main`, `app/src/test` and every living specification — and
+  that cleanliness is *enforced*, not merely observed (§XVII.2).
+- New `ReviewCommitVocabularyLockTest` (10 tests) and `RatingCommitUiStateTest` (4 tests).
+- Full JVM suite: `RESULT classes=122 tests=1373 passed=1373 failed=0 ignored=0`
+  (PART XVI's 120 classes / 1359 tests + 2 classes / 14 tests, one pre-existing test renamed),
+  `main errors: 0 (files: 197)`, `test errors: 0 (files: 142)`.
+- The lock was verified to *fail* when a retired name is reintroduced: planting
+  `FAILED_SAFE_TO_RETRY` in a main source and `RetryableFailure` in a living spec produced 3
+  failures naming the file and the pattern. A check that cannot fail is not a check.
+- Still not implemented, by design: real AnkiDroid rating mutation, `ContentProvider
+  answerCard()`, real PC mutation, private Anki database access.
+
+## XVII.1 What was already green (re-verified, not re-written)
+
+| Brief item | Status in this part |
+|---|---|
+| 1. `ReviewCommitCoordinator` | unchanged — `commit`/`retry`/`recover` on `AnkiStudyEffectExecutor` (§XV.3) |
+| 2. StudySession rating flow | unchanged — `SelectRating` → `CommitRating` → turn-scoped `RatingCommitUiState` |
+| 3. Source-of-truth mapping | unchanged — §XV.2 / §XVI.3, tests `Gate11bSourceOfTruthTest` |
+| 4. Recovery policy | unchanged — `ReviewCommitRecoveryPolicy.classifyStatus` (§XV.5) |
+| 5. Startup/session recovery | unchanged — pre-`beginReview` `recoveryBlocker` scan |
+| 6. Fake-backend transaction tests | unchanged — `Gate11bTransactionTest` against `FakeAnkiBackend` |
+
+The only production-code edit in this part is a KDoc correction in `SessionPhase.kt`:
+`RatingCommitFailed` said "ledger RETRY_ALLOWED or RETRY_ALLOWED" (a duplicated word left over from
+the GATE 01 rename). It now names the durable statuses precisely — `RETRY_ALLOWED`, including the
+pre-boundary `PREPARED` case that `markRefused`/`markNotCommitted` record as proven-not-applied.
+
+## XVII.2 Migration check — every occurrence classified
+
+Searched the whole repository for the brief's fixed list plus `NOT_STARTED` and the retired
+attempt-phase names. Classification:
+
+| Occurrence | Where | Classification |
+|---|---|---|
+| `FAILED_SAFE_TO_RETRY`, `FAILED_NOT_RETRYABLE`, `safeToRetry`, `NOT_STARTED`, `MUTATION_CALL_ENTERED`, `MUTATION_RESPONSE_RECEIVED`, `LOCAL_RESULT_PERSISTED` as string literals | `ReviewCommitLedger.normalizeLegacyVocabulary` / `migrateLegacy` | **TEMPORARY MIGRATION ADAPTER** — ledger schemas 1-3 only; the canonical schema is 4 |
+| the same names, asserted | `ReviewCommitLedgerTest` | **TEMPORARY MIGRATION ADAPTER (test)** — pins the adapter above |
+| `SubmissionState.NOT_STARTED` | `core/study/SubmissionLedger.kt` | **LEGITIMATE UNRELATED USE** — the PC submission ledger, untouched by 11B |
+| retired names in prose | KDoc in `ReviewCommit.kt`, `RatingCommitUiState.kt`, `ReviewCommitLedger.kt` | **LEGITIMATE UNRELATED USE** — comments explaining what was retired; stripped by the scan |
+| `NOT_STARTED`, `FAILED_SAFE_TO_RETRY`, `MUTATION_CALL_ENTERED`, `RetryableFailure`, `AnkiRatingCommitted`, `commit.state`, `CommitRatingResult`, `safeToRetry` in `SESSION_STATE_MACHINE.md`, `ANKI_INTEGRATION_ARCHITECTURE.md`, `ANKIDROID_INTEGRATION.md`, `GATE_01_ANKI_CONTRACT.md`, `GATE_03_ANKI_DOMAIN.md` | living specifications | **RENAME** — done here; each now states the canonical status/phase/result name and the mapping |
+| the same names in `GATE_01`…`GATE_14` reports | `docs/GATE_*.md` | **HISTORICAL RECORD** — kept verbatim; PART X now carries a vocabulary warning banner |
+| ADR 0007 item 4, ADR 0008 decision text | `docs/adr/0007`, `docs/adr/0008` | **HISTORICAL RECORD** — decisions unchanged, each with a *Naming amendment (GATE 11B)* section mapping old → new |
+| `AnkiCommitOutcome` (`Committed` / `Failed` / `Ambiguous` / `PersistenceFailure`) | `core/study/AnkiStudyInteraction.kt` | **LEGITIMATE UNRELATED USE** — the executor's *event payload*, not a status vocabulary: every case exposes the durable `ReviewCommitStatus` it reflects, and `ReviewCommitOutcome` remains the coordinator's return type (§10) |
+
+Two vocabularies are therefore not active anywhere: the ledger, the coordinator, the backend, the
+recovery policy and the UI each have exactly one name for their layer, and the docs agree with the
+code.
+
+## XVII.3 The lock itself
+
+`ReviewCommitVocabularyLockTest` (`app/src/test/.../anki/`) turns the brief's closing rule — *a name
+that could belong to two layers must be renamed* — into executable checks:
+
+| Check | What it pins |
+|---|---|
+| `the durable status vocabulary is closed to the five canonical values` | INV-11B-01: `ReviewCommitStatus.entries` == `PREPARED, SUBMITTING, COMMITTED, RETRY_ALLOWED, AMBIGUOUS` |
+| `the attempt phase vocabulary is closed to the four canonical values` | INV-11B-02: `ReviewCommitPhase` is diagnostics only |
+| `status and phase names do not overlap` | §7: `status = SUBMITTING, phase = PREPARED` cannot be written |
+| `the coordinator has exactly the three canonical entry points` | §36: `commit` / `retry` / `recover`, nothing else |
+| `the presentation vocabulary never reuses a durable status name` | INV-11B-13/§15-§17: `AwaitingRating, Saving, RetryAvailable, VerificationRequired, Saved` — no `Committed`, `Ambiguous`, `Retryable` |
+| `the recovery vocabulary stays disjoint from the durable status vocabulary` | §25: `status = RETRY_ALLOWED`, `action = OfferRetry` |
+| `no retired commit spelling survives in production sources` / `… in the test sources` | §20 + the migration check, over comment-stripped sources |
+| `every surviving retired spelling is classified` | an occurrence outside the four allowlisted files fails the build |
+| `the living specifications speak the canonical vocabulary` | README + the five living specs; gate reports and ADRs are excluded as history |
+
+`AnkiRatingCommitArchitectureTest.the ledger only ever names a canonical ReviewCommitStatus`
+replaces the older `… has no transition back to NOT_STARTED` grep, which had gone stale (it looked
+for `state =` in a file that now writes `status =`). It now asserts both directions: the ledger
+names no non-canonical status, and it can still reach all five.
+
+## XVII.4 The §14 projection table, pinned
+
+`RatingCommitUiStateTest` adds the one table the brief states but nothing asserted directly:
+
+| Durable status | Projection |
+|---|---|
+| no record | `AwaitingRating` (controls live) |
+| `PREPARED` | `Saving` |
+| `SUBMITTING` | `Saving` |
+| `RETRY_ALLOWED` | `RetryAvailable` |
+| `AMBIGUOUS` | `VerificationRequired` |
+| `COMMITTED` | `Saved(commitId, rating)` |
+
+plus: only `AwaitingRating` leaves the rating controls enabled, and a `Saved` projection is the only
+one that carries a committed rating (`AnkiRatingCommit.committedRating` is non-null exactly when the
+durable status is `COMMITTED`).
+
+## XVII.5 Deviations recorded (no rename needed)
+
+- The success event is `AnkiStudyEvent.RatingCommitResolved(…, Committed)`, not a dedicated
+  `RatingCommitSucceeded`. One event type carries the classified outcome, which keeps the event
+  vocabulary closed; the ordering requirement of §29 (durable `COMMITTED` **before** the event that
+  legalises the next card) is unchanged and is asserted by
+  `ReviewCommitDurabilityOrderTest.commit durability order is write-before-effect and
+  committed-before-next-card`.
+- `AnkiCommitOutcome` (§XVII.2, last row) and `ReviewCommitResolution` tokens
+  (`backend_confirmed`, `backend_rejected`, …) are stable *diagnostic* strings, not statuses; they
+  are persisted so a support bundle can say how a status was reached without a second vocabulary.
+
+## XVII.6 Evidence (JVM harness)
+
+`tools/jvm-harness` (Kotlin 2.3 + jdk4py + `Sable/android-platforms` + `kotlinx.coroutines` 1.10.2
+from source; see its README for the deviation table):
+
+```bash
+HARNESS_WORK=/tmp/h HARNESS_JAVA=… HARNESS_KOTLIN_JARS=… tools/jvm-harness/bin/bootstrap-sandbox.sh
+HARNESS_WORK=/tmp/h … tools/jvm-harness/bin/build.sh all
+HARNESS_WORK=/tmp/h … tools/jvm-harness/bin/run.sh            # full suite
+```
+
+`main errors: 0 (files: 197)` · `test errors: 0 (files: 142)` ·
+`RESULT classes=122 tests=1373 passed=1373 failed=0 ignored=0 time=20.4s`.
+
+Baseline measured the same way before this part: `classes=120 tests=1359 passed=1359 failed=0`.
+The delta is `+2 classes / +14 tests` (the vocabulary lock's 10 and the projection table's 4) plus
+one renamed test — `L3 process death at NOT_STARTED …` became `L3 process death before the mutation
+boundary …`, because `NOT_STARTED` is no longer a name this codebase may use.
+`./gradlew` still cannot run in this sandbox (no JDK on `PATH`, Maven mirrors blocked), so
+`./gradlew clean testDebugUnitTest lint assembleDebug assembleRelease` remains owed on a machine
+that can run it — the same caveat as PARTs XI/XV/XVI.
+
+## XVII.7 Still owed
+
+- Gradle/CI evidence: `./gradlew --stop / clean / testDebugUnitTest / lint / assembleDebug /
+  assembleRelease` (+ `connectedDebugAndroidTest` where appropriate).
+- Real AnkiDroid mutation verification on a disposable collection (out of scope for 11B).
+- Compose UI, instrumented tests, lint and APKs remain outside `tools/jvm-harness`; the study
+  screen reads `RatingCommitUiState` only, which the source scan in
+  `AnkiRatingCommitArchitectureTest` (UI never imports the AnkiDroid layer) keeps true.
