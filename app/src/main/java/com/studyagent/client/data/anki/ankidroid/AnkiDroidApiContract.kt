@@ -12,7 +12,10 @@ package com.studyagent.client.data.anki.ankidroid
  *
  * ## Provenance of every constant below (verified against sources, not memory)
  *
- * AnkiDroid release pinned for this gate: **v2.24.1** (`api` module version `2.0.0`).
+ * AnkiDroid release pinned for this gate: **v2.24.1** (`api` module version `2.0.0`), resolved
+ * to source commit `9f579c10bb151146728220729c510acbbd8faba7`. The rating/scheduler backend facts
+ * additionally use `ankitects/anki` tag `25.09.2`; the complete source audit is in
+ * `docs/GATE_11C_ANKIDROID_COMMIT_AUDIT.md`.
  *
  * | Fact | Value | Verified from |
  * |---|---|---|

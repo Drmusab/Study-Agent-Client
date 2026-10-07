@@ -120,6 +120,14 @@ class AnkiDroidBackend(
 
     private val committer: AnkiDroidRatingCommitter? = ratingGateway?.let { AnkiDroidRatingCommitter(it, clock) }
 
+    /**
+     * Content-free physical answer-update count. It is diagnostics/test evidence only; the backend
+     * does not use it for deduplication or scheduler truth. A durable ledger remains the source of
+     * transaction truth.
+     */
+    val ratingMutationInvocationCount: Long
+        get() = ratingGateway?.physicalAnswerCalls ?: 0L
+
     /** Full integration state for diagnostics and settings (internal but observable). */
     val integrationState: StateFlow<AnkiDroidIntegrationState> = _integrationState.asStateFlow()
 
@@ -575,7 +583,7 @@ class AnkiDroidBackend(
                 validateCommit(request)?.let { return@withLock CommitPreparation.Refused(it, retryable = false) }
                 val committer = this.committer
                     ?: return@withLock CommitPreparation.Refused(AnkiError.UnsupportedAction("ratingCommit"), retryable = false)
-                usabilityError()?.let { return@withLock CommitPreparation.Refused(it, retryable = true) }
+                commitPreflightError()?.let { return@withLock CommitPreparation.Refused(it, retryable = true) }
                 val authority = currentAuthority()
                     ?: return@withLock CommitPreparation.Refused(AnkiError.QueryFailure("authority-unknown"), retryable = true)
                 committer.prepare(authority, request.card)
@@ -624,6 +632,9 @@ class AnkiDroidBackend(
         if (request.deckRef != null && request.deckRef != record.deckRef) {
             return BackendCommitResult.ConfirmedNotCommitted(AnkiError.SessionInvalid())
         }
+        if (!collectionMatchesBoundSession(request, record)) {
+            return BackendCommitResult.ConfirmedNotCommitted(AnkiError.SessionInvalid())
+        }
         record.commits[request.commitId]?.let { previous ->
             if (!previous.samePayload(request)) return BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitConflict(request.card))
             // Known outcomes are final here; only a proven-not-applied attempt may be sent again.
@@ -632,14 +643,24 @@ class AnkiDroidBackend(
         validateCommit(request)?.let { return BackendCommitResult.ConfirmedNotCommitted(it) }
         val committer = this.committer
             ?: return BackendCommitResult.ConfirmedNotCommitted(AnkiError.UnsupportedAction("ratingCommit"))
-        usabilityError()?.let { return BackendCommitResult.ConfirmedNotCommitted(it) }
+        commitPreflightError()?.let { return BackendCommitResult.ConfirmedNotCommitted(it) }
         val authority = currentAuthority()
             ?: return BackendCommitResult.ConfirmedNotCommitted(AnkiError.QueryFailure("authority-unknown"))
         val deckId = record.deckRef.deckId.toLongOrNull()
+            ?.takeIf { it > 0L }
             ?: return BackendCommitResult.ConfirmedNotCommitted(AnkiError.InvalidRequest("deck_id_unmappable"))
 
         val result = committer.commit(authority, deckId, request, mutationEntry)
-        record.rememberCommit(request.commitId, BackendCommitRecord(request.card, request.rating, result))
+        record.rememberCommit(
+            request.commitId,
+            BackendCommitRecord(
+                card = request.card,
+                rating = request.rating,
+                result = result,
+                deckRef = request.deckRef,
+                collectionRef = request.collectionRef
+            )
+        )
         if (result is BackendCommitResult.ConfirmedCommitted) {
             record.activeTurn = null // resolved: the next nextCard() asks the scheduler again
             hydrationMemo = null
@@ -676,6 +697,7 @@ class AnkiDroidBackend(
         if (request.commitId.backendId != id || request.card.backendId != id) return AnkiError.SessionInvalid()
         val record = sessionRecordFor(request.commitId.studySessionId) ?: return AnkiError.SessionInvalid()
         if (request.deckRef != null && request.deckRef != record.deckRef) return AnkiError.SessionInvalid()
+        if (!collectionMatchesBoundSession(request, record)) return AnkiError.SessionInvalid()
         val turn = record.activeTurn
         if (turn == null || turn.turnId != request.commitId.turnId || turn.cardRef != request.card) {
             return AnkiError.StaleTurn()
@@ -692,6 +714,46 @@ class AnkiDroidBackend(
 
     private fun usabilityError(): AnkiError? =
         _integrationState.value.availability.unavailabilityError()
+
+    /**
+     * Commit-only safety gate. Health is a snapshot, so a provider can still revoke permission
+     * after this check; that later provider refusal is classified as [OutcomeUnknown] once the
+     * answer update may have been entered. Before the boundary, however, an explicit denied or
+     * unknown permission/capability state is a proven non-dispatch and no answer update is issued.
+     */
+    private fun commitPreflightError(): AnkiError? {
+        usabilityError()?.let { return it }
+        val state = _integrationState.value
+        val metadata = state.metadata
+            ?: return AnkiError.QueryFailure("commit_metadata_unknown")
+        if (metadata.permissionGranted != true) {
+            return if (metadata.permissionGranted == false) {
+                AnkiError.PermissionRequired()
+            } else {
+                AnkiError.QueryFailure("permission_state_unknown")
+            }
+        }
+        if (metadata.collectionReady == false) return AnkiError.CollectionUnavailable()
+        if (state.apiCapabilities.ratingCommit != CapabilitySupport.SUPPORTED) {
+            return AnkiError.UnsupportedAction("ratingCommit")
+        }
+        if (!state.capabilities.scheduledReview) {
+            return AnkiError.UnsupportedAction("scheduledReview")
+        }
+        return null
+    }
+
+    private fun collectionMatchesBoundSession(
+        request: CommitRatingRequest,
+        record: ReviewSessionRecord
+    ): Boolean {
+        val boundKey = record.session.context.collection?.collectionKey ?: return true
+        return listOfNotNull(
+            request.collectionRef?.collectionKey,
+            request.card.collectionKey,
+            request.deckRef?.collectionKey
+        ).all { it == boundKey }
+    }
 
     private fun buttonCountOf(turn: AnkiReviewTurn): Int? = buttonCountOf(turn.scheduledCard)
 

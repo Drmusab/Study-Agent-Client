@@ -12,18 +12,26 @@ import com.studyagent.client.core.models.Rating
  * endpoint hard-codes four buttons, so all four ratings are valid provider inputs; whether the
  * *scheduler offered* a rating for this card is still enforced from the turn's rating options.
  */
-internal object AnkiDroidRatingContract {
-    private const val EASE_AGAIN = 1
-    private const val EASE_HARD = 2
-    private const val EASE_GOOD = 3
-    private const val EASE_EASY = 4
+/**
+ * The one authoritative domain-rating → AnkiDroid-ease mapper.
+ *
+ * This is intentionally an integration-layer extension on the existing domain [Rating] type; the
+ * domain and the coordinator never see provider integers. The values are the public
+ * `com.ichi2.anki.api.Ease` values audited at v2.24.1.
+ */
+internal fun Rating.toAnkiDroidEase(): Int = when (this) {
+    Rating.AGAIN -> 1
+    Rating.HARD -> 2
+    Rating.GOOD -> 3
+    Rating.EASY -> 4
+}
 
-    fun easeFor(rating: Rating): Int = when (rating) {
-        Rating.AGAIN -> EASE_AGAIN
-        Rating.HARD -> EASE_HARD
-        Rating.GOOD -> EASE_GOOD
-        Rating.EASY -> EASE_EASY
-    }
+/**
+ * Compatibility-shaped facade for existing provider-contract tests. It delegates to
+ * [Rating.toAnkiDroidEase]; it is not a second mapping table.
+ */
+internal object AnkiDroidRatingContract {
+    fun easeFor(rating: Rating): Int = rating.toAnkiDroidEase()
 }
 
 /**
