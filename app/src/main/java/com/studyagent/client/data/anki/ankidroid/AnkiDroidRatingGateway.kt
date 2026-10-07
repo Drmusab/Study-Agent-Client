@@ -204,12 +204,14 @@ class DefaultAnkiDroidRatingGateway(
         val values = buildList {
             add(ProviderValue.LongValue(AnkiDroidApiContract.REVIEW_NOTE_ID_COLUMN, answer.noteId))
             add(ProviderValue.IntValue(AnkiDroidApiContract.REVIEW_CARD_ORD_COLUMN, answer.cardOrd))
-            add(ProviderValue.IntValue(AnkiDroidApiContract.REVIEW_ANSWER_EASE_COLUMN, AnkiDroidRatingContract.easeFor(answer.rating)))
+            add(ProviderValue.IntValue(AnkiDroidApiContract.REVIEW_ANSWER_EASE_COLUMN, answer.rating.toAnkiDroidEase()))
             answer.timeTakenMs?.let { add(ProviderValue.LongValue(AnkiDroidApiContract.REVIEW_TIME_TAKEN_COLUMN, it)) }
         }
         if (!acquirePermit()) {
             return AnkiDroidAnswerDispatch.NotDispatched(AnkiError.QueryFailure("provider_write_busy"))
         }
+        // This is the one scheduler-answer entry point. `issue` reaches the provider client's
+        // single ContentResolver.update call exactly once; it is not retried here or below.
         answerCalls.incrementAndGet()
         AppLogger.i(TAG, "ANKI_COMMIT_PROVIDER_CALL rating=${answer.rating.name.lowercase()}")
         val result = issue(authority, AnkiDroidApiContract.SCHEDULE_PATH, values)

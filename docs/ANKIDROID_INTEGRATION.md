@@ -1,7 +1,7 @@
 # AnkiDroid Integration — Dependency, Detection, Permission, Health, Gateway & Capabilities
 
-Date: 2026-09-22 · Gates: **GATE 02** (dependency, detection & permission) + **GATE 04** (gateway, capability & health)
-Normative companion: [`docs/ANKI_INTEGRATION_ARCHITECTURE.md`](ANKI_INTEGRATION_ARCHITECTURE.md), [`docs/GATE_04_ANKIDROID_GATEWAY.md`](GATE_04_ANKIDROID_GATEWAY.md)
+Date: 2026-10-07 · Gates: **GATE 02** (dependency, detection & permission) + **GATE 04** (gateway, capability & health) + **GATE 11C** (rating commit adapter)
+Normative companion: [`docs/ANKI_INTEGRATION_ARCHITECTURE.md`](ANKI_INTEGRATION_ARCHITECTURE.md), [`docs/GATE_04_ANKIDROID_GATEWAY.md`](GATE_04_ANKIDROID_GATEWAY.md), [`docs/GATE_11C_ANKIDROID_COMMIT_AUDIT.md`](GATE_11C_ANKIDROID_COMMIT_AUDIT.md), [`docs/GATE_11C_REPORT.md`](GATE_11C_REPORT.md)
 Code: `app/src/main/java/com/studyagent/client/data/anki/ankidroid/`
 
 This document is the reference for **how Study-Agent talks to AnkiDroid**: what it may depend on,
@@ -959,9 +959,9 @@ failure. Diagnostics (`ANKI_CARD_HYDRATION_*`, `ANKI_CARD_CONTENT_DEGRADED`,
 
 ### 27.5 Capabilities (GATE 07)
 
-`AnkiCapabilities.renderedCards = true` when Ready at a supported spec. Unchanged: `review`
-false (GATE 11), `media` false (GATE 09), `deckCounts` false (unverified), `flags` false (no
-contract support at the pin).
+`AnkiCapabilities.renderedCards = true` when Ready at a supported spec. `review` is true only
+when the real GATE 11C rating gateway is wired; otherwise the backend withholds it. `media` false
+(GATE 09), `deckCounts` false (unverified), and `flags` false (no contract support at the pin).
 
 ---
 

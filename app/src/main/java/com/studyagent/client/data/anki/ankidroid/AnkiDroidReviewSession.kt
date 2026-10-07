@@ -1,6 +1,7 @@
 package com.studyagent.client.data.anki.ankidroid
 
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiCollectionIdentity
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiReviewSession
 import com.studyagent.client.core.anki.AnkiReviewTurn
@@ -65,8 +66,17 @@ internal class ReviewSessionRecord(
 }
 
 /** GATE 11 — one remembered commit: its payload (for conflict detection) and its outcome. */
-internal data class BackendCommitRecord(val card: AnkiCardRef, val rating: Rating, val result: BackendCommitResult) {
-    fun samePayload(request: CommitRatingRequest): Boolean = request.card == card && request.rating == rating
+internal data class BackendCommitRecord(
+    val card: AnkiCardRef,
+    val rating: Rating,
+    val result: BackendCommitResult,
+    val deckRef: AnkiDeckRef? = null,
+    val collectionRef: AnkiCollectionIdentity? = null
+) {
+    fun samePayload(request: CommitRatingRequest): Boolean =
+        request.card == card && request.rating == rating &&
+            (deckRef == null || request.deckRef == deckRef) &&
+            (collectionRef == null || request.collectionRef == collectionRef)
 }
 
 /**

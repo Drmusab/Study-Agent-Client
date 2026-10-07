@@ -337,6 +337,11 @@ internal class AndroidAnkiDroidProviderClient(
                 }
             }
             try {
+                // === REAL ANKIDROID PROVIDER ENTRY ===
+                // For the scheduler path this is the single irreversible
+                // ContentResolver.update(content://<authority>/schedule, ...). The caller has
+                // already persisted SUBMITTING before this method can be entered; this primitive
+                // performs no retry and does not turn the returned row count into a receipt.
                 ProviderUpdateResult.Returned(appContext.contentResolver.update(uri, contentValues, null, null))
             } catch (throwable: Throwable) {
                 ProviderUpdateResult.Threw(
