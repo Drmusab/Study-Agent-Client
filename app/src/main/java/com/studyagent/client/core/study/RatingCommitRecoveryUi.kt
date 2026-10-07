@@ -42,14 +42,39 @@ data class RatingCommitRecoveryUi(
             val rating = commit?.rating
             val label = rating?.displayName ?: ""
             return when {
+                // GATE 11D §5/§23 — SUBMITTING (live persistence failure or restored interrupted
+                // submission) means the mutation boundary was entered: the rating *may already
+                // have been saved*. The canonical ambiguity meaning applies, and "Check again"
+                // (read-only verification) is the only offered mutation-adjacent action.
                 commit != null && machine.phase is SessionPhase.CommitPersistenceFailure ->
                     RatingCommitRecoveryUi(
                         RatingCommitUiState.VerificationRequired(commit.commitId), rating,
-                        "Review record could not be saved",
-                        "Study-Agent could not safely record the review result. It will not submit the rating " +
-                            "again or load another card. Check the record again or end the session.",
+                        "Review status uncertain",
+                        "The rating may already have been saved in Anki. Study-Agent will not submit it " +
+                            "again until the review state can be verified.",
                         canRetry = false, canCheckAgain = !commit.reconciling, canEndSession = true,
                         canOpenAnkiDroid = true, canViewDiagnostics = true)
+
+                // GATE 11D §22/§24/§27/§28 — a restored transaction whose durable status proves
+                // no mutation (PREPARED = boundary provably un-entered; RETRY_ALLOWED = proven
+                // not applied) projects to RetryAvailable with the *same* commit id and rating.
+                // The retry is offered, never automatic; a SUBMITTING/AMBIGUOUS restore reaches
+                // the VerificationRequired branches above instead.
+                commit != null && local.restoredCommit && machine.phase is SessionPhase.RatingCommitFailed &&
+                    (commit.status == ReviewCommitStatus.PREPARED ||
+                        commit.status == ReviewCommitStatus.RETRY_ALLOWED) -> {
+                    val retryable = local.turn != null
+                    RatingCommitRecoveryUi(
+                        RatingCommitUiState.RetryAvailable(commit.commitId), rating,
+                        if (retryable) "Rating not saved" else "Review interrupted",
+                        if (retryable) "The review was interrupted before Anki was changed. Nothing was " +
+                                "saved. Retry is safe for \u201c$label\u201d — it reuses the same review record."
+                            else "The original review turn cannot be resumed after restart. Study-Agent " +
+                                "will not send this rating again. End this session, then start a new " +
+                                "review if needed.",
+                        canRetry = retryable, canCheckAgain = false, canEndSession = true,
+                        canOpenAnkiDroid = true, canViewDiagnostics = true)
+                }
 
                 commit != null && local.restoredCommit && machine.phase is SessionPhase.RatingCommitFailed ->
                     RatingCommitRecoveryUi(

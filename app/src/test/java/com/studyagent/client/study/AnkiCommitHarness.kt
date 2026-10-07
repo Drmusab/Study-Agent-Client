@@ -56,6 +56,17 @@ class AnkiCommitHarness(
         executor = AnkiStudyEffectExecutor(AnkiBackendRegistry(listOf(backend)), ledger, clock, faults)
     }
 
+    /**
+     * GATE 11D — a client process restart with the real topology: a new ledger over the same
+     * durable state AND the fake's per-session runtime state dies with the process (its
+     * scheduler — applied effects and the dedup table — survives). Use this for tests where the
+     * restored session must re-validate against a backend that no longer remembers the turn.
+     */
+    suspend fun fullRestart() {
+        restartLedger()
+        fake.simulateProcessRestart()
+    }
+
     fun send(event: StudyEvent): Transition = StudyReducer.reduce(state, event, now).also { t ->
         state = t.newState
         if (!t.accepted) rejected += t.rejectionReason.orEmpty()
@@ -120,7 +131,7 @@ class AnkiCommitHarness(
         )
 
         /** Harness over a backend whose frozen semantics include authoritative reconciliation. */
-        fun reconcilable(commitSteps: List<FakeAnkiBackend.CommitStep>) = AnkiCommitHarness(
+        fun reconcilable(commitSteps: List<FakeAnkiBackend.CommitStep> = emptyList()) = AnkiCommitHarness(
             backendId = RECONCILABLE_BACKEND, mode = AnkiBackendMode.PC_AGENT, commitSteps = commitSteps
         )
     }

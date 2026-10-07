@@ -129,13 +129,18 @@ class Gate11bSourceOfTruthTest {
 
         assertEquals(ReviewCommitStatus.RETRY_ALLOWED, h.commit!!.status)
         assertEquals(SessionPhase.RatingCommitFailed, h.state.phase)
+        // GATE 11D §22/§28 — a restored proven-not-applied transaction projects to
+        // RetryAvailable (same commit id, same rating) with its turn re-attached from the
+        // durable record: the retry is offered explicitly, never automatic, and no scheduler
+        // query precedes it (INV-11D-17).
         assertTrue("the durable decision is re-projected, not re-decided",
-            RatingCommitRecoveryUi.from(h.state)!!.commitUiState is RatingCommitUiState.VerificationRequired)
-        assertFalse("a restored turn has no live AnkiDroid handle, so no retry mutation is offered",
+            RatingCommitRecoveryUi.from(h.state)!!.commitUiState is RatingCommitUiState.RetryAvailable)
+        assertTrue("a restored RETRY_ALLOWED with its re-attached turn offers the same-commit retry",
             RatingCommitRecoveryUi.from(h.state)!!.canRetry)
         assertEquals(commitId, h.commit!!.commitId)
         assertEquals(Rating.HARD, h.commit!!.selectedRating)
-        assertNull("no scheduler query before the unresolved transaction is dealt with", h.turn)
+        assertNotNull("the same review turn remains unresolved (identity restored, not re-queried)", h.turn)
+        assertEquals("the restored turn is the one the commit was made under", commitId.turnId, h.turn!!.turnId)
         assertEquals(0, h.fake.deliveryCount)
         assertEquals("the restore issued no scheduler query", nextCardsBefore, h.fake.nextCardCount)
     }

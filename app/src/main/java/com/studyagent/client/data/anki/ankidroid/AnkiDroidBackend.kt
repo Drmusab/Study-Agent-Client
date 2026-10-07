@@ -21,6 +21,7 @@ import com.studyagent.client.core.anki.CommitRatingRequest
 import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.ReconcileCommitRequest
 import com.studyagent.client.core.anki.ReconcileCommitResult
+import com.studyagent.client.core.anki.ReconciliationSupport
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.AnkiReviewSession
 import com.studyagent.client.core.common.AppClock
@@ -98,6 +99,18 @@ class AnkiDroidBackend(
             "AnkiDroid commit semantics overclaim"
         }
     }
+
+    /**
+     * GATE 11D §11/§12 — audited against the pinned v2.24.1 public API (see
+     * `docs/GATE_11C_ANKIDROID_COMMIT_AUDIT.md`): the provider has no ReviewCommitId key, no
+     * dedup table, no lookup-by-id and no durable receipt, and `answerCard` swallows scheduler
+     * exceptions while still returning one updated row. No card-state observation — reps,
+     * interval, due date, next card, last-review time — can be attributed to a specific
+     * `ReviewCommitId`, so exact transaction reconciliation is UNSUPPORTED. The read-only
+     * evidence pass in `reconcileCommit` therefore always stays ambiguous; it is diagnostics,
+     * never proof.
+     */
+    override fun reconciliationSupport(): ReconciliationSupport = ReconciliationSupport.UNSUPPORTED
 
     /** Distinguishes handles this instance issued from handles issued by a previous process. */
     private val instanceId: String = UUID.randomUUID().toString()

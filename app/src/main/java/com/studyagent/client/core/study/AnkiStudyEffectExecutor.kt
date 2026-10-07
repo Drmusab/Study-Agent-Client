@@ -4,7 +4,6 @@ import com.studyagent.client.core.anki.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -37,12 +36,34 @@ class AnkiStudyEffectExecutor(
     private val phases: CommitPhaseSink = CommitPhaseSink { _, _, _ -> },
     /** Upper bound for one read-only reconciliation query; expiry leaves the commit AMBIGUOUS. */
     private val reconcileTimeoutMs: Long = DEFAULT_RECONCILE_TIMEOUT_MS,
-    private val recoveryPolicy: ReviewCommitRecoveryPolicy = ReviewCommitRecoveryPolicy()
+    private val recoveryPolicy: ReviewCommitRecoveryPolicy = ReviewCommitRecoveryPolicy(),
+    /**
+     * GATE 11D §9 — the read-only transaction reconciler. Defaults to
+     * [AnkiReviewCommitReconciler], which dispatches by the transaction's own backend identity
+     * and enforces the backend's reconciliation capability; tests may substitute a scripted one.
+     */
+    private val reconciler: ReviewCommitReconciler =
+        AnkiReviewCommitReconciler(registry, clock, reconcileTimeoutMs)
 ) : ReviewCommitCoordinator {
     init { require(reconcileTimeoutMs > 0) }
 
     /** Known only while this process lives. A lost durable response never authorizes replay. */
     private val unpersistedResponses = ConcurrentHashMap<ReviewCommitId, BackendCommitResult>()
+
+    /**
+     * GATE 11D §35 — content-free reconciliation observability (result token + latency, per
+     * commit). Diagnostics only: nothing decides a transaction state from this.
+     */
+    data class ReconciliationDiagnostics(
+        val resultToken: String,
+        val latencyMs: Long,
+        val atEpochMs: Long
+    )
+
+    private val reconciliationDiagnostics = ConcurrentHashMap<ReviewCommitId, ReconciliationDiagnostics>()
+
+    fun reconciliationDiagnostics(commitId: ReviewCommitId): ReconciliationDiagnostics? =
+        reconciliationDiagnostics[commitId]
 
     /**
      * Executes [effect]. [emit] receives intermediate events (commit started); the return value is
@@ -124,8 +145,19 @@ class AnkiStudyEffectExecutor(
             // GATE 11B PART IV, last row: "unknown is not absent". A ledger that could not be read
             // must never be reported as "no transaction", because that would license a fresh
             // mutation for a turn whose durable truth is simply unknown.
-            if (ledger.health() !is ReviewCommitLedger.Health.Ready) {
-                return ReviewCommitRecoveryResult.Indeterminate(commitId, "commit_ledger_unavailable")
+            // GATE 11D §30: a structurally invalid ledger (two unresolved commits for one
+            // session) is named as an integrity failure, not swallowed as plain unavailability —
+            // recovery must not guess which record is "the" transaction.
+            val health = ledger.health()
+            if (health !is ReviewCommitLedger.Health.Ready) {
+                return when (health) {
+                    is ReviewCommitLedger.Health.Unavailable ->
+                        if (health.reason == ReviewCommitLedgerCodec.MULTIPLE_UNRESOLVED_PER_SESSION) {
+                            ReviewCommitRecoveryResult.IntegrityFailure(health.reason)
+                        } else ReviewCommitRecoveryResult.Indeterminate(commitId, "commit_ledger_unavailable")
+                    ReviewCommitLedger.Health.Ready ->
+                        ReviewCommitRecoveryResult.Indeterminate(commitId, "commit_ledger_unavailable")
+                }
             }
             return ReviewCommitRecoveryResult.NoTransaction(commitId)
         }
@@ -165,45 +197,45 @@ class AnkiStudyEffectExecutor(
     }
 
     /**
-     * Read-only reconciliation of an unknown outcome. Never a mutation and never a replay: the only
-     * backend call here is [AnkiBackend.reconcileCommit].
+     * Read-only reconciliation of an unknown outcome. Never a mutation and never a replay: the
+     * only backend call is the read-only evidence query inside [ReviewCommitReconciler]
+     * (INV-11D-09). Backend/collection/card identity, the capability gate, availability and the
+     * timeout all live in the reconciler (GATE 11D §9-§20); the ledger then applies the evidence
+     * through its single transition engine, so the durable record moves only
+     * AMBIGUOUS → {COMMITTED, RETRY_ALLOWED, AMBIGUOUS}.
      */
     private suspend fun reconcileRecord(
         ledger: ReviewCommitLedger,
         record: ReviewCommitRecord
     ): ReviewCommitRecoveryResult {
         val commitId = record.commitId
-        val backend = registry.find(commitId.backendId)
-            ?: return ReviewCommitRecoveryResult.Recovered(
-                ReviewCommitRecoveryAction.RemainBlocked, record, ReviewCommitOutcome.Ambiguous(record))
-        if (record.card.backendId != backend.id ||
-            record.deckRef?.backendId?.let { it != backend.id } == true) {
-            return ReviewCommitRecoveryResult.Recovered(
-                ReviewCommitRecoveryAction.RemainBlocked, record, ReviewCommitOutcome.Ambiguous(record))
-        }
-        // A backend that only observes counters/time cannot turn them into transaction truth.
-        val authoritative = if (record.frozenGuarantee != null) record.frozenAuthoritativeReconciliation
-            else backend.commitSemantics.supportsAuthoritativeReconciliation
-        if (!authoritative) {
-            return ReviewCommitRecoveryResult.Recovered(
-                ReviewCommitRecoveryAction.RemainBlocked, record, ReviewCommitOutcome.Ambiguous(record))
-        }
-        val submittedAt = record.submittedAtEpochMs ?: record.createdAtEpochMs
-        val windowEnd = maxOf(submittedAt, record.resolvedAtEpochMs ?: clock())
-        val result = try {
-            // Read-only and bounded: a hung provider query must not hold the session in
-            // VerificationRequired. Expiry is "still unknown", never "not applied".
-            withTimeoutOrNull(reconcileTimeoutMs) {
-                backend.reconcileCommit(ReconcileCommitRequest(
-                    commitId, record.card, record.rating, record.evidence, submittedAt, windowEnd
-                ))
-            } ?: ReconcileCommitResult.StillAmbiguous(RECONCILE_TIMEOUT)
+        val startedAt = clock()
+        // Contract guard: a backend that throws from a read-only probe violated the
+        // AnkiBackend contract; the outcome stays unknown (read-only — nothing to undo).
+        val reconciliation = try {
+            reconciler.reconcile(record)
         } catch (cancelled: CancellationException) {
-            throw cancelled // read-only: nothing to undo, the record stays AMBIGUOUS
+            throw cancelled
         } catch (_: Exception) {
-            ReconcileCommitResult.StillAmbiguous("reconcile_threw")
+            ReviewCommitReconciliationResult.Unresolved(AnkiError.Unknown("reconcile_threw"))
         }
-        val updated = withContext(NonCancellable) { ledger.reconcile(commitId, result) }
+        val token = when (reconciliation) {
+            is ReviewCommitReconciliationResult.ConfirmedCommitted -> "confirmed_committed"
+            is ReviewCommitReconciliationResult.ConfirmedNotCommitted -> "confirmed_not_committed"
+            is ReviewCommitReconciliationResult.Unresolved -> "unresolved"
+        }
+        reconciliationDiagnostics[commitId] = ReconciliationDiagnostics(
+            token, (clock() - startedAt).coerceAtLeast(0L), startedAt)
+        val evidence = when (reconciliation) {
+            is ReviewCommitReconciliationResult.ConfirmedCommitted ->
+                ReconcileCommitResult.Applied("reconciled", reconciliation.receipt)
+            is ReviewCommitReconciliationResult.ConfirmedNotCommitted ->
+                ReconcileCommitResult.NotApplied("reconciled")
+            is ReviewCommitReconciliationResult.Unresolved ->
+                ReconcileCommitResult.StillAmbiguous(
+                    reconciliation.reason?.commitCategory() ?: "reconciliation_unresolved")
+        }
+        val updated = withContext(NonCancellable) { ledger.reconcile(commitId, evidence) }
             ?: return ReviewCommitRecoveryResult.Indeterminate(commitId, "commit_persistence_failure")
         return when (updated.status) {
             ReviewCommitStatus.COMMITTED -> ReviewCommitRecoveryResult.Recovered(
@@ -486,6 +518,10 @@ class AnkiStudyEffectExecutor(
                 done(AnkiCommitOutcome.PersistenceFailure("ledger_record_missing"))
             is ReviewCommitRecoveryResult.Indeterminate ->
                 done(AnkiCommitOutcome.PersistenceFailure(result.reason))
+            // GATE 11D §30 — a structurally invalid ledger is fail-closed: the outcome is kept
+            // uncertain, nothing is retried and no next card may load.
+            is ReviewCommitRecoveryResult.IntegrityFailure ->
+                done(AnkiCommitOutcome.Ambiguous(result.reason))
             is ReviewCommitRecoveryResult.Recovered -> done((result.outcome ?: ReviewCommitOutcome.Ambiguous(
                 result.record)).toStudyOutcome(record.resolution))
         }

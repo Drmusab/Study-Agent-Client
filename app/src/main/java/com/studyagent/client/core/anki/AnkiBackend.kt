@@ -126,6 +126,19 @@ interface AnkiBackend {
     }
 
     /**
+     * GATE 11D §11 — what this backend can *authoritatively* prove about a commit whose response
+     * was lost, as a three-state capability.
+     *
+     * The default derives from the backend's frozen [commitSemantics]; a backend overrides it when
+     * its observable surface is more specific (for example [ReconciliationSupport.PARTIAL]). The
+     * [AnkiReviewCommitReconciler] caps a transaction's frozen promise by this live capability —
+     * a capability can only shrink, never grow.
+     */
+    fun reconciliationSupport(): ReconciliationSupport =
+        if (commitSemantics.supportsAuthoritativeReconciliation) ReconciliationSupport.SUPPORTED
+        else ReconciliationSupport.UNSUPPORTED
+
+    /**
      * GATE 11 — decide an AMBIGUOUS commit from backend-observable evidence, *without* mutating.
      *
      * Implemented only where the backend exposes enough state to decide; the default answers

@@ -46,6 +46,15 @@ data class CommitTruthSnapshot(
     /** Content-free identity, so a support report can be correlated with the ledger. */
     val commitId: String? = null,
     val turnId: String? = null,
+    /** GATE 11D §35 — the backend the transaction is locked into (recovery never follows the
+     *  current global preference, INV-11D-12). */
+    val backendId: String? = null,
+    /** GATE 11D §35 — whether the durable record carries a collection identity to validate. */
+    val collectionRef: String = NO_COLLECTION_REF,
+    /** GATE 11D §35 — the last reconciliation's content-free result token, or none yet. */
+    val reconciliation: String = NO_RECONCILIATION,
+    /** GATE 11D §35 — the last reconciliation's latency, when one ran. */
+    val reconciliationLatencyMs: Long? = null,
     /** True when the study projection and the durable record disagree right now. */
     val divergent: Boolean = false
 ) {
@@ -57,6 +66,9 @@ data class CommitTruthSnapshot(
         "Attempt phase (diagnostics)" to attemptPhase,
         "Backend scheduler availability" to backendSchedulerAvailability,
         "Recovery action" to recoveryAction,
+        "Backend identity (transaction-locked)" to (backendId ?: UNKNOWN),
+        "Collection ref" to collectionRef,
+        "Reconciliation" to reconciliation,
         "Sources agree" to if (divergent) "No — see COMMIT_STATE_PROJECTION_MISMATCH" else "Yes"
     )
 
@@ -66,6 +78,8 @@ data class CommitTruthSnapshot(
         const val NO_RECORD = "no_record"
         const val NO_ATTEMPT = "no_attempt"
         const val NO_RECOVERY = "not_applicable"
+        const val NO_RECONCILIATION = "not_run"
+        const val NO_COLLECTION_REF = "none_recorded"
     }
 }
 
@@ -116,7 +130,9 @@ object CommitTruthDiagnostics {
     fun snapshot(
         machine: SessionMachineState,
         record: ReviewCommitRecord? = null,
-        backendSchedulerAvailability: String = CommitTruthSnapshot.UNKNOWN
+        backendSchedulerAvailability: String = CommitTruthSnapshot.UNKNOWN,
+        reconciliation: String? = null,
+        reconciliationLatencyMs: Long? = null
     ): CommitTruthSnapshot {
         val local = machine.anki
         val commit = local?.commit
@@ -130,6 +146,13 @@ object CommitTruthDiagnostics {
                 ?: CommitTruthSnapshot.NO_RECOVERY,
             commitId = commit?.commitId?.stableKey ?: record?.commitId?.stableKey,
             turnId = commit?.commitId?.turnId?.value ?: record?.turnId?.value,
+            backendId = record?.backendId?.stableId ?: commit?.commitId?.backendId?.stableId,
+            collectionRef = when (record?.collectionKey) {
+                null -> CommitTruthSnapshot.NO_COLLECTION_REF
+                else -> "recorded"
+            },
+            reconciliation = reconciliation ?: CommitTruthSnapshot.NO_RECONCILIATION,
+            reconciliationLatencyMs = reconciliationLatencyMs,
             divergent = divergence(machine, record) != null
         )
     }

@@ -407,6 +407,12 @@ object ReviewCommitTransitions {
         now: Long
     ): ReviewCommitRecord? =
         if (record.status != ReviewCommitStatus.AMBIGUOUS) null
+        // A backend-issued reconciliation receipt must belong to this backend and this rating,
+        // exactly like the commit-path receipt validation in [responseEvidence]; a foreign or
+        // mismatched receipt is rejected before any durable write.
+        else if (receipt != null &&
+            (receipt.backendId != record.backendId || receipt.committedRating != record.selectedRating)
+        ) null
         else record.copy(
             status = ReviewCommitStatus.COMMITTED,
             phase = ReviewCommitPhase.FINAL_STATUS_PERSISTED,

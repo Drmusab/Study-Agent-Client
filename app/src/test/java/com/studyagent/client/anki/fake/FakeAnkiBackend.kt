@@ -186,11 +186,36 @@ class FakeAnkiBackend(
     var endReviewCalls: Int = 0
         private set
 
+    /**
+     * GATE 11D §16 test knob — the collection the fake currently considers its own. `null`
+     * (default) = the fake does not observe collection identity, so no mismatch check runs.
+     * When set, a reconciliation request whose card belongs to a *different known* collection
+     * is inconclusive: the transaction is never redirected to the current collection
+     * (INV-11D-13).
+     */
+    var currentCollectionKey: String? = null
+
     /** Invalidates all handles and drops scenario state without reusing presentation identifiers. */
     suspend fun reset() = mutex.withLock {
         ledger.clear()
         nextFailures.clear()
         commits.clear()
+        session = null
+        beginRequest = null
+        queue = emptyList()
+        cursor = 0
+        active = null
+        hydrationMemo = null
+    }
+
+    /**
+     * GATE 11D — a client-side process restart, modelled with the real topology: the backend's
+     * per-session runtime state (handle, active turn, queue cursor) is client-side state and dies
+     * with the Study-Agent process, while the scheduler itself — applied effects and the
+     * backend-owned dedup table — survives. This is what makes a post-restart retry of the
+     * original turn fail closed with a typed pre-mutation refusal instead of double-applying.
+     */
+    suspend fun simulateProcessRestart() = mutex.withLock {
         session = null
         beginRequest = null
         queue = emptyList()
@@ -407,6 +432,20 @@ class FakeAnkiBackend(
         delay(latencyMs)
         return mutex.withLock {
             reconcileCalls += 1
+            // GATE 11D read-only evidence boundaries: an unreachable backend proves nothing
+            // (§20/INV-11D-15); a card that no longer exists is not evidence in either
+            // direction (§19/INV-11D-14); a collection the transaction does not belong to must
+            // never be silently re-targeted (§16/INV-11D-13).
+            usabilityError()?.let { return@withLock ReconcileCommitResult.Unavailable(it) }
+            currentCollectionKey?.let { expected ->
+                val actual = request.card.collectionKey
+                if (actual != null && actual != expected) {
+                    return@withLock ReconcileCommitResult.StillAmbiguous("collection_mismatch")
+                }
+            }
+            if (cardData.none { AnkiCardHydration.identityMatches(request.card, it.ref) }) {
+                return@withLock ReconcileCommitResult.StillAmbiguous("card_not_found")
+            }
             val recorded = ledger[request.commitId]
             val answer = reconcileResults.removeFirstOrNull() ?: when {
                 recorded == null -> ReconcileCommitResult.StillAmbiguous("fake_unknown_commit")
