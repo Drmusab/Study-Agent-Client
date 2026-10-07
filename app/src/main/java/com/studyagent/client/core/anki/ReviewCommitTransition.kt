@@ -78,8 +78,15 @@ sealed interface ReviewCommitTransition {
     /** [ReviewCommitStatus.AMBIGUOUS] → [ReviewCommitStatus.RETRY_ALLOWED] on evidence of no mutation. */
     data object ReconciliationConfirmedNotCommitted : ReviewCommitTransition
 
-    /** Reconciliation could not decide: the record stays AMBIGUOUS, only the reason is refreshed. */
-    data class ReconciliationInconclusive(val category: String) : ReviewCommitTransition
+    /**
+     * Reconciliation could not decide: the record stays [ReviewCommitStatus.AMBIGUOUS] (or a
+     * recovered SUBMITTING is normalized into explicit uncertainty, GATE 11D §27/§28), only the
+     * reason is refreshed. [resolution] names the recovery convention that produced it.
+     */
+    data class ReconciliationInconclusive(
+        val category: String,
+        val resolution: String = ReviewCommitResolution.RECONCILIATION_INCONCLUSIVE
+    ) : ReviewCommitTransition
 
     /** Finalize an already durable backend response after process recreation; never redispatches. */
     data object FinalizeRecordedResponse : ReviewCommitTransition
@@ -200,11 +207,23 @@ object ReviewCommitTransitions {
             (transition is ReviewCommitTransition.BackendConfirmedNoMutation && transition.resolution.isBlank())) {
             return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.INVALID_RESULT_RECORD)
         }
+        // GATE 11D §36/§37 — a recovery-originated command must produce exactly the status the one
+        // closed recovery table allows, or it is rejected before any durable write. The table (not
+        // the call site) decides recovery status changes; pipeline and metadata commands are not
+        // part of the recovery table and are gated by the status machine below as before.
+        val recoveryEvent = transition.recoveryEventOrNull()
+        val recoveryTarget = recoveryEvent?.let { recoveryTransition(record.status, it) }
+        if (recoveryEvent != null && recoveryTarget == null) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.ILLEGAL_STATUS_TRANSITION)
+        }
         val next = try {
             applyUnchecked(record, transition, now)
         } catch (_: IllegalArgumentException) {
             return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.INVALID_RESULT_RECORD)
         } ?: return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.ILLEGAL_STATUS_TRANSITION)
+        if (recoveryEvent != null && next.status != recoveryTarget) {
+            return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.ILLEGAL_STATUS_TRANSITION)
+        }
         if (!sameIdentity(record, next) || (record.evidence != null && next.evidence != record.evidence)) {
             return ReviewCommitTransitionResult.Rejected(ReviewCommitTransitionRejection.IDENTITY_MUTATION)
         }
@@ -277,7 +296,8 @@ object ReviewCommitTransitions {
             is ReviewCommitTransition.ReconciliationConfirmedCommitted ->
                 reconciledCommitted(record, transition.receipt, now)
             is ReviewCommitTransition.ReconciliationConfirmedNotCommitted -> reconciledNotCommitted(record, now)
-            is ReviewCommitTransition.ReconciliationInconclusive -> reconciliationInconclusive(record, transition.category, now)
+            is ReviewCommitTransition.ReconciliationInconclusive ->
+                reconciliationInconclusive(record, transition.category, transition.resolution, now)
             is ReviewCommitTransition.FinalizeRecordedResponse -> finalizeRecordedResponse(record, now)
             is ReviewCommitTransition.Acknowledge -> record.copy(acknowledged = true, updatedAtEpochMs = now)
             is ReviewCommitTransition.NoteAbandoned ->
@@ -400,20 +420,27 @@ object ReviewCommitTransitions {
     /**
      * Reconciliation evidence *replaces* the unknown outcome with a definitive one: the durable
      * response is what the backend's authoritative query proved, not what the lost answer claimed.
+     *
+     * GATE 11D §23/§37: authoritative proof of success resolves either unfinished status —
+     * SUBMITTING (the mutation boundary was crossed) and AMBIGUOUS — to COMMITTED. The target
+     * status comes from [recoveryTransition], the one closed recovery table; PREPARED,
+     * RETRY_ALLOWED and a downgrade of COMMITTED are rejected by the table itself.
      */
     private fun reconciledCommitted(
         record: ReviewCommitRecord,
         receipt: CommitReceipt?,
         now: Long
-    ): ReviewCommitRecord? =
-        if (record.status != ReviewCommitStatus.AMBIGUOUS) null
+    ): ReviewCommitRecord? {
+        if (recoveryTransition(record.status, ReviewCommitRecoveryEvent.RECONCILIATION_CONFIRMED_COMMITTED) !=
+            ReviewCommitStatus.COMMITTED
+        ) return null
         // A backend-issued reconciliation receipt must belong to this backend and this rating,
         // exactly like the commit-path receipt validation in [responseEvidence]; a foreign or
         // mismatched receipt is rejected before any durable write.
-        else if (receipt != null &&
+        if (receipt != null &&
             (receipt.backendId != record.backendId || receipt.committedRating != record.selectedRating)
-        ) null
-        else record.copy(
+        ) return null
+        return record.copy(
             status = ReviewCommitStatus.COMMITTED,
             phase = ReviewCommitPhase.FINAL_STATUS_PERSISTED,
             committedRating = record.selectedRating,
@@ -426,10 +453,17 @@ object ReviewCommitTransitions {
             updatedAtEpochMs = now,
             resolvedAtEpochMs = now
         )
+    }
 
-    private fun reconciledNotCommitted(record: ReviewCommitRecord, now: Long): ReviewCommitRecord? =
-        if (record.status != ReviewCommitStatus.AMBIGUOUS) null
-        else record.copy(
+    /**
+     * GATE 11D §23/§37: authoritative proof of non-application resolves either unfinished status —
+     * SUBMITTING and AMBIGUOUS — to RETRY_ALLOWED. Target status from [recoveryTransition].
+     */
+    private fun reconciledNotCommitted(record: ReviewCommitRecord, now: Long): ReviewCommitRecord? {
+        if (recoveryTransition(record.status, ReviewCommitRecoveryEvent.RECONCILIATION_CONFIRMED_NOT_COMMITTED) !=
+            ReviewCommitStatus.RETRY_ALLOWED
+        ) return null
+        return record.copy(
             status = ReviewCommitStatus.RETRY_ALLOWED,
             phase = ReviewCommitPhase.FINAL_STATUS_PERSISTED,
             committedRating = null,
@@ -442,14 +476,42 @@ object ReviewCommitTransitions {
             updatedAtEpochMs = now,
             resolvedAtEpochMs = now
         )
+    }
 
-    private fun reconciliationInconclusive(record: ReviewCommitRecord, category: String, now: Long): ReviewCommitRecord? =
-        if (record.status != ReviewCommitStatus.AMBIGUOUS) null
-        else record.copy(
+    /**
+     * GATE 11D §10/§18/§27/§28: an unresolved reconciliation leaves AMBIGUOUS as AMBIGUOUS (not an
+     * error — uncertainty remains), and normalizes a SUBMITTING whose result could not be
+     * established into explicit uncertainty. The target status comes from [recoveryTransition];
+     * the transition is final only when it is durable (GATE 11D §35).
+     */
+    private fun reconciliationInconclusive(
+        record: ReviewCommitRecord,
+        category: String,
+        resolution: String,
+        now: Long
+    ): ReviewCommitRecord? {
+        val target = recoveryTransition(record.status, ReviewCommitRecoveryEvent.RECONCILIATION_UNRESOLVED)
+            ?: return null
+        if (target == record.status) {
+            // AMBIGUOUS → AMBIGUOUS: refresh only the reason; the record stays unresolved.
+            return record.copy(
+                failure = ReviewCommitFailure(category.take(96)),
+                resolution = resolution,
+                updatedAtEpochMs = now
+            )
+        }
+        // SUBMITTING → AMBIGUOUS (a recovered SUBMITTING that cannot be classified, §28): the
+        // attempt is finalized into explicit uncertainty, exactly like the pipeline path.
+        return record.copy(
+            status = ReviewCommitStatus.AMBIGUOUS,
+            phase = ReviewCommitPhase.FINAL_STATUS_PERSISTED,
+            committedRating = null,
             failure = ReviewCommitFailure(category.take(96)),
-            resolution = ReviewCommitResolution.RECONCILIATION_INCONCLUSIVE,
-            updatedAtEpochMs = now
+            resolution = resolution,
+            updatedAtEpochMs = now,
+            resolvedAtEpochMs = now
         )
+    }
 
     /** Recover a recorded backend response after process death. Never redispatches. */
     private fun finalizeRecordedResponse(record: ReviewCommitRecord, now: Long): ReviewCommitRecord? =

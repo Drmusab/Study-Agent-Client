@@ -48,7 +48,8 @@ data class RatingCommitRecoveryUi(
                 // (read-only verification) is the only offered mutation-adjacent action.
                 commit != null && machine.phase is SessionPhase.CommitPersistenceFailure ->
                     RatingCommitRecoveryUi(
-                        RatingCommitUiState.VerificationRequired(commit.commitId), rating,
+                        // GATE 11D §39 — SUBMITTING is the mutation boundary: recovery must verify.
+                        commit.status.recoveryUiProjection(commit.commitId, commit.rating), rating,
                         "Review status uncertain",
                         "The rating may already have been saved in Anki. Study-Agent will not submit it " +
                             "again until the review state can be verified.",
@@ -65,7 +66,8 @@ data class RatingCommitRecoveryUi(
                         commit.status == ReviewCommitStatus.RETRY_ALLOWED) -> {
                     val retryable = local.turn != null
                     RatingCommitRecoveryUi(
-                        RatingCommitUiState.RetryAvailable(commit.commitId), rating,
+                        // GATE 11D §39 — PREPARED/RETRY_ALLOWED both prove no mutation happened.
+                        commit.status.recoveryUiProjection(commit.commitId, commit.rating), rating,
                         if (retryable) "Rating not saved" else "Review interrupted",
                         if (retryable) "The review was interrupted before Anki was changed. Nothing was " +
                                 "saved. Retry is safe for \u201c$label\u201d — it reuses the same review record."
@@ -78,7 +80,8 @@ data class RatingCommitRecoveryUi(
 
                 commit != null && local.restoredCommit && machine.phase is SessionPhase.RatingCommitFailed ->
                     RatingCommitRecoveryUi(
-                        RatingCommitUiState.VerificationRequired(commit.commitId), rating,
+                        // GATE 11D §39 — a restored SUBMITTING/AMBIGUOUS can never offer a retry.
+                        commit.status.recoveryUiProjection(commit.commitId, commit.rating), rating,
                         "Review interrupted",
                         "The original review turn cannot be resumed after restart. Study-Agent will not " +
                             "send this rating again. End this session, then start a new review if needed.",
@@ -107,11 +110,13 @@ data class RatingCommitRecoveryUi(
                 commit != null && commit.status == ReviewCommitStatus.AMBIGUOUS &&
                     machine.phase is SessionPhase.ReconciliationRequired ->
                     if (commit.reconciling) RatingCommitRecoveryUi(
-                        RatingCommitUiState.VerificationRequired(commit.commitId), rating, "Checking Anki",
+                        // GATE 11D §22 — reconciliation introduces no durable status; the truth
+                        // stays AMBIGUOUS and the surface stays VerificationRequired.
+                        commit.status.recoveryUiProjection(commit.commitId, commit.rating), rating, "Checking Anki",
                         "Checking whether Anki saved \u201c$label\u201d\u2026",
                         canRetry = false, canCheckAgain = false, canEndSession = true
                     ) else RatingCommitRecoveryUi(
-                        RatingCommitUiState.VerificationRequired(commit.commitId), rating,
+                        commit.status.recoveryUiProjection(commit.commitId, commit.rating), rating,
                         "Review status uncertain",
                         "The rating may already have been saved. Study-Agent will not " +
                             "submit it again until the review state is verified.",
@@ -122,12 +127,12 @@ data class RatingCommitRecoveryUi(
                 commit != null && commit.status == ReviewCommitStatus.COMMITTED &&
                     machine.phase is SessionPhase.WaitingForFirstCard ->
                     if (commit.verifiedByReconciliation) RatingCommitRecoveryUi(
-                        RatingCommitUiState.Saved(commit.commitId, commit.rating), rating,
+                        commit.status.recoveryUiProjection(commit.commitId, commit.rating), rating,
                         "Rating verified as saved",
                         "Rating verified as saved. Loading the next scheduled card\u2026",
                         canRetry = false, canCheckAgain = false, canEndSession = true
                     ) else RatingCommitRecoveryUi(
-                        RatingCommitUiState.Saved(commit.commitId, commit.rating), rating, "Rating saved",
+                        commit.status.recoveryUiProjection(commit.commitId, commit.rating), rating, "Rating saved",
                         "Loading the next scheduled card\u2026",
                         canRetry = false, canCheckAgain = false, canEndSession = true)
 
