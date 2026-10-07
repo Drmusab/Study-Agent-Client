@@ -45,9 +45,11 @@ sealed interface SessionPhase {
     data object SubmittingRating : SessionPhase
 
     /**
-     * GATE 11 — the rating is known NOT applied (ledger RETRY_ALLOWED or RETRY_ALLOWED).
-     * The turn stays unresolved:
-     * user may retry the *same* commit when it is safe, or end the session. Never advances.
+     * GATE 11 — the durable ledger proved the rating was NOT applied
+     * (`ReviewCommitStatus.RETRY_ALLOWED`), including the case where the attempt was refused
+     * before the mutation boundary was ever entered (it was still `PREPARED`). The turn stays
+     * unresolved: the user may retry the *same* commit when it is safe, or end the session.
+     * Never advances.
      */
     data object RatingCommitFailed : SessionPhase
 

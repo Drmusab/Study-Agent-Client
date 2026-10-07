@@ -48,9 +48,11 @@ Doc updates: `docs/ARCHITECTURE.md` §11, `docs/SESSION_STATE_MACHINE.md` §16,
 - **One writable backend per session**, resolved once into
   `AnkiSessionContext` (INV-01/07); **no silent mid-session failover** (ADR 0002).
 - **Exactly-once scheduling mutation per review turn** via
-  `ReviewCommitId(backend, session, turn)`; commit outcomes COMMITTED /
-  REJECTED / FAILED_SAFE_TO_RETRY / AMBIGUOUS; **AMBIGUOUS blocks progression**
-  until reconciled (INV-02/08/11, ADR 0007).
+  `ReviewCommitId(backend, session, turn)`; backend commit evidence is
+  `BackendCommitResult.ConfirmedCommitted` / `ConfirmedNotCommitted` /
+  `OutcomeUnknown`, which the ledger records as `COMMITTED` / `RETRY_ALLOWED` /
+  `AMBIGUOUS`; **AMBIGUOUS blocks progression** until reconciled (INV-02/08/11,
+  ADR 0007).
 - **Suggested ≠ selected ≠ committed rating**; human authority by default
   (INV-05/13).
 - **Boundary hygiene:** no AnkiDroid types above the gateway, no PC protocol

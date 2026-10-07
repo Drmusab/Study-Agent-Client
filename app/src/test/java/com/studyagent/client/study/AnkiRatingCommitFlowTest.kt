@@ -505,12 +505,12 @@ class AnkiRatingCommitFlowTest {
         assertEquals(1, h.fake.commitInvocations)
     }
 
-    @Test fun `L3 process death at NOT_STARTED is restorable and dispatches exactly once`() = runTest {
+    @Test fun `L3 process death before the mutation boundary is restorable and dispatches exactly once`() = runTest {
         val h = AnkiCommitHarness()
         h.loadToRating()
         h.rate()
         val effect = h.takeCommitEffect()
-        h.ledger.prepare(effect.request) // NOT_STARTED persisted, then the process dies
+        h.ledger.prepare(effect.request) // durable PREPARED intent persisted, then the process dies
         h.restartLedger()
         assertEquals(1, h.ledger.recoveryReport().restorable)
         val resumed = h.executor.execute(effect) as AnkiStudyEvent.RatingCommitResolved

@@ -365,7 +365,7 @@ never re-resolved by availability changes, provider changes or connection flaps
 |---|---|---|---|
 | AI **suggested** rating | `SuggestedRating` = `Evaluation.suggestedRating` (existing) | AI evaluator | LLM/rules |
 | User **selected** rating | `SelectedRating` (`CommitRatingRequest.rating`) | User | tap/spoken/click |
-| Anki **committed** rating | `CommittedRating` = scheduler accept (CommitRatingResult.Committed) | Anki backend | scheduler |
+| Anki **committed** rating | `CommittedRating` = scheduler accept (`BackendCommitResult.ConfirmedCommitted`) | Anki backend | scheduler |
 
 - `AI suggested GOOD` must not become `Anki commit GOOD` by itself (INV-05/13).
 - A future trusted auto-rating mode may exist ONLY as an explicit user setting;
@@ -391,14 +391,17 @@ Card loaded → turn starts → user interacts → rating chosen
 **Transaction boundary:** the next card is never requested/activated before the
 rating commit has a *deterministic* outcome.
 
-**Commit outcomes (`CommitRatingResult`, §28; sealed variants since GATE 03):**
+**Backend commit evidence (`BackendCommitResult`, §28; sealed variants since GATE 03, canonical
+names since GATE 11B):**
 
-| Status | Meaning | Session behavior |
+| Backend result | Meaning | Session behavior |
 |---|---|---|
-| Committed | Mutation applied + acknowledged | Advance to next turn |
-| Rejected | Deterministically refused pre-mutation | Surface; do NOT auto-retry |
-| RetryableFailure | Mutation provably never happened | Retry with THE SAME commit id |
-| Ambiguous | Outcome unknown (e.g. write issued, no ACK) | STOP progression; reconcile before any next card (INV-08) |
+| `ConfirmedCommitted` | Mutation applied + acknowledged | Advance to next turn (once the ledger made it durable) |
+| `ConfirmedNotCommitted` | Deterministically refused, or proven not applied, pre-mutation | Surface; the ledger records `RETRY_ALLOWED`, so an explicit retry of the same commit id is allowed |
+| `OutcomeUnknown` | Outcome unknown (e.g. write issued, no ACK) | STOP progression; the ledger records `AMBIGUOUS` — reconcile before any next card (INV-08) |
+
+The backend never names a ledger status: `RetryAllowed` is a local transaction-policy conclusion
+the coordinator draws from `ConfirmedNotCommitted`, never a backend fact (GATE 11B §12).
 
 `AMBIGUOUS` is the load-bearing case:
 
@@ -432,7 +435,7 @@ interface AnkiBackend {
     suspend fun getDecks(): AnkiResult<List<AnkiDeck>>
     suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession>
     suspend fun nextCard(session: AnkiReviewSession): NextCardResult
-    suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult
+    suspend fun commitRating(request: CommitRatingRequest): BackendCommitResult
 }
 ```
 
@@ -586,8 +589,9 @@ effect→event discipline).
 
 Effects (executed, complete as events): `LoadNextAnkiCard`, `CommitAnkiRating`,
 `BuryAnkiCard`, `SuspendAnkiCard`, `RefreshDeckSummary`.
-Events: `AnkiCardLoaded`, `AnkiCardLoadFailed`, `AnkiRatingCommitted`,
-`AnkiRatingCommitFailed(outcome)`, `AnkiBackendUnavailable`.
+Events: `AnkiCardLoaded`, `AnkiCardLoadFailed`, `RatingCommitPrepared`,
+`RatingCommitStarted`, `RatingCommitResolved(outcome)`, `RatingCommitReconciled(outcome)`,
+`AnkiBackendUnavailable`.
 These land in the gate that wires the gateway into the machine (GATE 06),
 behind the same reducer/effect separation every other effect uses.
 
@@ -1195,10 +1199,9 @@ re-probed and recovery policy must define which original facts remain authoritat
 | `NextCardResult.Finished` | Scheduler queue complete | Finish explicitly |
 | `NextCardResult.BackendUnavailable` | Backend unusable now | Keep binding; pause/recover |
 | `NextCardResult.Failure` | Other typed next-card error | Surface/recover, not exhaustion |
-| `CommitRatingResult.Committed` | Mutation acknowledged | May advance |
-| `CommitRatingResult.Rejected` | Deterministically refused before mutation | Surface/reconcile; no automatic retry |
-| `CommitRatingResult.RetryableFailure` | Proven not applied | Retry identical ID **and payload** |
-| `CommitRatingResult.Ambiguous` | Applied state unknown | Block advance and blind retry |
+| `BackendCommitResult.ConfirmedCommitted` | Mutation acknowledged by the backend | May advance (once the ledger made it durable) |
+| `BackendCommitResult.ConfirmedNotCommitted` | Backend proves it did not mutate | Retry identical ID **and payload** — the ledger records `RETRY_ALLOWED` |
+| `BackendCommitResult.OutcomeUnknown` | Backend cannot say whether it mutated | Block advance and blind retry — the ledger records `AMBIGUOUS` |
 
 Commit identity is `(backendId, studySessionId, turnId)`. Request adds the card ref,
 user rating, rated-at epoch milliseconds and optional answer duration; no HTML. Same ID
@@ -1599,23 +1602,43 @@ StudyScreen → StudySessionMachine / StudyReducer (pure events)
 
 ### State and durable boundary
 
-Logical state: `NOT_STARTED`, `SUBMITTING`, `COMMITTED`, `FAILED` (`safeToRetry`), `AMBIGUOUS`. Independent durable attempt phase: null (no claim), `PREPARED`, `MUTATION_CALL_ENTERED`, `MUTATION_RESPONSE_RECEIVED`, `LOCAL_RESULT_PERSISTED`. The transaction executor performs:
+The durable transaction status is `ReviewCommitStatus` — `PREPARED`, `SUBMITTING`, `COMMITTED`,
+`RETRY_ALLOWED`, `AMBIGUOUS`, and nothing else. There is deliberately **no `NOT_STARTED`**: a
+transaction that does not exist has no record, and "no record" is not a status. The status itself
+carries the mutation boundary (`PREPARED` = boundary not entered, `SUBMITTING` = boundary entered),
+so recovery never has to infer safety from a status plus a phase.
 
-1. Persist first intent (`NOT_STARTED`) and read-only baseline, then claim a durable `SUBMITTING/PREPARED` attempt. Only one claimant wins the ledger compare-and-set.
-2. During backend preflight, do not claim the scheduler was called. Immediately **before** the actual mutation API, persist `MUTATION_CALL_ENTERED`. If this write fails, the callback refuses mutation. This marker means the call **may** have mutated; it never proves success. Adapters without separate preflight mark entry before entering `commitRating`.
-3. Send at most one rating for that attempt; persist its classified response (`MUTATION_RESPONSE_RECEIVED`), then persist a terminal state (`LOCAL_RESULT_PERSISTED`). **Only durable `COMMITTED` may produce `Next`**. A failed response/final write produces `CommitPersistenceFailure`, not an optimistic success, replay or next-card query. An in-process known response can finish *only the ledger write* when the user checks again; it is never resent to the backend.
+`ReviewCommitPhase` (`INTENT_PERSISTED`, `MUTATION_BOUNDARY_ENTERED`, `BACKEND_RESPONSE_RECEIVED`,
+`FINAL_STATUS_PERSISTED`) is a separate, diagnostics-only marker for how far the latest attempt
+progressed. It is never transaction truth.
+
+The transaction executor performs:
+
+1. Persist first intent (`PREPARED`) and read-only baseline, then claim a durable attempt
+   (`INTENT_PERSISTED`, still `PREPARED`). Only one claimant wins the ledger compare-and-set.
+2. During backend preflight, do not claim the scheduler was called. Immediately **before** the
+   actual mutation API, persist `SUBMITTING` / `MUTATION_BOUNDARY_ENTERED`. If this write fails,
+   the callback refuses mutation. This marker means the call **may** have mutated; it never proves
+   success. Adapters without separate preflight mark entry before entering `commitRating`.
+3. Send at most one rating for that attempt; persist its classified response
+   (`BACKEND_RESPONSE_RECEIVED`), then persist a terminal status (`FINAL_STATUS_PERSISTED`).
+   **Only durable `COMMITTED` may produce `Next`**. A failed response/final write produces a
+   persistence fault, not an optimistic success, replay or next-card query. An in-process known
+   response can finish *only the ledger write* when the user checks again; it is never resent to
+   the backend.
 
 The DataStore snapshot is a dedicated, serialized cell with no reset-on-corruption handler. Unreadable storage, contradictory identities/phases, failed recovery writes and full capacity stop new commits before mutation. Committed and unresolved identities are not evicted to make room. Schema-v1 `SUBMITTING` is migrated conservatively as **call entered**, not as a safe pre-call retry. Health/count diagnostics are metadata-only; the UI never rewrites a record as “committed.”
 
-| Durable state found after interruption | Recovery | Scheduler call / next card |
+| Durable status found after interruption | Recovery action | Scheduler call / next card |
 |---|---|---|
-| `NOT_STARTED` or `SUBMITTING/PREPARED` | Safe only because the call boundary was never entered; explicit retry on the same *live* turn | No automatic replay; a restored turn has no live backend handle |
-| `SUBMITTING/MUTATION_CALL_ENTERED` without durable response | `AMBIGUOUS` | Never blind replay, never next card |
-| `SUBMITTING/MUTATION_RESPONSE_RECEIVED` | Finalize durably from the known response; no backend call | Only after terminal `COMMITTED` is saved |
-| `COMMITTED/LOCAL_RESULT_PERSISTED` | Duplicate event returns recorded success | Do not mutate again |
-| `FAILED/LOCAL_RESULT_PERSISTED` | Retry **only if** proven not applied and original turn is live; otherwise end | No next card while failed |
-| `AMBIGUOUS/LOCAL_RESULT_PERSISTED` | Read-only authoritative reconciliation, if backend supports it | No retry, rating buttons, skip or next card while unresolved |
-| Storage/integrity fault | Separate persistence-fault/error presentation, including failure *after backend success* | Stop; never guess from UI/card state |
+| no record | nothing to recover; the user rates again (nothing was sent) | No scheduler call |
+| `PREPARED` / `INTENT_PERSISTED` | `OfferRetry` — safe only because the boundary was never entered; explicit retry on the same *live* turn | No automatic replay; a restored turn has no live backend handle |
+| `SUBMITTING` / `MUTATION_BOUNDARY_ENTERED` without durable response | `Reconcile` → stays `AMBIGUOUS` until evidence decides | Never blind replay, never next card |
+| `SUBMITTING` / `BACKEND_RESPONSE_RECEIVED` | Finalize durably from the known response; no backend call | Only after terminal `COMMITTED` is saved |
+| `COMMITTED` / `FINAL_STATUS_PERSISTED` | `ResumeCommitted`; a duplicate event returns the recorded success | Do not mutate again |
+| `RETRY_ALLOWED` / `FINAL_STATUS_PERSISTED` | `OfferRetry` — proven not applied; retry the same commit id, on the original live turn, otherwise end | No next card while unresolved |
+| `AMBIGUOUS` / `FINAL_STATUS_PERSISTED` | `Reconcile` — read-only authoritative reconciliation, if the backend supports it | No retry, rating buttons, skip or next card while unresolved |
+| Storage/integrity fault | `IntegrityFailure` / separate persistence-fault presentation, including failure *after backend success* | Stop; never guess from UI/card state |
 
 On startup, scan before opening the backend review session or querying `nextCard`. Block the affected study session and any new session in the same known collection (unknown collection: entire backend) while an answer may be unresolved. Other backends and known unrelated collections are not blocked. Exiting/acknowledging does not delete the ambiguity. Restored turns cannot be re-rated by a new live turn. The UI distinguishes saving, saved, known-not-saved, unconfirmed, checking and persistence fault; “Check again” retries a read/ledger finalization, **not** the rating. No production “mark committed” or abandonment-as-proof control exists.
 

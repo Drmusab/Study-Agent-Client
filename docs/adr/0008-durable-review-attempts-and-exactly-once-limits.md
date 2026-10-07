@@ -1,6 +1,7 @@
 # ADR 0008 — Durable review attempts and exactly-once limits
 
-**Status:** Accepted (GATE 11 correction, 2026-09-24)
+**Status:** Accepted (GATE 11 correction, 2026-09-24) — naming amended by GATE 11B (2026-10-07), see
+[Naming amendment](#naming-amendment-gate-11b)
 **Supersedes:** ADR 0007's unqualified exactly-once scheduling and card-state reconciliation claims. Its rating-authority and stable-turn-identity decisions still apply.
 
 ## Decision
@@ -34,3 +35,20 @@ The ledger now stamps a per-record version and rejects an illegal or stale trans
 AnkiDroid remains `AT_MOST_ONCE_FAIL_CLOSED`. A provider write that is already in flight is `Ambiguous`, not a safe retry. Semantics are frozen onto the record at prepare and are not upgraded if a later capability refresh looks stronger. Reconciliation success is the only copy that may say the rating was verified as saved. Opening AnkiDroid and viewing diagnostics are navigation; they do not resubmit.
 
 The PC `rate_card` frame may carry an optional `review_commit_id`, omitted when absent. The client advertising `review_commit_idempotency` does not mean the server implements it. The mock agent ignores that field. Its `message_id` cache is process memory and is not a durable scheduler dedup. Automatic transport replay of a rating stays off unless the frozen semantics of that transaction advertise idempotent replay. That is not an end-to-end exactly-once claim.
+
+## Naming amendment (GATE 11B)
+
+The durable design above is unchanged; only the marker and status words were renamed when GATE 11B
+locked one name per layer:
+
+| This ADR (GATE 11 wording) | Canonical GATE 11B name | Layer |
+|---|---|---|
+| `MUTATION_CALL_ENTERED` | durable status `SUBMITTING`, attempt phase `MUTATION_BOUNDARY_ENTERED` | transaction truth / diagnostics |
+| `MUTATION_RESPONSE_RECEIVED` | attempt phase `BACKEND_RESPONSE_RECEIVED` | diagnostics |
+| `LOCAL_RESULT_PERSISTED` | attempt phase `FINAL_STATUS_PERSISTED` | diagnostics |
+| `FAILED` | `RETRY_ALLOWED` (proven not applied) or `AMBIGUOUS` (outcome unknown) | durable transaction truth |
+
+The load-bearing simplification: the durable **status** now carries the mutation boundary, so
+`PREPARED` means the boundary was never entered and `SUBMITTING` means it was. Recovery reads the
+status alone and no longer infers safety from a status plus a phase. There is no `NOT_STARTED`:
+no record means no transaction.

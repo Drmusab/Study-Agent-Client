@@ -108,10 +108,12 @@ A full ledger fails closed without evicting keys. Reset clears histories/scripts
 invalidates old turns without reusing presentation IDs.
 
 `ReviewCommitId = backend + study session + turn`. Together with `ReviewTurnId` and the sealed
-Committed / Rejected / RetryableFailure / Ambiguous outcomes, this prepares a stable correlation
-boundary. It is **not** a completed distributed exactly-once implementation. Durable ledgers,
-post-dispatch cancellation handling, scheduler mutation proof and reconciliation remain future work.
-Error-category-only retry classification was removed because it cannot prove non-application.
+`BackendCommitResult` outcomes — `ConfirmedCommitted` / `ConfirmedNotCommitted` / `OutcomeUnknown`,
+which the durable ledger records as `COMMITTED` / `RETRY_ALLOWED` / `AMBIGUOUS` — this prepares a
+stable correlation boundary. It is **not** a completed distributed exactly-once implementation.
+Durable ledgers, post-dispatch cancellation handling, scheduler mutation proof and reconciliation
+remain future work. Error-category-only retry classification was removed because it cannot prove
+non-application.
 
 ## Validation evidence
 
