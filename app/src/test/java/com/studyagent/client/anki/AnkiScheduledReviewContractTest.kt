@@ -205,7 +205,7 @@ abstract class AnkiScheduledReviewContract {
         val session = f.session()
         val turn = (f.backend.nextCard(session) as NextCardResult.Card).turn
 
-        assertTrue(f.backend.commitRating(turn.request(Rating.GOOD)) is com.studyagent.client.core.anki.CommitRatingResult.Rejected)
+        assertTrue(f.backend.commitRating(turn.request(Rating.GOOD)) is com.studyagent.client.core.anki.BackendCommitResult.ConfirmedNotCommitted)
         // …and the refusal does not silently advance the session either.
         assertEquals(NextCardResult.Card(turn), f.backend.nextCard(session))
     }

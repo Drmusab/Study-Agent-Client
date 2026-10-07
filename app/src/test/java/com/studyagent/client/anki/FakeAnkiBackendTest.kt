@@ -36,7 +36,7 @@ class FakeAnkiBackendTest {
     }
 
     @Test fun `ambiguous applied write blocks advance and blind duplicate mutation`() = runTest {
-        val ambiguous = CommitRatingResult.Ambiguous(AnkiError.QueryFailure("ack-lost"))
+        val ambiguous = BackendCommitResult.OutcomeUnknown(AnkiError.QueryFailure("ack-lost"))
         val backend = fake(listOf(CommitStep(ambiguous, appliedWhenAmbiguous = true)))
         val session = backend.begin()
         val turn = (backend.nextCard(session) as NextCardResult.Card).turn
@@ -49,7 +49,7 @@ class FakeAnkiBackendTest {
     }
 
     @Test fun `ambiguous unapplied write still cannot become safe retry`() = runTest {
-        val outcome = CommitRatingResult.Ambiguous(AnkiError.BackendUnavailable())
+        val outcome = BackendCommitResult.OutcomeUnknown(AnkiError.BackendUnavailable())
         val backend = fake(listOf(CommitStep(outcome)))
         val session = backend.begin()
         val request = (backend.nextCard(session) as NextCardResult.Card).turn.request()
@@ -60,28 +60,35 @@ class FakeAnkiBackendTest {
     }
 
     @Test fun `safe failure retries same payload once without consuming turn`() = runTest {
-        val failure = CommitRatingResult.RetryableFailure(AnkiError.BackendUnavailable())
+        val failure = BackendCommitResult.ConfirmedNotCommitted(AnkiError.BackendUnavailable())
         val backend = fake(listOf(CommitStep(failure)))
         val session = backend.begin()
         val turn = (backend.nextCard(session) as NextCardResult.Card).turn
         assertEquals(failure, backend.commitRating(turn.request()))
         assertEquals(NextCardResult.Card(turn), backend.nextCard(session))
-        val conflict = backend.commitRating(turn.request(Rating.EASY)) as CommitRatingResult.Rejected
-        assertTrue(conflict.error is AnkiError.CommitConflict)
-        assertTrue(backend.commitRating(turn.request()) is CommitRatingResult.Committed)
+        val conflict = backend.commitRating(turn.request(Rating.EASY)) as BackendCommitResult.ConfirmedNotCommitted
+        assertTrue(conflict.reason is AnkiError.CommitConflict)
+        assertTrue(backend.commitRating(turn.request()) is BackendCommitResult.ConfirmedCommitted)
         assertEquals(2, backend.recordedCommits().single().attempts)
         assertEquals(1, backend.recordedCommits().single().mutationCount)
     }
 
-    @Test fun `rejected commit neither mutates nor advances`() = runTest {
-        val rejected = CommitRatingResult.Rejected(AnkiError.CommitConflict())
+    @Test fun `a refusal before the mutation applies nothing and blocks the scheduler`() = runTest {
+        // GATE 11B §10: "not applied" is one backend fact. Whether the transaction may be
+        // resubmitted is decided by the coordinator from the durable status (RETRY_ALLOWED), not by
+        // a second, softer rejection kind invented by the backend.
+        val rejected = BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitConflict())
         val backend = fake(listOf(CommitStep(rejected)))
         val session = backend.begin()
         val turn = (backend.nextCard(session) as NextCardResult.Card).turn
         assertEquals(rejected, backend.commitRating(turn.request()))
-        assertEquals(rejected, backend.commitRating(turn.request()))
-        assertTrue(backend.nextCard(session) is NextCardResult.Failure)
+        assertFalse("the session cannot advance on an unresolved turn",
+            backend.nextCard(session) is NextCardResult.Card)
         assertEquals(0, backend.recordedCommits().single().mutationCount)
+        // Nothing was applied, so the same transaction is free to be resubmitted — and it applies.
+        assertTrue(backend.commitRating(turn.request()) is BackendCommitResult.ConfirmedCommitted)
+        assertEquals(1, backend.recordedCommits().single().mutationCount)
+        assertEquals(2, backend.recordedCommits().single().attempts)
     }
 
     @Test fun `backend loss preserves context and never switches backend`() = runTest {
@@ -91,12 +98,12 @@ class FakeAnkiBackendTest {
         backend.setAvailability(AnkiAvailability.TemporarilyUnavailable())
         assertEquals(fakeId, session.context.backendId)
         assertTrue(backend.nextCard(session) is NextCardResult.BackendUnavailable)
-        assertTrue(backend.commitRating(turn.request()) is CommitRatingResult.RetryableFailure)
+        assertTrue(backend.commitRating(turn.request()) is BackendCommitResult.ConfirmedNotCommitted)
         assertEquals(0, backend.recordedCommits().single().mutationCount)
-        assertTrue(backend.commitRating(turn.request(Rating.EASY)) is CommitRatingResult.Rejected)
+        assertTrue(backend.commitRating(turn.request(Rating.EASY)) is BackendCommitResult.ConfirmedNotCommitted)
         backend.setAvailability(AnkiAvailability.Ready(reviewCaps))
         assertEquals(NextCardResult.Card(turn), backend.nextCard(session))
-        assertTrue(backend.commitRating(turn.request()) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(turn.request()) is BackendCommitResult.ConfirmedCommitted)
     }
 
     @Test fun `known acknowledgment survives temporary unavailability`() = runTest {
@@ -131,7 +138,7 @@ class FakeAnkiBackendTest {
         backend.setCapabilities(AnkiCapabilities.NONE)
         assertTrue((backend.getDecks() as AnkiResult.Failure).error is AnkiError.UnsupportedAction)
         assertTrue((backend.nextCard(session) as NextCardResult.Failure).error is AnkiError.UnsupportedAction)
-        assertTrue(backend.commitRating(turn.request()) is CommitRatingResult.Rejected)
+        assertTrue(backend.commitRating(turn.request()) is BackendCommitResult.ConfirmedNotCommitted)
         assertTrue(session.context.capabilities.review)
         assertFalse(backend.availability.value.isReadyForReview)
         assertTrue(backend.beginReview(BeginReviewRequest(context(sessionId = "new"))) is AnkiResult.Failure)
@@ -180,9 +187,9 @@ class FakeAnkiBackendTest {
         val session = backend.begin()
         val turn = (backend.nextCard(session) as NextCardResult.Card).turn
         val wrongCard = turn.request().copy(card = card("B").ref)
-        assertTrue((backend.commitRating(wrongCard) as CommitRatingResult.Rejected).error is AnkiError.StaleTurn)
+        assertTrue((backend.commitRating(wrongCard) as BackendCommitResult.ConfirmedNotCommitted).reason is AnkiError.StaleTurn)
         val wrongSession = turn.request().copy(commitId = turn.commitId.copy(studySessionId = "other"))
-        assertTrue((backend.commitRating(wrongSession) as CommitRatingResult.Rejected).error is AnkiError.SessionInvalid)
+        assertTrue((backend.commitRating(wrongSession) as BackendCommitResult.ConfirmedNotCommitted).reason is AnkiError.SessionInvalid)
         assertTrue(backend.recordedCommits().isEmpty())
     }
 
@@ -192,8 +199,8 @@ class FakeAnkiBackendTest {
         val first = (backend.nextCard(session) as NextCardResult.Card).turn
         backend.commitRating(first.request())
         val second = (backend.nextCard(session) as NextCardResult.Card).turn
-        assertTrue(backend.commitRating(second.request()) is CommitRatingResult.Rejected)
-        assertTrue(backend.commitRating(first.request()) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(second.request()) is BackendCommitResult.ConfirmedNotCommitted)
+        assertTrue(backend.commitRating(first.request()) is BackendCommitResult.ConfirmedCommitted)
         assertEquals(1, backend.recordedCommits().size)
     }
 
@@ -208,7 +215,7 @@ class FakeAnkiBackendTest {
         val new = backend.begin()
         val newTurn = (backend.nextCard(new) as NextCardResult.Card).turn
         assertNotEquals(oldTurn.turnId, newTurn.turnId)
-        assertTrue(backend.commitRating(oldTurn.request()) is CommitRatingResult.Rejected)
+        assertTrue(backend.commitRating(oldTurn.request()) is BackendCommitResult.ConfirmedNotCommitted)
     }
 
     @Test fun `latency uses virtual time and cancellation cannot apply a commit`() = runTest {
@@ -221,7 +228,7 @@ class FakeAnkiBackendTest {
         assertTrue(backend.recordedCommits().isEmpty())
         job.cancelAndJoin()
         assertTrue(backend.recordedCommits().isEmpty())
-        assertTrue(backend.commitRating(turn.request()) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(turn.request()) is BackendCommitResult.ConfirmedCommitted)
     }
 
     @Test fun `availability is checked after simulated I O latency`() = runTest {
@@ -231,7 +238,7 @@ class FakeAnkiBackendTest {
         val pending = async { backend.commitRating(turn.request()) }
         runCurrent()
         backend.setAvailability(AnkiAvailability.TemporarilyUnavailable())
-        assertTrue(pending.await() is CommitRatingResult.RetryableFailure)
+        assertTrue(pending.await() is BackendCommitResult.ConfirmedNotCommitted)
         assertEquals(0, backend.recordedCommits().single().mutationCount)
     }
 
@@ -240,7 +247,7 @@ class FakeAnkiBackendTest {
         val session = backend.begin()
         val turn = (backend.nextCard(session) as NextCardResult.Card).turn
         val results = List(50) { async(Dispatchers.Default) { backend.commitRating(turn.request()) } }.awaitAll()
-        assertTrue(results.all { it is CommitRatingResult.Committed })
+        assertTrue(results.all { it is BackendCommitResult.ConfirmedCommitted })
         assertEquals(1, backend.recordedCommits().single().mutationCount)
         assertEquals(1, backend.recordedCommits().single().attempts)
     }
@@ -292,13 +299,13 @@ class FakeAnkiBackendTest {
         val backend = fake()
         val session = backend.begin()
         val first = (backend.nextCard(session) as NextCardResult.Card).turn
-        assertTrue(backend.commitRating(first.request(Rating.GOOD)) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(first.request(Rating.GOOD)) is BackendCommitResult.ConfirmedCommitted)
 
         val second = (backend.nextCard(session) as NextCardResult.Card).turn
         assertEquals("B", second.cardRef.cardId)
         assertNotEquals("a new presentation is a new turn identity", first.turnId, second.turnId)
         assertEquals("B", (backend.nextCard(session) as NextCardResult.Card).turn.cardRef.cardId)
-        assertTrue(backend.commitRating(second.request(Rating.GOOD)) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(second.request(Rating.GOOD)) is BackendCommitResult.ConfirmedCommitted)
         assertEquals(NextCardResult.Finished, backend.nextCard(session))
     }
 }

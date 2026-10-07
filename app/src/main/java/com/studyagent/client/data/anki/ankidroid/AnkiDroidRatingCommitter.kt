@@ -5,7 +5,7 @@ import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiResult
 import com.studyagent.client.core.anki.CommitPreparation
 import com.studyagent.client.core.anki.CommitRatingRequest
-import com.studyagent.client.core.anki.CommitRatingResult
+import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.ReconcileCommitRequest
 import com.studyagent.client.core.anki.ReconcileCommitResult
 import com.studyagent.client.core.common.AppClock
@@ -46,17 +46,17 @@ internal class AnkiDroidRatingCommitter(
     suspend fun commit(
         authority: String, sessionDeckId: Long, request: CommitRatingRequest,
         mutationEntry: suspend () -> Boolean = { true }
-    ): CommitRatingResult {
+    ): BackendCommitResult {
         val card = request.card
         val noteId = card.noteId?.toLongOrNull()
         val cardOrd = card.cardOrd
         if (noteId == null || cardOrd == null) {
-            return CommitRatingResult.Rejected(AnkiError.InvalidRequest("answer_requires_note_and_ord"))
+            return BackendCommitResult.ConfirmedNotCommitted(AnkiError.InvalidRequest("answer_requires_note_and_ord"))
         }
         // A write from an earlier attempt that never returned may still land. This attempt has not
         // entered, but non-application of the in-flight write is not proven, so retry is not safe.
         if (gateway.writeInFlight) {
-            return CommitRatingResult.Ambiguous(AnkiError.QueryFailure("provider_write_busy"))
+            return BackendCommitResult.OutcomeUnknown(AnkiError.QueryFailure("provider_write_busy"))
         }
 
         // 1. Fresh baseline, compared with the durable one captured before SUBMITTING.
@@ -66,12 +66,12 @@ internal class AnkiDroidRatingCommitter(
         }
         request.evidence?.let { evidence ->
             val expected = AnkiDroidCardState.fromEvidence(evidence)
-                ?: return CommitRatingResult.Rejected(AnkiError.InvalidRequest("commit_evidence_unreadable"))
+                ?: return BackendCommitResult.ConfirmedNotCommitted(AnkiError.InvalidRequest("commit_evidence_unreadable"))
             if (!expected.unchangedFrom(baseline)) {
                 // Someone (AnkiDroid itself, sync, another client) changed the card since it was
                 // rated here. Answering now would stack a second review on top: refuse, pre-mutation.
                 log("ANKI_COMMIT_PRECONDITION_FAILED reason=card_state_changed")
-                return CommitRatingResult.Rejected(AnkiError.CommitConflict(card))
+                return BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitConflict(card))
             }
         }
 
@@ -84,11 +84,11 @@ internal class AnkiDroidRatingCommitter(
         if (previousDeck != sessionDeckId) {
             when (val selected = gateway.selectDeck(authority, sessionDeckId)) {
                 AnkiDroidSelectOutcome.Selected -> selectionChanged = true
-                AnkiDroidSelectOutcome.DeckMissing -> return CommitRatingResult.Rejected(AnkiError.DeckNotFound())
-                is AnkiDroidSelectOutcome.NotDispatched -> return CommitRatingResult.RetryableFailure(selected.error)
+                AnkiDroidSelectOutcome.DeckMissing -> return BackendCommitResult.ConfirmedNotCommitted(AnkiError.DeckNotFound())
+                is AnkiDroidSelectOutcome.NotDispatched -> return BackendCommitResult.ConfirmedNotCommitted(selected.error)
                 is AnkiDroidSelectOutcome.Unknown -> {
                     restoreSelection(authority, previousDeck)
-                    return CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("deck_selection_unconfirmed"))
+                    return BackendCommitResult.ConfirmedNotCommitted(AnkiError.QueryFailure("deck_selection_unconfirmed"))
                 }
             }
         }
@@ -103,11 +103,11 @@ internal class AnkiDroidRatingCommitter(
                 // The scheduler now wants another card first (e.g. a learning card became due). On
                 // v2.24.1 the provider would silently fail to answer; nothing is sent.
                 log("ANKI_COMMIT_PRECONDITION_FAILED reason=card_not_next_in_queue")
-                return CommitRatingResult.Rejected(AnkiError.CommitConflict(card))
+                return BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitConflict(card))
             }
             // The callback durably records CALL_ENTERED just before the only scheduler update.
             // If it fails, the provider is NEVER called; finally still restores selected_deck.
-            if (!mutationEntry()) return CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable())
+            if (!mutationEntry()) return BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitLedgerUnavailable())
             val windowStart = clock.nowMillis()
             gateway.submitAnswer(authority, AnkiDroidAnswer(noteId, cardOrd, request.rating, request.answerDurationMs)) to windowStart
         } finally {
@@ -143,9 +143,9 @@ internal class AnkiDroidRatingCommitter(
         dispatch: AnkiDroidAnswerDispatch,
         windowStart: Long,
         windowEnd: Long
-    ): CommitRatingResult {
+    ): BackendCommitResult {
         if (dispatch is AnkiDroidAnswerDispatch.NotDispatched) {
-            return CommitRatingResult.RetryableFailure(dispatch.error) // no IPC happened at all
+            return BackendCommitResult.ConfirmedNotCommitted(dispatch.error) // no IPC happened at all
         }
         // A timeout, exception, or -1 is a lost response, NOT a transaction result. Even if a
         // later card read shows reps+1 (or no change), that observation cannot attribute the
@@ -153,29 +153,29 @@ internal class AnkiDroidRatingCommitter(
         // from this answer call *and* a consistent single review transition.
         if (dispatch !is AnkiDroidAnswerDispatch.Returned ||
             dispatch.rowCount != AnkiDroidApiContract.REVIEW_ANSWER_REACHED_ROWS) {
-            return CommitRatingResult.Ambiguous(AnkiError.Unknown("answer_outcome_unavailable"))
+            return BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("answer_outcome_unavailable"))
         }
         val after = when (val read = gateway.readCardState(authority, card)) {
             is AnkiResult.Success -> read.value
             is AnkiResult.Failure -> {
                 log("ANKI_COMMIT_VERIFICATION_UNAVAILABLE error=${read.error::class.simpleName}")
-                return CommitRatingResult.Ambiguous(AnkiError.Unknown("verification_read_failed"))
+                return BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("verification_read_failed"))
             }
         }
         val verdict = AnkiDroidCommitVerifier.classify(baseline, after, windowStart, windowEnd, tightWindow = true)
         log("ANKI_COMMIT_VERIFIED dispatch=${dispatch.token()} verdict=${verdict::class.simpleName}:${verdict.detail}")
         return when (verdict) {
             is AnkiDroidCommitVerifier.Verdict.ConsistentWithAnswer -> if (baseline.inFilteredDeck)
-                CommitRatingResult.Ambiguous(AnkiError.Unknown("filtered_deck_result_unverified"))
-                else CommitRatingResult.Committed()
+                BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("filtered_deck_result_unverified"))
+                else BackendCommitResult.ConfirmedCommitted()
             is AnkiDroidCommitVerifier.Verdict.Unchanged,
             is AnkiDroidCommitVerifier.Verdict.Unattributable ->
-                CommitRatingResult.Ambiguous(AnkiError.Unknown("answer_not_confirmed"))
+                BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("answer_not_confirmed"))
         }
     }
 
-    private fun preDispatch(error: AnkiError): CommitRatingResult =
-        if (error.isTransient()) CommitRatingResult.RetryableFailure(error) else CommitRatingResult.Rejected(error)
+    private fun preDispatch(error: AnkiError): BackendCommitResult =
+        if (error.isTransient()) BackendCommitResult.ConfirmedNotCommitted(error) else BackendCommitResult.ConfirmedNotCommitted(error)
 
     private suspend fun restoreSelection(authority: String, previousDeck: Long?) {
         if (previousDeck == null) return

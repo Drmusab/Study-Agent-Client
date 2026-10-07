@@ -44,7 +44,7 @@ class AnkiRatingCommitFlowTest {
         assertEquals(SessionPhase.WaitingForFirstCard, h.state.phase)
         assertEquals(1, h.pending.count { it is AnkiStudyEffect.Next })
         assertEquals(1, h.state.session!!.totalReviewedInSession)
-        assertEquals(ReviewCommitState.COMMITTED, h.ledger.get(firstTurn.commitId)!!.state)
+        assertEquals(ReviewCommitStatus.COMMITTED, h.ledger.get(firstTurn.commitId)!!.status)
 
         h.drain()
         assertNotEquals(firstTurn.turnId, h.turn!!.turnId)
@@ -53,7 +53,7 @@ class AnkiRatingCommitFlowTest {
         assertEquals(1, h.fake.physicalCommitCalls)
     }
 
-    @Test fun `B NOT_STARTED then SUBMITTING are durable before the backend is called`() = runTest {
+    @Test fun `B PREPARED then SUBMITTING are durable before the backend is called`() = runTest {
         val h = AnkiCommitHarness()
         h.loadToRating()
         h.rate()
@@ -63,16 +63,53 @@ class AnkiRatingCommitFlowTest {
         val job = launch { h.run(effect) }
         runCurrent()
         // The backend call is in progress (suspended at the gate): look at the disk.
+        fun durable(index: Int) = (ReviewCommitLedgerCodec.decode(h.store.writes[index])
+            as ReviewCommitLedgerCodec.Decoded.Records).records.single()
+        val intent = durable(0)
+        assertEquals(ReviewCommitStatus.PREPARED, intent.status)
+        assertEquals(ReviewCommitPhase.INTENT_PERSISTED, intent.phase)
+        assertEquals(0, intent.attemptCount)
+        // GATE 11B §28: the claim is durable too, and still PREPARED — the boundary is un-entered.
+        val claimed = durable(1)
+        assertEquals(ReviewCommitStatus.PREPARED, claimed.status)
+        assertEquals(1, claimed.attemptCount)
+        assertNotNull("the exclusive claim is durable before the call", claimed.claimedAtEpochMs)
+        assertNull("PREPARED never carries a submission time", claimed.submittedAtEpochMs)
+
         val observed = h.store.durableRecords().single()
-        val firstWrite = ReviewCommitLedgerCodec.decode(h.store.writes.first()) as ReviewCommitLedgerCodec.Decoded.Records
-        assertEquals(ReviewCommitState.NOT_STARTED, firstWrite.records.single().state)
-        assertEquals(ReviewCommitState.SUBMITTING, observed.state)
-        assertEquals(CommitAttemptPhase.MUTATION_CALL_ENTERED, observed.phase)
+        assertEquals(ReviewCommitStatus.PREPARED, observed.status)
+        assertEquals(ReviewCommitPhase.INTENT_PERSISTED, observed.phase)
         assertNotNull("baseline evidence is persisted before the call", observed.evidence)
-        assertEquals(ReviewCommitState.SUBMITTING, h.commit!!.state)
+        assertEquals(ReviewCommitStatus.PREPARED, h.commit!!.status)
         gate.complete(Unit)
         job.join()
-        assertEquals(ReviewCommitState.COMMITTED, h.store.durableRecords().single().state)
+        val committed = h.store.durableRecords().single()
+        assertEquals(ReviewCommitStatus.COMMITTED, committed.status)
+        assertEquals(ReviewCommitPhase.FINAL_STATUS_PERSISTED, committed.phase)
+        assertNotNull("entering the boundary stamps the mutation window", committed.submittedAtEpochMs)
+    }
+
+    @Test fun `B2 a crash during backend preflight leaves a provably un-entered record`() = runTest {
+        // Canonical SUBMITTING means "the mutation boundary was entered". Preflight runs while the
+        // record is still PREPARED, so a crash there must never be classified as unknown.
+        val h = AnkiCommitHarness()
+        h.loadToRating()
+        h.rate()
+        val effect = h.takeCommitEffect()
+        h.fake.commitGate = CompletableDeferred() // never completes: the process dies in preflight
+        val job = launch { h.run(effect) }
+        runCurrent()
+        job.cancelAndJoin()
+        h.fake.commitGate = null // the new process makes its own call
+        val durable = h.store.durableRecords().single()
+        assertEquals(ReviewCommitStatus.PREPARED, durable.status)
+        assertEquals(ReviewCommitPhase.INTENT_PERSISTED, durable.phase)
+        assertEquals(0, h.fake.mutationBoundaryCrossingCount)
+        // A new process offers a retry rather than forcing reconciliation (GATE 11B §45).
+        h.restartLedger()
+        val replay = h.executor.execute(effect) as AnkiStudyEvent.RatingCommitResolved
+        assertTrue(replay.outcome is AnkiCommitOutcome.Committed)
+        assertEquals(1, h.fake.mutationBoundaryCrossingCount)
     }
 
     @Test fun `C answer time is measured from question presentation to rating selection`() = runTest {
@@ -111,7 +148,7 @@ class AnkiRatingCommitFlowTest {
         // (no event) or answered from the ledger — never a second dispatch.
         assertEquals(1, outcomes.count { it == AnkiCommitOutcome.Committed("backend_confirmed") })
         assertTrue(outcomes.all { it == null || it is AnkiCommitOutcome.Committed })
-        assertEquals(ReviewCommitState.COMMITTED, h.ledger.get(effect.request.commitId)!!.state)
+        assertEquals(ReviewCommitStatus.COMMITTED, h.ledger.get(effect.request.commitId)!!.status)
     }
 
     // ---------------------------------------------------------------- E. correlation / stale
@@ -157,17 +194,17 @@ class AnkiRatingCommitFlowTest {
 
     @Test fun `F a proven not applied failure blocks and retries with the same commit id and rating`() = runTest {
         val h = AnkiCommitHarness(commitSteps = listOf(
-            CommitStep(CommitRatingResult.RetryableFailure(AnkiError.BackendUnavailable()))))
+            CommitStep(BackendCommitResult.ConfirmedNotCommitted(AnkiError.BackendUnavailable()))))
         h.loadToRating()
         h.rate(Rating.HARD)
         val original = h.takeCommitEffect()
         h.run(original)
         assertEquals(SessionPhase.RatingCommitFailed, h.state.phase)
-        assertTrue(h.commit!!.safeToRetry)
+        assertTrue(h.commit!!.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertTrue(h.pending.none { it is AnkiStudyEffect.Next })
         assertEquals(0, h.state.session!!.totalReviewedInSession)
         val ui = RatingCommitRecoveryUi.from(h.state)!!
-        assertEquals(RatingCommitRecoveryUi.Status.NOT_SAVED, ui.status)
+        assertTrue(ui.commitUiState is RatingCommitUiState.RetryAvailable)
         assertTrue(ui.canRetry)
         assertFalse(ui.ratingControlsEnabled)
         // A new rating is not a retry.
@@ -186,38 +223,66 @@ class AnkiRatingCommitFlowTest {
         assertEquals(2, h.ledger.get(original.request.commitId)!!.attemptCount)
     }
 
-    @Test fun `G a rejected commit cannot be retried and the session can be ended safely`() = runTest {
+    @Test fun `G a commit the backend proved not applied is retryable and the session can be ended safely`() = runTest {
+        // GATE 11B §10/§21: a backend answer of "not applied" is one durable fact — RETRY_ALLOWED.
+        // There is no second "rejected, never retry" status: retryability follows from whether the
+        // scheduler mutation was dispatched, never from how unpleasant the error looked.
         val h = AnkiCommitHarness(commitSteps = listOf(
-            CommitStep(CommitRatingResult.Rejected(AnkiError.CommitConflict()))))
+            CommitStep(BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitConflict()))))
         h.loadToRating()
         h.rate()
         h.drain()
         assertEquals(SessionPhase.RatingCommitFailed, h.state.phase)
-        assertFalse(h.commit!!.safeToRetry)
-        assertEquals("anki-retry-not-safe",
-            h.send(AnkiStudyEvent.RetryRatingCommit(h.state.epoch, h.commit!!.commitId)).rejectionReason)
+        assertEquals(ReviewCommitStatus.RETRY_ALLOWED, h.commit!!.status)
+        val ui = RatingCommitRecoveryUi.from(h.state)!!
+        assertTrue(ui.commitUiState is RatingCommitUiState.RetryAvailable)
+        assertTrue("the retry is offered to the user, never taken automatically", ui.canRetry)
+        assertTrue("the session can always be left safely", ui.canEndSession)
+        assertEquals(0, h.state.session!!.totalReviewedInSession)
         h.send(StudyEvent.UserEndRequested("end"))
         assertEquals(SessionPhase.Finished, h.state.phase)
         assertEquals(1, h.pending.count { it is AnkiStudyEffect.EndReview })
         assertEquals(1, h.fake.physicalCommitCalls)
     }
 
+    @Test fun `G2 a different payload for the same commit id is refused before any dispatch`() = runTest {
+        // The one thing that is *not* retryable is a different transaction wearing a known id.
+        val h = AnkiCommitHarness()
+        h.loadToRating()
+        h.rate()
+        val effect = h.takeCommitEffect()
+        h.fake.commitGate = CompletableDeferred() // holds the first attempt before the boundary
+        val job = launch { h.run(effect) }
+        runCurrent()
+        val original = effect.request
+        assertEquals("a durable transaction exists for the selected rating",
+            Rating.GOOD, h.ledger.get(original.commitId)!!.rating)
+        job.cancelAndJoin()
+        h.fake.commitGate = null
+        val forged = AnkiStudyEffect.CommitRating(0L, original.copy(rating = Rating.EASY), retry = false)
+        val resolved = h.executor.execute(forged) as AnkiStudyEvent.RatingCommitResolved
+        assertEquals(AnkiCommitOutcome.Failed("commit_payload_conflict", dispatched = false), resolved.outcome)
+        assertEquals("the scheduler was never mutated", 0, h.fake.mutationBoundaryCrossingCount)
+        assertEquals("and the original selection survives", Rating.GOOD,
+            h.ledger.get(original.commitId)!!.rating)
+    }
+
     // ---------------------------------------------------------------- H. ambiguity
 
     @Test fun `H an ambiguous commit blocks progression retry and re-rating`() = runTest {
         val h = AnkiCommitHarness(commitSteps = listOf(
-            CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("timeout")), appliedWhenAmbiguous = true)))
+            CommitStep(BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("timeout")), appliedWhenAmbiguous = true)))
         h.loadToRating()
         h.rate()
         h.drain()
         assertEquals(SessionPhase.ReconciliationRequired, h.state.phase)
-        assertEquals(ReviewCommitState.AMBIGUOUS, h.ledger.get(h.commit!!.commitId)!!.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, h.ledger.get(h.commit!!.commitId)!!.status)
         assertTrue(h.pending.isEmpty())
         assertFalse(h.send(AnkiStudyEvent.RetryRatingCommit(h.state.epoch, h.commit!!.commitId)).accepted)
         assertFalse(h.send(StudyEvent.UserRateCard(Rating.GOOD, h.state.currentCardId!!)).accepted)
         assertEquals(0, h.state.session!!.totalReviewedInSession)
         val ui = RatingCommitRecoveryUi.from(h.state)!!
-        assertEquals(RatingCommitRecoveryUi.Status.UNCONFIRMED, ui.status)
+        assertTrue(ui.commitUiState is RatingCommitUiState.VerificationRequired)
         assertFalse(ui.canRetry)
         assertTrue(ui.canCheckAgain)
         assertTrue(ui.canEndSession)
@@ -228,12 +293,12 @@ class AnkiRatingCommitFlowTest {
     @Test fun `H2 reconciliation that proves the write applied commits and advances once`() = runTest {
         // Only a backend whose *frozen* semantics include authoritative reconciliation may be asked.
         val h = AnkiCommitHarness.reconcilable(commitSteps = listOf(
-            CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("ack-lost")), appliedWhenAmbiguous = true)))
+            CommitStep(BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("ack-lost")), appliedWhenAmbiguous = true)))
         h.loadToRating()
         h.rate()
         h.drain()
         h.send(AnkiStudyEvent.ReconcileRatingCommit(h.state.epoch, h.commit!!.commitId))
-        assertEquals(RatingCommitRecoveryUi.Status.CHECKING, RatingCommitRecoveryUi.from(h.state)!!.status)
+        assertTrue(RatingCommitRecoveryUi.from(h.state)!!.commitUiState is RatingCommitUiState.VerificationRequired)
         assertFalse("one reconciliation at a time",
             h.send(AnkiStudyEvent.ReconcileRatingCommit(h.state.epoch, h.commit!!.commitId)).accepted)
         h.drain()
@@ -246,14 +311,14 @@ class AnkiRatingCommitFlowTest {
 
     @Test fun `H3 reconciliation that proves not applied allows an explicit retry only`() = runTest {
         val h = AnkiCommitHarness.reconcilable(commitSteps = listOf(
-            CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("lost")), appliedWhenAmbiguous = false)))
+            CommitStep(BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("lost")), appliedWhenAmbiguous = false)))
         h.loadToRating()
         h.rate()
         h.drain()
         h.send(AnkiStudyEvent.ReconcileRatingCommit(h.state.epoch, h.commit!!.commitId))
         h.drain()
         assertEquals(SessionPhase.RatingCommitFailed, h.state.phase)
-        assertTrue(h.commit!!.safeToRetry)
+        assertTrue(h.commit!!.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertTrue(h.pending.isEmpty())
         h.send(AnkiStudyEvent.RetryRatingCommit(h.state.epoch, h.commit!!.commitId))
         h.drain()
@@ -265,7 +330,7 @@ class AnkiRatingCommitFlowTest {
         // The fake claims authoritative reconciliation, but AnkiDroid semantics are clamped to
         // AT_MOST_ONCE_FAIL_CLOSED at freeze time: the transaction stays AMBIGUOUS, backend untouched.
         val h = AnkiCommitHarness(commitSteps = listOf(
-            CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("ack-lost")), appliedWhenAmbiguous = true)))
+            CommitStep(BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("ack-lost")), appliedWhenAmbiguous = true)))
         h.loadToRating()
         h.rate()
         h.drain()
@@ -276,14 +341,14 @@ class AnkiRatingCommitFlowTest {
         h.drain()
         assertEquals(0, h.fake.reconcileCalls)
         assertEquals(SessionPhase.ReconciliationRequired, h.state.phase)
-        assertEquals(ReviewCommitState.AMBIGUOUS, h.ledger.get(h.commit!!.commitId)!!.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, h.ledger.get(h.commit!!.commitId)!!.status)
         assertEquals("A", h.turn!!.cardRef.cardId)
         assertEquals(1, h.fake.physicalCommitCalls)
     }
 
     @Test fun `H5 a hung reconciliation times out as still ambiguous and can be checked again`() = runTest {
         val h = AnkiCommitHarness.reconcilable(commitSteps = listOf(
-            CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("ack-lost")), appliedWhenAmbiguous = true)))
+            CommitStep(BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("ack-lost")), appliedWhenAmbiguous = true)))
         h.loadToRating()
         h.rate()
         h.drain()
@@ -295,7 +360,7 @@ class AnkiRatingCommitFlowTest {
         assertEquals(SessionPhase.ReconciliationRequired, h.state.phase)
         assertFalse(h.commit!!.reconciling)
         val record = h.ledger.get(h.commit!!.commitId)!!
-        assertEquals(ReviewCommitState.AMBIGUOUS, record.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, record.status)
         assertEquals(ReviewCommitResolution.RECONCILIATION_INCONCLUSIVE, record.resolution)
         assertEquals("A", h.turn!!.cardRef.cardId) // no advance on an unknown outcome
         assertEquals(1, h.fake.physicalCommitCalls) // and never a second mutation
@@ -309,7 +374,7 @@ class AnkiRatingCommitFlowTest {
     }
 
     @Test fun `H4 inconclusive or unsupported reconciliation stays AMBIGUOUS`() = runTest {
-        val h = AnkiCommitHarness(commitSteps = listOf(CommitStep(CommitRatingResult.Ambiguous())))
+        val h = AnkiCommitHarness(commitSteps = listOf(CommitStep(BackendCommitResult.OutcomeUnknown())))
         h.loadToRating()
         h.rate()
         h.drain()
@@ -318,7 +383,7 @@ class AnkiRatingCommitFlowTest {
         h.drain()
         assertEquals(SessionPhase.ReconciliationRequired, h.state.phase)
         assertFalse(h.commit!!.reconciling)
-        assertEquals(ReviewCommitState.AMBIGUOUS, h.ledger.get(h.commit!!.commitId)!!.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, h.ledger.get(h.commit!!.commitId)!!.status)
     }
 
     @Test fun `I an exception escaping the backend after dispatch is AMBIGUOUS not failed`() = runTest {
@@ -336,14 +401,36 @@ class AnkiRatingCommitFlowTest {
         h.loadToRating()
         h.rate()
         val effect = h.takeCommitEffect()
-        h.fake.commitGate = CompletableDeferred()
+        // Suspend inside the mutation window: the durable boundary is already behind us.
+        h.fake.mutationGate = CompletableDeferred()
         val job = launch { h.executor.execute(effect) }
         runCurrent()
-        assertEquals(ReviewCommitState.SUBMITTING, h.store.durableRecords().single().state)
+        assertEquals(ReviewCommitStatus.SUBMITTING, h.store.durableRecords().single().status)
         job.cancelAndJoin()
         val record = h.store.durableRecords().single()
-        assertEquals(ReviewCommitState.AMBIGUOUS, record.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, record.status)
         assertEquals("cancelled_after_dispatch", record.failure!!.category)
+    }
+
+    @Test fun `J2 cancellation before the mutation boundary stays PREPARED and is retryable`() = runTest {
+        val h = AnkiCommitHarness()
+        h.loadToRating()
+        h.rate()
+        val effect = h.takeCommitEffect()
+        h.fake.commitGate = CompletableDeferred() // preflight only: the boundary is never entered
+        val job = launch { h.executor.execute(effect) }
+        runCurrent()
+        job.cancelAndJoin()
+        h.fake.commitGate = null
+        val record = h.store.durableRecords().single()
+        // Not ambiguous: nothing was dispatched, so the claim is released and it may be retried.
+        assertEquals(ReviewCommitStatus.PREPARED, record.status)
+        assertNull("the exclusive claim is released", record.claimedAtEpochMs)
+        assertEquals(0, h.fake.mutationBoundaryCrossingCount)
+        // …and the same process may claim it again immediately, without a restart.
+        val replay = h.executor.execute(effect) as AnkiStudyEvent.RatingCommitResolved
+        assertTrue(replay.outcome is AnkiCommitOutcome.Committed)
+        assertEquals(1, h.fake.mutationBoundaryCrossingCount)
     }
 
     // ---------------------------------------------------------------- K. stop during commit
@@ -363,15 +450,15 @@ class AnkiRatingCommitFlowTest {
         val late = inFlight.await()!!
         assertFalse(h.send(late).accepted)
         assertTrue(h.pending.none { it is AnkiStudyEffect.Next })
-        assertEquals("the ledger still learns the outcome", ReviewCommitState.COMMITTED,
-            h.ledger.get(effect.request.commitId)!!.state)
+        assertEquals("the ledger still learns the outcome", ReviewCommitStatus.COMMITTED,
+            h.ledger.get(effect.request.commitId)!!.status)
         assertEquals(1, h.fake.physicalCommitCalls)
         // Background / UI recreation never produce a mutation.
         assertTrue(h.send(StudyEvent.UiRecreated).effects.none { it is AnkiStudyEffect.CommitRating })
     }
 
     @Test fun `K2 new session in unresolved collection is blocked before nextCard`() = runTest {
-        val h = AnkiCommitHarness(commitSteps = listOf(CommitStep(CommitRatingResult.Ambiguous())))
+        val h = AnkiCommitHarness(commitSteps = listOf(CommitStep(BackendCommitResult.OutcomeUnknown())))
         h.loadToRating()
         h.rate()
         h.drain()
@@ -382,7 +469,7 @@ class AnkiRatingCommitFlowTest {
         h.send(AnkiStudyEvent.Start(AnkiStudyRequest("study-2", AnkiBackendMode.ANKIDROID_LOCAL, AnkiCommitHarness.DECK)))
         h.drain()
         assertEquals(SessionPhase.ReconciliationRequired, h.state.phase)
-        assertEquals(RatingCommitRecoveryUi.Status.UNCONFIRMED, RatingCommitRecoveryUi.from(h.state)!!.status)
+        assertTrue(RatingCommitRecoveryUi.from(h.state)!!.commitUiState is RatingCommitUiState.VerificationRequired)
         assertFalse(RatingCommitRecoveryUi.from(h.state)!!.ratingControlsEnabled)
         assertNull("do not start with nextCard()", h.turn)
         assertEquals("old commit is never re-sent", 1, h.fake.physicalCommitCalls)
@@ -395,11 +482,11 @@ class AnkiRatingCommitFlowTest {
         h.loadToRating()
         h.rate()
         val effect = h.takeCommitEffect()
-        h.fake.commitGate = CompletableDeferred()
+        h.fake.mutationGate = CompletableDeferred() // suspended inside the mutation window
         val job = launch { h.executor.execute(effect) }
         runCurrent()
         job.cancelAndJoin() // the process dies with the call in flight
-        h.store.overwrite(h.store.writes[2]) // …and the disk only has CALL_ENTERED, no response
+        h.store.overwrite(h.store.writes[2]) // …and the disk only has MUTATION_BOUNDARY_ENTERED
         h.restartLedger()
         val replay = h.executor.execute(effect) as AnkiStudyEvent.RatingCommitResolved
         assertTrue(replay.outcome is AnkiCommitOutcome.Ambiguous)
@@ -441,7 +528,7 @@ class AnkiRatingCommitFlowTest {
         val next = h.pending.removeFirst() as AnkiStudyEffect.Next
         h.send(AnkiStudyEvent.Scheduled(h.state.epoch, NextCardResult.Failure(AnkiError.QueryFailure("provider"))))
         assertTrue(h.state.phase is SessionPhase.Error)
-        assertEquals(ReviewCommitState.COMMITTED, h.commit!!.state)
+        assertEquals(ReviewCommitStatus.COMMITTED, h.commit!!.status)
         assertEquals(1, h.state.session!!.totalReviewedInSession)
         // Retrying the *read* is allowed; it can never re-send the committed rating.
         h.send(AnkiStudyEvent.RetryNextCard(h.state.epoch))
@@ -461,7 +548,7 @@ class AnkiRatingCommitFlowTest {
         h.fake.prepareRefusal = CommitPreparation.Refused(AnkiError.BackendUnavailable(), retryable = true)
         h.drain()
         assertEquals(SessionPhase.RatingCommitFailed, h.state.phase)
-        assertTrue(h.commit!!.safeToRetry)
+        assertTrue(h.commit!!.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertEquals(0, h.fake.physicalCommitCalls)
         h.fake.prepareRefusal = null
         h.send(AnkiStudyEvent.RetryRatingCommit(h.state.epoch, h.commit!!.commitId))
@@ -479,7 +566,7 @@ class AnkiRatingCommitFlowTest {
         h.drain()
         assertEquals(SessionPhase.CommitPersistenceFailure, h.state.phase)
         assertEquals("ledger_unavailable", h.commit!!.failureCategory)
-        assertFalse(h.commit!!.safeToRetry)
+        assertFalse(h.commit!!.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertEquals(0, h.fake.commitInvocations)
     }
 
@@ -500,10 +587,11 @@ class AnkiRatingCommitFlowTest {
         h.rate()
         val effect = h.takeCommitEffect()
         val gate = CompletableDeferred<Unit>()
-        h.fake.commitGate = gate
+        h.fake.mutationGate = gate // inside the mutation window: the boundary is already durable
         val job = launch { h.run(effect) }
         runCurrent()
-        assertEquals(CommitAttemptPhase.MUTATION_CALL_ENTERED, h.store.durableRecords().single().phase)
+        assertEquals(ReviewCommitStatus.SUBMITTING, h.store.durableRecords().single().status)
+        assertEquals(ReviewCommitPhase.MUTATION_BOUNDARY_ENTERED, h.store.durableRecords().single().phase)
         h.store.failNextWrites = 1 // response write fails, AFTER backend success
         gate.complete(Unit)
         job.join()
@@ -513,13 +601,13 @@ class AnkiRatingCommitFlowTest {
         assertTrue(h.pending.none { it is AnkiStudyEffect.Next })
         assertFalse(RatingCommitRecoveryUi.from(h.state)!!.canRetry)
         assertFalse(RatingCommitRecoveryUi.from(h.state)!!.ratingControlsEnabled)
-        assertEquals(ReviewCommitState.SUBMITTING, h.store.durableRecords().single().state)
+        assertEquals(ReviewCommitStatus.SUBMITTING, h.store.durableRecords().single().status)
 
         // This retries a ledger write, NOT commitRating(). A new process with no in-memory
-        // response would classify CALL_ENTERED as AMBIGUOUS rather than replay the mutation.
+        // response would finalize the durable answer rather than replay the mutation.
         h.send(AnkiStudyEvent.ReconcileRatingCommit(h.state.epoch, h.commit!!.commitId))
         h.drain()
-        assertEquals(ReviewCommitState.COMMITTED, h.store.durableRecords().single().state)
+        assertEquals(ReviewCommitStatus.COMMITTED, h.store.durableRecords().single().status)
         assertEquals(1, h.fake.backendEffectCount)
         assertEquals(1, h.fake.deliveryCount)
         assertEquals("B", h.turn!!.cardRef.cardId)
@@ -544,7 +632,7 @@ class AnkiRatingCommitFlowTest {
         h.rate()
         val effect = h.takeCommitEffect()
         h.run(effect) // COMMITTED durable, Next not yet executed
-        assertEquals(RatingCommitRecoveryUi.Status.SAVED, RatingCommitRecoveryUi.from(h.state)!!.status)
+        assertTrue(RatingCommitRecoveryUi.from(h.state)!!.commitUiState is RatingCommitUiState.Saved)
         assertFalse(RatingCommitRecoveryUi.from(h.state)!!.ratingControlsEnabled)
         h.restartLedger()
         val replay = h.executor.execute(effect) as AnkiStudyEvent.RatingCommitResolved

@@ -35,19 +35,22 @@ data class AnkiStudyInteraction(
 /**
  * The reducer's view of the current turn's rating transaction.
  *
- * [state] mirrors the durable ledger as far as the reducer knows it: NOT_STARTED = an attempt was
- * prepared and dispatched to the executor; SUBMITTING = the executor reported the ledger marker as
- * durable and the backend call started; COMMITTED / FAILED_SAFE_TO_RETRY / FAILED_NOT_RETRYABLE /
- * AMBIGUOUS = the executor's final,
- * persisted classification. [request] is fixed at selection time and re-sent verbatim by a retry
- * (same commit id, same rating, same timing), which is what makes the retry idempotent.
+ * [status] is the durable [ReviewCommitStatus] as far as the reducer knows it — the same
+ * vocabulary, never a study-level synonym: PREPARED = the attempt was prepared and dispatched to
+ * the coordinator; SUBMITTING = the coordinator reported the durable boundary marker, so the
+ * backend mutation may have happened; RETRY_ALLOWED / AMBIGUOUS / COMMITTED = the coordinator's
+ * final, persisted classification.
+ *
+ * Presentation is derived from this into [RatingCommitUiState]; the two are never stored apart.
+ *
+ * [request] is fixed at selection time and re-sent verbatim by a retry (same commit id, same
+ * rating, same timing), which is what makes the retry idempotent.
  */
 data class AnkiRatingCommit(
     val request: CommitRatingRequest,
-    val state: ReviewCommitState,
+    val status: ReviewCommitStatus,
     /** Attempts the reducer dispatched (1 = first submission). */
     val attempt: Int = 1,
-    val safeToRetry: Boolean = false,
     val failureCategory: String? = null,
     /** A reconciliation read is in flight (AMBIGUOUS only). */
     val reconciling: Boolean = false,
@@ -60,8 +63,16 @@ data class AnkiRatingCommit(
     val rating: Rating get() = request.rating
     val card: AnkiCardRef get() = request.card
     val selectedRating: Rating get() = request.rating
-    val committedRating: Rating? get() = if (state == ReviewCommitState.COMMITTED) request.rating else null
-    val isPending: Boolean get() = state == ReviewCommitState.NOT_STARTED || state == ReviewCommitState.SUBMITTING
+    val committedRating: Rating? get() = if (status == ReviewCommitStatus.COMMITTED) request.rating else null
+    val isPending: Boolean get() = status == ReviewCommitStatus.PREPARED || status == ReviewCommitStatus.SUBMITTING
+    /** The presentation projection of this transaction (GATE 11B §14). */
+    val commitUiState: RatingCommitUiState
+        get() = when (status) {
+            ReviewCommitStatus.PREPARED, ReviewCommitStatus.SUBMITTING -> RatingCommitUiState.Saving(commitId)
+            ReviewCommitStatus.RETRY_ALLOWED -> RatingCommitUiState.RetryAvailable(commitId)
+            ReviewCommitStatus.AMBIGUOUS -> RatingCommitUiState.VerificationRequired(commitId)
+            ReviewCommitStatus.COMMITTED -> RatingCommitUiState.Saved(commitId, request.rating)
+        }
 }
 
 /** Caller supplies a new logical session ID; a display deck name is never an identity. */
@@ -81,27 +92,30 @@ enum class AnkiStudyCompletion { NO_DUE_CARDS, USER_ENDED }
  * the reducer. It always reflects the durable ledger *after* the executor wrote it.
  */
 sealed interface AnkiCommitOutcome {
-    val state: ReviewCommitState
+    /** The durable [ReviewCommitStatus] this outcome reflects. Never a second status vocabulary. */
+    val status: ReviewCommitStatus
 
     /** [source]: `backend_confirmed`, `ledger_replay` (already COMMITTED, no call made) or `reconciled`. */
     data class Committed(val source: String) : AnkiCommitOutcome {
-        override val state: ReviewCommitState get() = ReviewCommitState.COMMITTED
+        override val status: ReviewCommitStatus get() = ReviewCommitStatus.COMMITTED
     }
 
-    /** Known NOT applied. [dispatched] = the backend was called for this attempt. */
-    data class Failed(val category: String, val safeToRetry: Boolean, val dispatched: Boolean) : AnkiCommitOutcome {
-        override val state: ReviewCommitState get() = if (safeToRetry)
-            ReviewCommitState.FAILED_SAFE_TO_RETRY else ReviewCommitState.FAILED_NOT_RETRYABLE
+    /**
+     * Known NOT applied: the backend proved it did not mutate. [dispatched] says whether the
+     * backend was invoked for this attempt at all.
+     */
+    data class Failed(val category: String, val dispatched: Boolean) : AnkiCommitOutcome {
+        override val status: ReviewCommitStatus get() = ReviewCommitStatus.RETRY_ALLOWED
     }
 
     /** May have been applied. Progression stays blocked. */
     data class Ambiguous(val category: String) : AnkiCommitOutcome {
-        override val state: ReviewCommitState get() = ReviewCommitState.AMBIGUOUS
+        override val status: ReviewCommitStatus get() = ReviewCommitStatus.AMBIGUOUS
     }
 
     /** The backend result cannot yet be durably recorded; NOT a backend failure or retry grant. */
     data class PersistenceFailure(val category: String) : AnkiCommitOutcome {
-        override val state: ReviewCommitState get() = ReviewCommitState.SUBMITTING
+        override val status: ReviewCommitStatus get() = ReviewCommitStatus.SUBMITTING
     }
 }
 
@@ -197,7 +211,7 @@ sealed interface AnkiStudyEffect : StudyEffect {
     data class Hydrate(val epoch: Long, val turn: AnkiReviewTurn) : AnkiStudyEffect
     data object CancelReads : AnkiStudyEffect
 
-    /** The single rating mutation path. [retry] = explicit retry of FAILED_SAFE_TO_RETRY. */
+    /** The single rating mutation path. [retry] = explicit retry of RETRY_ALLOWED. */
     data class CommitRating(val epoch: Long, val request: CommitRatingRequest, val retry: Boolean = false) : AnkiStudyEffect
 
     /** Read-only reconciliation of an AMBIGUOUS commit. */

@@ -26,13 +26,13 @@ class ReviewCommitBackendContractTest {
         val r = request(backend)
         assertEquals(CommitGuaranteeLevel.AT_MOST_ONCE_FAIL_CLOSED, backend.commitSemantics.guaranteeLevel)
         assertFalse(backend.commitSemantics.supportsIdempotentReplay)
-        assertTrue(backend.commitRating(r) is CommitRatingResult.Committed)
-        assertTrue(backend.commitRating(r) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(r) is BackendCommitResult.ConfirmedCommitted)
+        assertTrue(backend.commitRating(r) is BackendCommitResult.ConfirmedCommitted)
         assertEquals(1, backend.logicalCommitCount)
         assertEquals(2, backend.deliveryCount)
         assertEquals(1, backend.physicalCommitCalls)
         assertEquals(1, backend.backendEffectCount)
-        assertTrue(backend.commitRating(r.copy(rating = Rating.HARD)) is CommitRatingResult.Rejected)
+        assertTrue(backend.commitRating(r.copy(rating = Rating.HARD)) is BackendCommitResult.ConfirmedNotCommitted)
     }
 
     @Test fun `local dedup only backend can apply repeated delivery twice but ledger must stop it`() = runTest {
@@ -60,7 +60,7 @@ class ReviewCommitBackendContractTest {
 
         val recreated = FakeAnkiBackend(fakeId, listOf(deck()), listOf(card("A")), instanceId = "mode-idempotent-2",
             mode = FakeCommitMode.IDEMPOTENT_REPLAY, persistedEffectStore = store)
-        assertTrue(recreated.commitRating(request) is CommitRatingResult.Committed)
+        assertTrue(recreated.commitRating(request) is BackendCommitResult.ConfirmedCommitted)
         assertEquals(1, recreated.deliveryCount)
         assertEquals("backend table answered without a new mutation boundary", 0,
             recreated.mutationBoundaryCrossingCount)
@@ -71,8 +71,8 @@ class ReviewCommitBackendContractTest {
         val backend = FakeAnkiBackend(fakeId, listOf(deck()), listOf(card("A")), instanceId = "mode-non-idempotent",
             mode = FakeCommitMode.NON_IDEMPOTENT_REPLAY)
         val request = request(backend)
-        assertTrue(backend.commitRating(request) is CommitRatingResult.Committed)
-        assertTrue(backend.commitRating(request) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(request) is BackendCommitResult.ConfirmedCommitted)
+        assertTrue(backend.commitRating(request) is BackendCommitResult.ConfirmedCommitted)
         assertEquals(2, backend.deliveryCount)
         assertEquals(2, backend.mutationBoundaryCrossingCount)
         assertEquals(2, backend.backendEffectCount)
@@ -84,7 +84,7 @@ class ReviewCommitBackendContractTest {
         backend.commitThrowable = IllegalStateException("lost response")
         backend.applyBeforeThrow = true
         try { backend.commitRating(r); fail("expected lost response") } catch (_: IllegalStateException) {}
-        assertTrue(backend.commitRating(r) is CommitRatingResult.Ambiguous)
+        assertTrue(backend.commitRating(r) is BackendCommitResult.OutcomeUnknown)
         assertEquals(1, backend.physicalCommitCalls)
         assertEquals(1, backend.backendEffectCount)
     }
@@ -101,11 +101,11 @@ class ReviewCommitBackendContractTest {
         // correlates the scheduler effect (this in-memory simulation is not PC server proof).
         assertEquals(CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED, recreated.commitSemantics.guaranteeLevel)
         assertTrue(recreated.commitSemantics.supportsIdempotentReplay)
-        assertTrue(recreated.commitRating(r) is CommitRatingResult.Committed)
+        assertTrue(recreated.commitRating(r) is BackendCommitResult.ConfirmedCommitted)
         assertEquals(1, recreated.logicalCommitCount)
         assertEquals(1, recreated.backendEffectCount)
         assertEquals(0, recreated.physicalCommitCalls)
-        assertTrue(recreated.commitRating(r.copy(rating = Rating.EASY)) is CommitRatingResult.Rejected)
+        assertTrue(recreated.commitRating(r.copy(rating = Rating.EASY)) is BackendCommitResult.ConfirmedNotCommitted)
         assertEquals(1, recreated.backendEffectCount)
     }
 }

@@ -168,7 +168,7 @@ class AnkiCardFlowTest {
         val first = (backend.nextCard(session) as NextCardResult.Card).turn
         val late = (backend.hydrateCardContent(first.cardRef) as AnkiResult.Success).value
         // The turn advances while the first result is still in flight (STEP 49).
-        assertTrue(backend.commitRating(first.request(Rating.GOOD)) is CommitRatingResult.Committed)
+        assertTrue(backend.commitRating(first.request(Rating.GOOD)) is BackendCommitResult.ConfirmedCommitted)
         val second = (backend.nextCard(session) as NextCardResult.Card).turn
         assertNotEquals(first.turnId, second.turnId)
         // The late result verifies against the *turn it is attached to* — here it does not

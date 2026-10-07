@@ -83,7 +83,8 @@ class AnkiRatingCommitMachineTest {
         }
         assertEquals("hard", metadata["rating"])
         assertEquals("-", metadata["committed"])
-        assertTrue("the failure token survives inside the state", metadata["state"]!!.startsWith("FAILED("))
+        assertTrue("the durable status and its reason survive together: ${metadata["state"]}",
+            metadata["state"]!!.startsWith("RETRY_ALLOWED("))
         assertEquals("1", metadata["attempt"])
         // The guarantee is the frozen one, not a later restatement: the same value the ledger row
         // carries. The fake advertises authoritative reconciliation, which the AnkiDroid identity
@@ -112,7 +113,7 @@ class AnkiRatingCommitMachineTest {
         // The pending rating is data on the public state, and the rating controls are locked.
         val loading = r.machine.studyState.value as StudyState.Loading
         assertEquals(Rating.GOOD, loading.pendingRating)
-        assertEquals(RatingCommitRecoveryUi.Status.SAVING, r.machine.ratingCommitRecovery.value!!.status)
+        assertTrue("r.machine.ratingCommitRecovery.value!!.commitUiState", r.machine.ratingCommitRecovery.value!!.commitUiState is RatingCommitUiState.Saving)
         gate.complete(Unit); advanceUntilIdle()
 
         assertEquals("B", r.state.anki!!.turn!!.cardRef.cardId)
@@ -144,7 +145,7 @@ class AnkiRatingCommitMachineTest {
         // UI recreation during the in-flight commit is a no-op too.
         r.machine.dispatch(StudyEvent.UiRecreated); runCurrent()
         gate.complete(Unit); advanceUntilIdle()
-        assertEquals(ReviewCommitState.COMMITTED, r.ledger.get(commitId)!!.state)
+        assertEquals(ReviewCommitStatus.COMMITTED, r.ledger.get(commitId)!!.status)
         assertEquals(SessionPhase.Finished, r.state.phase)
         assertEquals(1, r.fake.physicalCommitCalls)
         assertEquals(1, r.fake.endReviewCalls)

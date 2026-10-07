@@ -147,7 +147,7 @@ sealed interface AnkiError {
 
     /**
      * Anything not classifiable. An error category alone cannot prove whether a write happened.
-     * Once dispatched, an unproven outcome MUST be CommitRatingResult.Ambiguous. Never infer
+     * Once dispatched, an unproven outcome MUST be BackendCommitResult.OutcomeUnknown. Never infer
      * retry safety from this category (or from BackendUnavailable).
      */
     data class Unknown(

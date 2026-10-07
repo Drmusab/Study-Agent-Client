@@ -90,7 +90,7 @@ class AnkiDroidRatingCommitTest {
             return (backend.nextCard(session) as NextCardResult.Card).turn
         }
 
-        suspend fun commit(turn: AnkiReviewTurn, rating: Rating = Rating.GOOD): Pair<CommitRatingRequest, CommitRatingResult> {
+        suspend fun commit(turn: AnkiReviewTurn, rating: Rating = Rating.GOOD): Pair<CommitRatingRequest, BackendCommitResult> {
             val base = CommitRatingRequest(turn.commitId, turn.cardRef, rating, clock.now, answerDurationMs = 3_000)
             val prepared = backend.prepareCommit(base) as CommitPreparation.Ready
             val request = base.copy(evidence = prepared.evidence)
@@ -120,7 +120,7 @@ class AnkiDroidRatingCommitTest {
         val r = rig()
         val turn = r.openTurn()
         val (_, result) = r.commit(turn)
-        assertEquals(CommitRatingResult.Committed(), result)
+        assertEquals(BackendCommitResult.ConfirmedCommitted(), result)
         assertEquals(1, r.answerCalls)
         val sent = r.provider.updateLog.single { it.first == "schedule" }.second
         assertTrue(sent.contains(ProviderValue.IntValue("answer_ease", 3)))
@@ -164,7 +164,7 @@ class AnkiDroidRatingCommitTest {
             markerCalls++
             true
         }
-        assertTrue(result is CommitRatingResult.Committed)
+        assertTrue(result is BackendCommitResult.ConfirmedCommitted)
         assertEquals(1, markerCalls)
         assertEquals(1, r.answerCalls)
     }
@@ -179,7 +179,7 @@ class AnkiDroidRatingCommitTest {
             markerCalls++
             true
         }
-        assertTrue(result is CommitRatingResult.Rejected)
+        assertTrue(result is BackendCommitResult.ConfirmedNotCommitted)
         assertEquals(0, markerCalls)
         assertEquals(0, r.answerCalls)
     }
@@ -190,7 +190,7 @@ class AnkiDroidRatingCommitTest {
         val result = r.backend.commitRating(CommitRatingRequest(turn.commitId, turn.cardRef, Rating.GOOD, r.clock.now)) {
             false // durable CALL_ENTERED could not be persisted
         }
-        assertEquals(CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable()), result)
+        assertEquals(BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitLedgerUnavailable()), result)
         assertEquals(0, r.answerCalls)
         assertEquals(42L, r.model.selectedDeck)
     }
@@ -202,7 +202,7 @@ class AnkiDroidRatingCommitTest {
         r.onAnswer = { ProviderUpdateResult.Returned(1) } // v2.24.1: caught RuntimeException, updated++
         val turn = r.openTurn()
         val (request, result) = r.commit(turn)
-        assertTrue(result is CommitRatingResult.Ambiguous)
+        assertTrue(result is BackendCommitResult.OutcomeUnknown)
         r.onAnswer = { r.model.applyAnswer(); ProviderUpdateResult.Returned(1) }
         assertEquals(result, r.backend.commitRating(request)) // no second answer, even on new input
         assertEquals(1, r.answerCalls)
@@ -215,7 +215,7 @@ class AnkiDroidRatingCommitTest {
         r.model.frontNote = 999L // a learning card became due first
         r.refreshProviderRows()
         val (_, result) = r.commit(turn)
-        assertTrue(result is CommitRatingResult.Rejected)
+        assertTrue(result is BackendCommitResult.ConfirmedNotCommitted)
         assertEquals(0, r.answerCalls)
         assertEquals("selection restored", 42L, r.model.selectedDeck)
     }
@@ -228,7 +228,7 @@ class AnkiDroidRatingCommitTest {
         r.model.applyAnswer() // reviewed in AnkiDroid itself meanwhile
         r.refreshProviderRows()
         val result = r.backend.commitRating(base.copy(evidence = evidence))
-        assertEquals(CommitRatingResult.Rejected(AnkiError.CommitConflict(turn.cardRef)), result)
+        assertEquals(BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitConflict(turn.cardRef)), result)
         assertEquals(0, r.answerCalls)
     }
 
@@ -244,7 +244,7 @@ class AnkiDroidRatingCommitTest {
         val post = rig()
         post.onAnswer = { ProviderUpdateResult.Threw("SecurityException",
             AnkiDroidFailure(AnkiDroidFailureCategory.PERMISSION_DENIED, AnkiDroidFailureEvidence.SECURITY_EXCEPTION_TYPE)) }
-        assertTrue(post.commit(post.openTurn()).second is CommitRatingResult.Ambiguous)
+        assertTrue(post.commit(post.openTurn()).second is BackendCommitResult.OutcomeUnknown)
         assertEquals(1, post.answerCalls)
     }
 
@@ -253,12 +253,12 @@ class AnkiDroidRatingCommitTest {
     @Test fun `provider death is ambiguous whether the card changed or not`() = runTest {
         val applied = rig()
         applied.onAnswer = { applied.model.applyAnswer(); ProviderUpdateResult.Returned(-1) }
-        assertTrue(applied.commit(applied.openTurn()).second is CommitRatingResult.Ambiguous)
+        assertTrue(applied.commit(applied.openTurn()).second is BackendCommitResult.OutcomeUnknown)
         assertEquals(6, applied.model.reps)
 
         val notApplied = rig()
         notApplied.onAnswer = { ProviderUpdateResult.Returned(-1) }
-        assertTrue(notApplied.commit(notApplied.openTurn()).second is CommitRatingResult.Ambiguous)
+        assertTrue(notApplied.commit(notApplied.openTurn()).second is BackendCommitResult.OutcomeUnknown)
         assertEquals(5, notApplied.model.reps)
     }
 
@@ -274,8 +274,8 @@ class AnkiDroidRatingCommitTest {
             yield()
         }
         val (request, result) = r.commit(turn)
-        assertTrue(result is CommitRatingResult.Ambiguous)
-        assertFalse(result is CommitRatingResult.RetryableFailure)
+        assertTrue(result is BackendCommitResult.OutcomeUnknown)
+        assertFalse(result is BackendCommitResult.ConfirmedNotCommitted)
         assertEquals(callsBefore, r.answerCalls)
         assertEquals(result, r.backend.commitRating(request))
         assertEquals(callsBefore, r.answerCalls)
@@ -287,7 +287,7 @@ class AnkiDroidRatingCommitTest {
         r.onAnswer = { delay(60_000); r.model.applyAnswer(); ProviderUpdateResult.Returned(1) }
         val turn = r.openTurn()
         val (request, result) = r.commit(turn)
-        assertTrue(result is CommitRatingResult.Ambiguous)
+        assertTrue(result is BackendCommitResult.OutcomeUnknown)
         assertTrue(r.gateway.writeInFlight)
         assertEquals("known ambiguous answers from memory, no second dispatch", result, r.backend.commitRating(request))
         val reconcile = r.backend.reconcileCommit(ReconcileCommitRequest(
@@ -311,7 +311,7 @@ class AnkiDroidRatingCommitTest {
         }
         r.provider.updateHandlers["schedule"] = { r.onAnswer() } // keep the failure scripted
         val (_, result) = r.commit(turn)
-        assertEquals(CommitRatingResult.Ambiguous(AnkiError.Unknown("verification_read_failed")), result)
+        assertEquals(BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("verification_read_failed")), result)
     }
 
     // ---------------------------------------------------------------- identity / idempotency
@@ -321,7 +321,7 @@ class AnkiDroidRatingCommitTest {
         val turn = r.openTurn()
         val (request, first) = r.commit(turn)
         assertEquals(first, r.backend.commitRating(request))
-        assertEquals(CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card)),
+        assertEquals(BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitConflict(request.card)),
             r.backend.commitRating(request.copy(rating = Rating.EASY)))
         assertEquals(1, r.answerCalls)
     }
@@ -330,7 +330,7 @@ class AnkiDroidRatingCommitTest {
         val r = rig()
         val turn = r.openTurn()
         val stale = CommitRatingRequest(turn.commitId.copy(turnId = ReviewTurnId("old")), turn.cardRef, Rating.GOOD, 1)
-        assertEquals(CommitRatingResult.Rejected(AnkiError.StaleTurn()), r.backend.commitRating(stale))
+        assertEquals(BackendCommitResult.ConfirmedNotCommitted(AnkiError.StaleTurn()), r.backend.commitRating(stale))
         assertEquals(0, r.answerCalls)
     }
 

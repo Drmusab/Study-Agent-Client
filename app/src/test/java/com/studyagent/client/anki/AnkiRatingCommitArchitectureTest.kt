@@ -60,8 +60,8 @@ class AnkiRatingCommitArchitectureTest {
 
     @Test fun `the ledger has no transition back to NOT_STARTED`() {
         val ledger = main.single { it.name == "ReviewCommitLedger.kt" }
-        val back = Regex("copy\\([^)]*state\\s*=\\s*ReviewCommitState\\.NOT_STARTED").containsMatchIn(ledger.code())
-        assertTrue("SUBMITTING/FAILED_SAFE_TO_RETRY/FAILED_NOT_RETRYABLE/AMBIGUOUS must never become NOT_STARTED in the ledger", !back)
+        val back = Regex("copy\\([^)]*state\\s*=\\s*ReviewCommitStatus\\.NOT_STARTED").containsMatchIn(ledger.code())
+        assertTrue("SUBMITTING/RETRY_ALLOWED/RETRY_ALLOWED/AMBIGUOUS must never become NOT_STARTED in the ledger", !back)
     }
 
     @Test fun `only the COMMITTED branch of the reducer requests the next card after a rating`() {

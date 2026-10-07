@@ -15,7 +15,7 @@ import org.junit.Test
  * from the store), every backend call made by the real executor, and the fake's physical mutation
  * counter. The asserted sequence *is* the durability contract:
  *
- *   intent durable → PREPARED durable → CALL_ENTERED durable → physical mutation →
+ *   intent durable → claim durable → boundary entered durable → physical mutation →
  *   RESPONSE_RECEIVED durable → COMMITTED durable → next card requested
  */
 class ReviewCommitDurabilityOrderTest {
@@ -30,7 +30,7 @@ class ReviewCommitDurabilityOrderTest {
             return inner.nextCard(session)
         }
 
-        override suspend fun commitRating(request: CommitRatingRequest, mutationEntry: suspend () -> Boolean): CommitRatingResult {
+        override suspend fun commitRating(request: CommitRatingRequest, mutationEntry: suspend () -> Boolean): BackendCommitResult {
             trace += "backend:commitRating(enter)"
             val result = inner.commitRating(request) {
                 trace += "boundary:mutationEntry-requested"
@@ -47,7 +47,7 @@ class ReviewCommitDurabilityOrderTest {
         store.onDurableWrite = { snapshot ->
             val record = (ReviewCommitLedgerCodec.decode(snapshot) as ReviewCommitLedgerCodec.Decoded.Records)
                 .records.lastOrNull()
-            trace += "durable:${record?.state}/${record?.phase}"
+            trace += "durable:${record?.status}/${record?.phase}"
         }
     }
 
@@ -67,15 +67,15 @@ class ReviewCommitDurabilityOrderTest {
         h.drain()
 
         assertEquals(listOf(
-            "durable:NOT_STARTED/null",                        // intent row before anything else
-            "durable:SUBMITTING/PREPARED",                     // claim (CAS) before the backend call
+            "durable:PREPARED/INTENT_PERSISTED",               // intent row before anything else
+            "durable:PREPARED/INTENT_PERSISTED",               // durable claim, boundary still un-entered
             "backend:commitRating(enter)",
             "boundary:mutationEntry-requested",
-            "durable:SUBMITTING/MUTATION_CALL_ENTERED",        // durable before the effect
+            "durable:SUBMITTING/MUTATION_BOUNDARY_ENTERED",        // durable before the effect
             "boundary:mutationEntry=true physical=0",          // effect not yet applied
             "backend:commitRating(return) physical=1",         // exactly one physical effect
-            "durable:SUBMITTING/MUTATION_RESPONSE_RECEIVED",   // response durable…
-            "durable:COMMITTED/LOCAL_RESULT_PERSISTED",        // …then terminal
+            "durable:SUBMITTING/BACKEND_RESPONSE_RECEIVED",   // response durable…
+            "durable:COMMITTED/FINAL_STATUS_PERSISTED",        // …then terminal
             "backend:nextCard"                                 // only now may the session advance
         ), trace)
         assertEquals("B", h.turn!!.cardRef.cardId)
@@ -85,7 +85,7 @@ class ReviewCommitDurabilityOrderTest {
     @Test fun `a failed mutation-entry write means the provider is never touched`() = runTest {
         val trace = mutableListOf<String>()
         val store = InMemoryReviewCommitStore()
-        // Right after the claim is durable, make the next write (MUTATION_CALL_ENTERED) fail.
+        // Right after the claim is durable, make the next write (MUTATION_BOUNDARY_ENTERED) fail.
         val failEntryWrite = CommitFaultInjector { point ->
             if (point == CommitFaultPoint.AFTER_PREPARED) store.failNextWrites = 1
         }
@@ -97,7 +97,7 @@ class ReviewCommitDurabilityOrderTest {
         h.drain()
         assertEquals(0, h.fake.physicalCommitCalls)
         assertTrue(trace.toString(), trace.contains("boundary:mutationEntry=false physical=0"))
-        assertFalse(trace.contains("durable:SUBMITTING/MUTATION_CALL_ENTERED"))
+        assertFalse(trace.contains("durable:SUBMITTING/MUTATION_BOUNDARY_ENTERED"))
         assertFalse(trace.contains("backend:nextCard"))
         assertEquals("A", h.turn!!.cardRef.cardId)
     }

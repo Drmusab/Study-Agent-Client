@@ -66,7 +66,7 @@ abstract class AnkiBackendContract {
             val turn = (f.backend.nextCard(session) as NextCardResult.Card).turn
             assertEquals(expected.ref, turn.cardRef)
             assertTrue(f.backend.commitRating(turn.request(if (index == 1) Rating.AGAIN else Rating.GOOD))
-                is CommitRatingResult.Committed)
+                is BackendCommitResult.ConfirmedCommitted)
             turns += turn
         }
         assertEquals(f.cards.size, turns.map { it.turnId }.distinct().size)
@@ -82,10 +82,10 @@ abstract class AnkiBackendContract {
         val turn = (f.backend.nextCard(session) as NextCardResult.Card).turn
         val request = turn.request()
         val committed = f.backend.commitRating(request)
-        assertTrue(committed is CommitRatingResult.Committed)
+        assertTrue(committed is BackendCommitResult.ConfirmedCommitted)
         assertEquals(committed, f.backend.commitRating(request))
-        val conflict = f.backend.commitRating(request.copy(rating = Rating.EASY)) as CommitRatingResult.Rejected
-        assertTrue(conflict.error is AnkiError.CommitConflict)
+        val conflict = f.backend.commitRating(request.copy(rating = Rating.EASY)) as BackendCommitResult.ConfirmedNotCommitted
+        assertTrue(conflict.reason is AnkiError.CommitConflict)
         val second = f.backend.nextCard(session) as NextCardResult.Card
         assertEquals(f.cards[1].ref, second.turn.cardRef)
         assertEquals(committed, f.backend.commitRating(request)) // late ACK retry, never advances twice
@@ -97,7 +97,7 @@ abstract class AnkiBackendContract {
         val session = f.begin()
         val turn = (f.backend.nextCard(session) as NextCardResult.Card).turn
         val results = List(20) { async { f.backend.commitRating(turn.request()) } }.awaitAll()
-        assertTrue(results.all { it is CommitRatingResult.Committed })
+        assertTrue(results.all { it is BackendCommitResult.ConfirmedCommitted })
         val second = f.backend.nextCard(session) as NextCardResult.Card
         assertEquals(f.cards[1].ref, second.turn.cardRef)
     }
@@ -107,8 +107,8 @@ abstract class AnkiBackendContract {
         val session = f.begin()
         val turn = (f.backend.nextCard(session) as NextCardResult.Card).turn
         val stale = turn.request().copy(commitId = turn.commitId.copy(turnId = ReviewTurnId("not-active")))
-        val result = f.backend.commitRating(stale) as CommitRatingResult.Rejected
-        assertTrue(result.error is AnkiError.StaleTurn)
+        val result = f.backend.commitRating(stale) as BackendCommitResult.ConfirmedNotCommitted
+        assertTrue(result.reason is AnkiError.StaleTurn)
         assertEquals(NextCardResult.Card(turn), f.backend.nextCard(session))
     }
 

@@ -2,7 +2,7 @@ package com.studyagent.client.study
 
 import com.studyagent.client.anki.fake.FakeCommitMode
 import com.studyagent.client.core.anki.ReviewCommitLedger
-import com.studyagent.client.core.anki.ReviewCommitState
+import com.studyagent.client.core.anki.ReviewCommitStatus
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.study.AnkiStudyEffect
 import com.studyagent.client.core.study.StudyEvent
@@ -43,7 +43,7 @@ class ReviewCommitConcurrencyTest {
         assertEquals(1, harness.fake.backendEffectCount)
         assertEquals(1, harness.fake.logicalCommitCount)
         assertEquals("the ledger is the authority and it says COMMITTED",
-            ReviewCommitState.COMMITTED, harness.ledger.snapshot().single().state)
+            ReviewCommitStatus.COMMITTED, harness.ledger.snapshot().single().status)
     }
 
     @Test
@@ -61,7 +61,7 @@ class ReviewCommitConcurrencyTest {
         assertEquals(1, harness.fake.backendEffectCount)
         // Every racing caller gets an answer, but only one of them caused a scheduler effect.
         assertTrue(results.all { it != null })
-        assertEquals(ReviewCommitState.COMMITTED, harness.ledger.snapshot().single().state)
+        assertEquals(ReviewCommitStatus.COMMITTED, harness.ledger.snapshot().single().status)
     }
 
     @Test
@@ -124,7 +124,7 @@ class ReviewCommitConcurrencyTest {
         val cardId = harness.state.currentCardId!!
         harness.rate(Rating.GOOD)
         harness.drain()
-        assertEquals(ReviewCommitState.AMBIGUOUS, harness.commit?.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, harness.commit?.status)
 
         // Racing the same input again (and the losing ratings) must not reach the backend.
         val attempts = (1..100).map { async { harness.send(StudyEvent.UserRateCard(Rating.GOOD, cardId)).accepted } }

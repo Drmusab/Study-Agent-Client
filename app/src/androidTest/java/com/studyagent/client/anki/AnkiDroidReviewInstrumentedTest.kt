@@ -13,7 +13,7 @@ import com.studyagent.client.core.anki.AnkiReviewTurnContent
 import com.studyagent.client.core.anki.AnkiSessionContext
 import com.studyagent.client.core.anki.BeginReviewRequest
 import com.studyagent.client.core.anki.CommitRatingRequest
-import com.studyagent.client.core.anki.CommitRatingResult
+import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.ReviewCommitId
 import com.studyagent.client.core.models.Rating
@@ -169,10 +169,10 @@ class AnkiDroidReviewInstrumentedTest {
                 )
             )
         }
-        assertTrue("GATE 06 must refuse rather than pretend", result is CommitRatingResult.Rejected)
+        assertTrue("GATE 06 must refuse rather than pretend", result is BackendCommitResult.ConfirmedNotCommitted)
         assertEquals(
             "ratingCommitIntegrationPending",
-            ((result as CommitRatingResult.Rejected).error as AnkiError.UnsupportedAction).action
+            ((result as BackendCommitResult.ConfirmedNotCommitted).reason as AnkiError.UnsupportedAction).action
         )
         assertEquals(NextCardResult.Card(turn), runBlocking { backend.nextCard(session) })
     }
