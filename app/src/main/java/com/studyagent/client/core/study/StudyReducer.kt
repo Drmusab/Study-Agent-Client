@@ -217,7 +217,13 @@ object StudyReducer {
                         attempt = record.attemptCount.coerceAtLeast(1),
                         failureCategory = record.failure?.category),
                         restoredCommit = true,
-                        blockedByPriorCommit = record.sessionId != local.request.studySessionId),
+                        blockedByPriorCommit = record.sessionId != local.request.studySessionId,
+                        // PART V: the durable scan overrides whatever this session believed. A
+                        // disagreement is recorded, never silently reconciled in favour of the UI.
+                        projectionMismatch = CommitTruthDiagnostics.detectMismatch(
+                            projected = local.commit?.status, durable = record.status,
+                            commitId = record.commitId,
+                            source = CommitProjectionMismatch.SOURCE_RESTORE)),
                     error = SessionProblemHolder(when {
                         pendingWrite -> SessionProblem.ANKI_COMMIT_PERSISTENCE_FAILURE
                         unresolved -> SessionProblem.ANKI_RATING_UNCONFIRMED
@@ -248,8 +254,9 @@ object StudyReducer {
                             turn.cardRef.collectionKey != context.deckRef?.collectionKey) return failed(AnkiError.SessionInvalid())
                         // A new presentation starts a new transaction: the previous (COMMITTED)
                         // commit is gone, so a late duplicate result for it is stale by identity.
+                        // Any recorded divergence belonged to that transaction and retires with it.
                         moved(state.copy(anki = local.copy(turn = turn, commit = null, transcript = null,
-                            turnPresentedAtMs = null, failure = null)),
+                            turnPresentedAtMs = null, failure = null, projectionMismatch = null)),
                             listOf(AnkiStudyEffect.Hydrate(state.epoch, turn)))
                     }
                 }
@@ -467,7 +474,9 @@ object StudyReducer {
         )
         val next = state.copy(
             phase = SessionPhase.SubmittingRating,
-            anki = local.copy(commit = AnkiRatingCommit(request, ReviewCommitStatus.PREPARED)),
+            // A new transaction supersedes any divergence recorded for an older one.
+            anki = local.copy(commit = AnkiRatingCommit(request, ReviewCommitStatus.PREPARED),
+                projectionMismatch = null),
             error = null,
             activeSpeechEffectId = null,
             activeRecognitionEffectId = null
@@ -498,6 +507,20 @@ object StudyReducer {
             (!local.restoredCommit && (session == null || commitId.studySessionId != session.context.studySessionId))
         ) return Transition.reject(state, event, "stale-anki-commit-result")
         if (commit.status == ReviewCommitStatus.COMMITTED) return Transition.reject(state, event, "duplicate-anki-commit-result")
+        // PART V — durable truth adopted here may contradict the projection this session was
+        // showing (a restore scan, a ledger replay after process death, or read-only
+        // reconciliation). The ledger wins and the disagreement is recorded, never hidden.
+        // A persistence failure is deliberately excluded: "could not write" is not a durable status.
+        val overrideSource = when {
+            outcome is AnkiCommitOutcome.PersistenceFailure -> null
+            reconciliation -> CommitProjectionMismatch.SOURCE_RECONCILE
+            outcome is AnkiCommitOutcome.Committed && outcome.source != AnkiCommitOutcome.SOURCE_BACKEND_CONFIRMED ->
+                CommitProjectionMismatch.SOURCE_REPLAY
+            else -> null
+        }
+        val owner = local.copy(projectionMismatch = local.projectionMismatch ?: overrideSource?.let {
+            CommitTruthDiagnostics.detectMismatch(commit.status, outcome.status, commitId, it)
+        })
         if (local.restoredCommit) {
             // A process cannot resurrect an AnkiDroid turn handle. Never create a fresh turn or
             // retry the old rating before resolving the durable transaction. Once resolved, begin
@@ -510,13 +533,13 @@ object StudyReducer {
                 is AnkiCommitOutcome.Committed -> movedRecovery(state, event, local, now)
                 is AnkiCommitOutcome.Failed -> if (local.blockedByPriorCommit) movedRecovery(state, event, local, now)
                     else Transition(state.copy(phase = SessionPhase.RatingCommitFailed,
-                        anki = local.copy(commit = commit.copy(status = ReviewCommitStatus.RETRY_ALLOWED,
+                        anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.RETRY_ALLOWED,
                             reconciling = false))), emptyList())
                 is AnkiCommitOutcome.Ambiguous -> Transition(state.copy(phase = SessionPhase.ReconciliationRequired,
-                    anki = local.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS,
+                    anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS,
                         reconciling = false))), emptyList())
                 is AnkiCommitOutcome.PersistenceFailure -> Transition(state.copy(phase = SessionPhase.CommitPersistenceFailure,
-                    anki = local.copy(commit = commit.copy(reconciling = false))), emptyList())
+                    anki = owner.copy(commit = commit.copy(reconciling = false))), emptyList())
             }
         }
         if (session == null || turn == null || turn.turnId != commitId.turnId) {
@@ -530,7 +553,7 @@ object StudyReducer {
         val next = when (outcome) {
             is AnkiCommitOutcome.Committed -> state.copy(
                 phase = SessionPhase.WaitingForFirstCard,
-                anki = local.copy(turn = null, transcript = null, turnPresentedAtMs = null,
+                anki = owner.copy(turn = null, transcript = null, turnPresentedAtMs = null,
                     commit = commit.copy(status = ReviewCommitStatus.COMMITTED, reconciling = false,
                         failureCategory = null,
                         verifiedByReconciliation = reconciliation)),
@@ -543,7 +566,7 @@ object StudyReducer {
             )
             is AnkiCommitOutcome.Failed -> state.copy(
                 phase = SessionPhase.RatingCommitFailed,
-                anki = local.copy(commit = commit.copy(
+                anki = owner.copy(commit = commit.copy(
                     status = ReviewCommitStatus.RETRY_ALLOWED,
                     reconciling = false, failureCategory = outcome.category)),
                 error = SessionProblemHolder(
@@ -554,7 +577,7 @@ object StudyReducer {
             )
             is AnkiCommitOutcome.Ambiguous -> state.copy(
                 phase = SessionPhase.ReconciliationRequired,
-                anki = local.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS, reconciling = false,
+                anki = owner.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS, reconciling = false,
                     failureCategory = outcome.category)),
                 error = SessionProblemHolder(
                     SessionProblem.ANKI_RATING_UNCONFIRMED,
@@ -565,7 +588,7 @@ object StudyReducer {
             )
             is AnkiCommitOutcome.PersistenceFailure -> state.copy(
                 phase = SessionPhase.CommitPersistenceFailure,
-                anki = local.copy(commit = commit.copy(reconciling = false, failureCategory = outcome.category)),
+                anki = owner.copy(commit = commit.copy(reconciling = false, failureCategory = outcome.category)),
                 error = SessionProblemHolder(SessionProblem.ANKI_COMMIT_PERSISTENCE_FAILURE,
                     "Study-Agent could not safely record the review result. It will not retry or " +
                         "load another card until the record is saved.", true, now)
@@ -586,7 +609,9 @@ object StudyReducer {
     ): Transition = Transition(state.copy(
         phase = SessionPhase.Starting,
         anki = local.copy(commit = null, restoredCommit = false, blockedByPriorCommit = false,
-            failure = null, priorUnresolvedCommits = 0),
+            // The transaction is resolved and the durable record now leads a fresh read-only
+            // scheduler session, so the recorded divergence has been acted on and is retired.
+            failure = null, priorUnresolvedCommits = 0, projectionMismatch = null),
         error = null
     ).recordTransition(event, state.phase, SessionPhase.Starting),
         listOf(AnkiStudyEffect.Begin(state.epoch, local.request, now)))

@@ -68,6 +68,30 @@ class AnkiStudyEffectExecutor(
         }
     }
 
+    // ------------------------------------------------- GATE 11B PART V diagnostics (read-only)
+
+    /**
+     * The durable record for [commitId], for diagnostics correlation only.
+     *
+     * Deliberately narrow: diagnostics may *read* durable transaction truth, but nothing may decide
+     * anything from this call, and there is no write counterpart here — every state change goes
+     * through the coordinator's three entry points (brief PART II: one transaction path).
+     */
+    suspend fun durableRecord(commitId: ReviewCommitId): ReviewCommitRecord? = ledger?.get(commitId)
+
+    /**
+     * What the backend currently says about its own reachability, or [CommitTruthSnapshot.UNKNOWN].
+     * Scheduler truth is observed, never inferred from a commit status (brief PART II: ledger answers transactions, backend answers scheduling).
+     */
+    fun schedulerAvailabilityOf(backendId: AnkiBackendId): String {
+        val backend = registry.find(backendId) ?: return CommitTruthSnapshot.UNKNOWN
+        return when (val value = backend.availability.value) {
+            is AnkiAvailability.Ready -> "ready"
+            is AnkiAvailability.Checking -> CommitTruthSnapshot.UNKNOWN
+            else -> value::class.simpleName?.lowercase() ?: CommitTruthSnapshot.UNKNOWN
+        }
+    }
+
     // ---------------------------------------------------------------- GATE 11B coordinator API
 
     override suspend fun commit(request: CommitRatingRequest): ReviewCommitOutcome {
@@ -96,7 +120,15 @@ class AnkiStudyEffectExecutor(
         val ledger = this.ledger
             ?: return ReviewCommitRecoveryResult.Indeterminate(commitId, "ledger_unavailable")
         var record = ledger.get(commitId)
-            ?: return ReviewCommitRecoveryResult.NoTransaction(commitId)
+        if (record == null) {
+            // GATE 11B PART IV, last row: "unknown is not absent". A ledger that could not be read
+            // must never be reported as "no transaction", because that would license a fresh
+            // mutation for a turn whose durable truth is simply unknown.
+            if (ledger.health() !is ReviewCommitLedger.Health.Ready) {
+                return ReviewCommitRecoveryResult.Indeterminate(commitId, "commit_ledger_unavailable")
+            }
+            return ReviewCommitRecoveryResult.NoTransaction(commitId)
+        }
 
         // 1. Durable backend evidence is applied first: a recorded answer is proof, not inference.
         //    Recovery never re-enters the mutation boundary — it only finishes *writing* an answer
@@ -307,7 +339,8 @@ class AnkiStudyEffectExecutor(
                 prepared.record
             }
             is ReviewCommitLedger.PrepareResult.Existing -> prepared.record
-            is ReviewCommitLedger.PrepareResult.Tombstoned -> return AnkiCommitOutcome.Committed("ledger_tombstone")
+            is ReviewCommitLedger.PrepareResult.Tombstoned -> return AnkiCommitOutcome.Committed(
+                AnkiCommitOutcome.SOURCE_LEDGER_TOMBSTONE)
             // The recorded rating is immutable: a different payload for this id is never sent.
             is ReviewCommitLedger.PrepareResult.Conflict -> return refused("commit_payload_conflict")
             ReviewCommitLedger.PrepareResult.Full -> return storageFault("ledger_full")
@@ -322,7 +355,7 @@ class AnkiStudyEffectExecutor(
 
         // Answer from the ledger whenever the record is not claimable by this effect.
         when (record.status) {
-            ReviewCommitStatus.COMMITTED -> return AnkiCommitOutcome.Committed("ledger_replay")
+            ReviewCommitStatus.COMMITTED -> return AnkiCommitOutcome.Committed(AnkiCommitOutcome.SOURCE_LEDGER_REPLAY)
             ReviewCommitStatus.AMBIGUOUS ->
                 return AnkiCommitOutcome.Ambiguous(record.failure?.category ?: "ambiguous")
             ReviewCommitStatus.SUBMITTING -> return null // in flight in this process; that attempt reports
@@ -361,7 +394,8 @@ class AnkiStudyEffectExecutor(
         val claimed = when (val claim = ledger.claim(commitId, evidence, allowRetry = effect.retry)) {
             is ReviewCommitLedger.ClaimResult.Claimed -> claim.record
             is ReviewCommitLedger.ClaimResult.InFlight -> return null
-            is ReviewCommitLedger.ClaimResult.AlreadyCommitted -> return AnkiCommitOutcome.Committed("ledger_replay")
+            is ReviewCommitLedger.ClaimResult.AlreadyCommitted -> return AnkiCommitOutcome.Committed(
+                AnkiCommitOutcome.SOURCE_LEDGER_REPLAY)
             is ReviewCommitLedger.ClaimResult.NotClaimable -> return resolved(claim.record.toOutcome())
             ReviewCommitLedger.ClaimResult.Missing -> return storageFault("ledger_record_missing")
             is ReviewCommitLedger.ClaimResult.StoreFailed -> return storageFault("commit_persistence_failure")
@@ -438,7 +472,7 @@ class AnkiStudyEffectExecutor(
         faults.on(CommitFaultPoint.AFTER_COMMITTED_PERSIST)
         phases.onPhase(DURABLE_FINAL_STATUS_PERSISTED, final.attemptCount, commitId)
         unpersistedResponses.remove(commitId)
-        return resolved(final.toOutcome(committedSource = "backend_confirmed"))
+        return resolved(final.toOutcome(committedSource = AnkiCommitOutcome.SOURCE_BACKEND_CONFIRMED))
     }
 
     /** Study-facing reconcile effect (an explicit "check again" from the UI). */
@@ -471,7 +505,9 @@ class AnkiStudyEffectExecutor(
      * Durable truth → the study event payload. PREPARED means "provably un-entered", so it is a
      * not-applied outcome and never an uncertain one.
      */
-    private fun ReviewCommitRecord.toOutcome(committedSource: String = "ledger_replay"): AnkiCommitOutcome = when (status) {
+    private fun ReviewCommitRecord.toOutcome(
+        committedSource: String = AnkiCommitOutcome.SOURCE_LEDGER_REPLAY
+    ): AnkiCommitOutcome = when (status) {
         ReviewCommitStatus.COMMITTED -> AnkiCommitOutcome.Committed(committedSource)
         ReviewCommitStatus.RETRY_ALLOWED, ReviewCommitStatus.PREPARED -> AnkiCommitOutcome.Failed(
             failure?.category ?: "not_applied", dispatched = attemptCount > 0
@@ -482,7 +518,7 @@ class AnkiStudyEffectExecutor(
 
     /** Coordinator outcome → study event payload. No truth is re-derived here. */
     private fun ReviewCommitOutcome.toStudyOutcome(resolution: String? = null): AnkiCommitOutcome = when (this) {
-        is ReviewCommitOutcome.Committed -> AnkiCommitOutcome.Committed("ledger_replay")
+        is ReviewCommitOutcome.Committed -> AnkiCommitOutcome.Committed(AnkiCommitOutcome.SOURCE_LEDGER_REPLAY)
         is ReviewCommitOutcome.RetryAllowed -> AnkiCommitOutcome.Failed(
             record.failure?.category ?: "not_applied", dispatched = record.attemptCount > 0)
         is ReviewCommitOutcome.Ambiguous -> AnkiCommitOutcome.Ambiguous(

@@ -24,7 +24,14 @@ data class AnkiStudyInteraction(
     val priorUnresolvedCommits: Int = 0,
     /** A durable unfinished transaction blocked startup before any scheduler query. */
     val restoredCommit: Boolean = false,
-    val blockedByPriorCommit: Boolean = false
+    val blockedByPriorCommit: Boolean = false,
+    /**
+     * GATE 11B PART V — the durable ledger contradicted this session's projection, and the ledger
+     * won. Recorded (never silently dropped) so diagnostics can emit
+     * [CommitTruthDiagnostics.EVENT_COMMIT_STATE_PROJECTION_MISMATCH]. It is a fact *about* the
+     * projection, not a second commit state.
+     */
+    val projectionMismatch: CommitProjectionMismatch? = null
 ) {
     /** User choice only; before durable COMMITTED it is not a scheduler fact. */
     val selectedRating: Rating? get() = commit?.selectedRating
@@ -116,6 +123,15 @@ sealed interface AnkiCommitOutcome {
     /** The backend result cannot yet be durably recorded; NOT a backend failure or retry grant. */
     data class PersistenceFailure(val category: String) : AnkiCommitOutcome {
         override val status: ReviewCommitStatus get() = ReviewCommitStatus.SUBMITTING
+    }
+
+    companion object {
+        /** The answer came from this attempt's own backend call. */
+        const val SOURCE_BACKEND_CONFIRMED = "backend_confirmed"
+        /** The answer came from the durable ledger, with no backend call at all. */
+        const val SOURCE_LEDGER_REPLAY = "ledger_replay"
+        /** The transaction identity was retired; the ledger answered from its tombstone. */
+        const val SOURCE_LEDGER_TOMBSTONE = "ledger_tombstone"
     }
 }
 
