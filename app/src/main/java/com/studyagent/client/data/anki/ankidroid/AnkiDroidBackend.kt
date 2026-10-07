@@ -18,7 +18,7 @@ import com.studyagent.client.core.anki.unavailabilityError
 import com.studyagent.client.core.anki.BeginReviewRequest
 import com.studyagent.client.core.anki.CommitPreparation
 import com.studyagent.client.core.anki.CommitRatingRequest
-import com.studyagent.client.core.anki.CommitRatingResult
+import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.ReconcileCommitRequest
 import com.studyagent.client.core.anki.ReconcileCommitResult
 import com.studyagent.client.core.anki.NextCardResult
@@ -434,7 +434,7 @@ class AnkiDroidBackend(
             // GATE 11 — an unresolved turn whose commit is AMBIGUOUS or rejected blocks progression
             // with a typed failure; it is never silently replaced by the next card.
             return when (record.commits[turn.commitId]?.result) {
-                is CommitRatingResult.Ambiguous, is CommitRatingResult.Rejected ->
+                is BackendCommitResult.OutcomeUnknown, is BackendCommitResult.ConfirmedNotCommitted ->
                     NextCardResult.Failure(AnkiError.CommitConflict(turn.cardRef))
                 else -> NextCardResult.Card(turn)
             }
@@ -597,50 +597,50 @@ class AnkiDroidBackend(
      * [AnkiDroidRatingCommitter]. Only `Committed` releases the turn, so the next `nextCard` asks
      * the scheduler; anything escaping after the lock is AMBIGUOUS, never a failure.
      */
-    override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult =
+    override suspend fun commitRating(request: CommitRatingRequest): BackendCommitResult =
         commitRating(request) { true }
 
     override suspend fun commitRating(
         request: CommitRatingRequest, mutationEntry: suspend () -> Boolean
-    ): CommitRatingResult {
+    ): BackendCommitResult {
         try {
             return reviewMutex.withLock { commitLocked(request, mutationEntry) }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (throwable: Throwable) {
             AppLogger.w(TAG, "ANKI_COMMIT_UNEXPECTED error=${throwable::class.java.simpleName}")
-            return CommitRatingResult.Ambiguous(AnkiError.Unknown(cause = throwable::class.java.simpleName))
+            return BackendCommitResult.OutcomeUnknown(AnkiError.Unknown(cause = throwable::class.java.simpleName))
         }
     }
 
     private suspend fun commitLocked(
         request: CommitRatingRequest, mutationEntry: suspend () -> Boolean
-    ): CommitRatingResult {
+    ): BackendCommitResult {
         if (request.commitId.backendId != id || request.card.backendId != id) {
-            return CommitRatingResult.Rejected(AnkiError.SessionInvalid())
+            return BackendCommitResult.ConfirmedNotCommitted(AnkiError.SessionInvalid())
         }
         val record = sessionRecordFor(request.commitId.studySessionId)
-            ?: return CommitRatingResult.Rejected(AnkiError.SessionInvalid())
+            ?: return BackendCommitResult.ConfirmedNotCommitted(AnkiError.SessionInvalid())
         if (request.deckRef != null && request.deckRef != record.deckRef) {
-            return CommitRatingResult.Rejected(AnkiError.SessionInvalid())
+            return BackendCommitResult.ConfirmedNotCommitted(AnkiError.SessionInvalid())
         }
         record.commits[request.commitId]?.let { previous ->
-            if (!previous.samePayload(request)) return CommitRatingResult.Rejected(AnkiError.CommitConflict(request.card))
+            if (!previous.samePayload(request)) return BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitConflict(request.card))
             // Known outcomes are final here; only a proven-not-applied attempt may be sent again.
-            if (previous.result !is CommitRatingResult.RetryableFailure) return previous.result
+            if (previous.result !is BackendCommitResult.ConfirmedNotCommitted) return previous.result
         }
-        validateCommit(request)?.let { return CommitRatingResult.Rejected(it) }
+        validateCommit(request)?.let { return BackendCommitResult.ConfirmedNotCommitted(it) }
         val committer = this.committer
-            ?: return CommitRatingResult.Rejected(AnkiError.UnsupportedAction("ratingCommit"))
-        usabilityError()?.let { return CommitRatingResult.RetryableFailure(it) }
+            ?: return BackendCommitResult.ConfirmedNotCommitted(AnkiError.UnsupportedAction("ratingCommit"))
+        usabilityError()?.let { return BackendCommitResult.ConfirmedNotCommitted(it) }
         val authority = currentAuthority()
-            ?: return CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("authority-unknown"))
+            ?: return BackendCommitResult.ConfirmedNotCommitted(AnkiError.QueryFailure("authority-unknown"))
         val deckId = record.deckRef.deckId.toLongOrNull()
-            ?: return CommitRatingResult.Rejected(AnkiError.InvalidRequest("deck_id_unmappable"))
+            ?: return BackendCommitResult.ConfirmedNotCommitted(AnkiError.InvalidRequest("deck_id_unmappable"))
 
         val result = committer.commit(authority, deckId, request, mutationEntry)
         record.rememberCommit(request.commitId, BackendCommitRecord(request.card, request.rating, result))
-        if (result is CommitRatingResult.Committed) {
+        if (result is BackendCommitResult.ConfirmedCommitted) {
             record.activeTurn = null // resolved: the next nextCard() asks the scheduler again
             hydrationMemo = null
         }

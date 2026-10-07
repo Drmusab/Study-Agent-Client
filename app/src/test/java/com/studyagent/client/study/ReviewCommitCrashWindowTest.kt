@@ -5,7 +5,7 @@ import com.studyagent.client.core.anki.CommitFaultPoint
 import com.studyagent.client.core.anki.CommitGuaranteeLevel
 import com.studyagent.client.core.anki.CommitSemantics
 import com.studyagent.client.core.anki.PcRatingReplayPolicy
-import com.studyagent.client.core.anki.ReviewCommitState
+import com.studyagent.client.core.anki.ReviewCommitStatus
 import com.studyagent.client.core.anki.ThrowingCommitFault
 import com.studyagent.client.core.anki.commitSemanticsFromAgent
 import com.studyagent.client.core.models.AgentCapabilities
@@ -35,8 +35,8 @@ class ReviewCommitCrashWindowTest {
         assertEquals(0, h.fake.physicalCommitCalls)
         h.restartLedger()
         val recovered = h.ledger.snapshot().single()
-        assertEquals(ReviewCommitState.AMBIGUOUS, recovered.state)
-        assertFalse(recovered.safeToRetry)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, recovered.status)
+        assertFalse(recovered.status == ReviewCommitStatus.RETRY_ALLOWED)
         h.pending.clear()
         h.drain()
         assertEquals(0, h.fake.physicalCommitCalls)
@@ -56,8 +56,8 @@ class ReviewCommitCrashWindowTest {
         assertEquals(1, h.fake.physicalCommitCalls)
         h.restartLedger()
         val recovered = h.ledger.snapshot().single()
-        assertEquals(ReviewCommitState.AMBIGUOUS, recovered.state)
-        assertFalse(recovered.safeToRetry)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, recovered.status)
+        assertFalse(recovered.status == ReviewCommitStatus.RETRY_ALLOWED)
         h.pending.clear()
         h.drain()
         assertEquals("restart must not send a second scheduler mutation", 1, h.fake.physicalCommitCalls)

@@ -3,7 +3,7 @@ package com.studyagent.client.study
 import com.studyagent.client.anki.fake.FakeAnkiBackend
 import com.studyagent.client.anki.fake.FakeCommitMode
 import com.studyagent.client.core.anki.CommitGuaranteeLevel
-import com.studyagent.client.core.anki.ReviewCommitState
+import com.studyagent.client.core.anki.ReviewCommitStatus
 import com.studyagent.client.core.anki.AnkiBackendMode
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.study.AnkiStudyEvent
@@ -48,7 +48,7 @@ class FakeCommitLaboratoryTest {
         assertTrue(harness.rate(Rating.GOOD).accepted)
         harness.commitOnce()
 
-        assertEquals(ReviewCommitState.AMBIGUOUS, harness.commit?.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, harness.commit?.status)
         assertEquals(1, harness.ledger.snapshot().single().attemptCount)
         assertEquals(SessionPhase.ReconciliationRequired, harness.state.phase)
         assertEquals("delivered exactly once", 1, harness.fake.deliveryCount)
@@ -73,7 +73,7 @@ class FakeCommitLaboratoryTest {
         harness.rate(Rating.HARD)
         harness.commitOnce()
 
-        assertEquals(ReviewCommitState.AMBIGUOUS, harness.commit?.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, harness.commit?.status)
         assertEquals(1, harness.ledger.snapshot().single().attemptCount)
         assertEquals(0, harness.fake.backendEffectCount)
         assertEquals(1, harness.fake.deliveryCount)
@@ -90,8 +90,8 @@ class FakeCommitLaboratoryTest {
         val original = harness.commit!!.commitId
         harness.commitOnce()
 
-        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, harness.commit?.state)
-        assertTrue(harness.commit!!.safeToRetry)
+        assertEquals(ReviewCommitStatus.RETRY_ALLOWED, harness.commit?.status)
+        assertTrue(harness.commit!!.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertEquals(SessionPhase.RatingCommitFailed, harness.state.phase)
         assertEquals("the request was delivered", 1, harness.fake.deliveryCount)
         assertEquals("pre-mutation failure never crossed the durable boundary", 0,
@@ -105,7 +105,7 @@ class FakeCommitLaboratoryTest {
         val retry = harness.send(AnkiStudyEvent.RetryRatingCommit(harness.state.epoch, original))
         assertTrue(retry.accepted)
         harness.drain()
-        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, harness.commit?.state)
+        assertEquals(ReviewCommitStatus.RETRY_ALLOWED, harness.commit?.status)
         assertEquals("attempt count grows only when a new prepared submission is durable", 2,
             harness.ledger.snapshot().single().attemptCount)
         assertEquals("the retry re-sent the same logical commit", 2, harness.fake.deliveryCount)
@@ -122,8 +122,8 @@ class FakeCommitLaboratoryTest {
         harness.rate(Rating.GOOD)
         harness.commitOnce()
 
-        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, harness.commit?.state)
-        assertTrue(harness.commit!!.safeToRetry)
+        assertEquals(ReviewCommitStatus.RETRY_ALLOWED, harness.commit?.status)
+        assertTrue(harness.commit!!.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertEquals("read-only preparation refused before a safe submission attempt", 0,
             harness.ledger.snapshot().single().attemptCount)
         assertEquals("refused in prepare, so commitRating was never called", 0, harness.fake.deliveryCount)
@@ -145,7 +145,7 @@ class FakeCommitLaboratoryTest {
         harness.assertNoAutomaticResend(nextCardsBefore)
         assertEquals(SessionPhase.SubmittingRating, harness.state.phase)
         assertFalse("COMMITTED is not claimed while the response is missing",
-            harness.commit?.state == ReviewCommitState.COMMITTED)
+            harness.commit?.status == ReviewCommitStatus.COMMITTED)
         assertEquals("one durable prepared submission", 1, harness.ledger.snapshot().single().attemptCount)
         assertEquals("the delivery occurred", 1, harness.fake.deliveryCount)
         assertEquals("the mutation boundary was entered", 1, harness.fake.mutationBoundaryCrossingCount)
@@ -155,7 +155,7 @@ class FakeCommitLaboratoryTest {
         call.await()
         harness.drain()
 
-        assertEquals(ReviewCommitState.COMMITTED, harness.ledger.snapshot().single().state)
+        assertEquals(ReviewCommitStatus.COMMITTED, harness.ledger.snapshot().single().status)
         assertEquals(1, harness.fake.backendEffectCount)
     }
 
@@ -170,7 +170,7 @@ class FakeCommitLaboratoryTest {
         val effect = harness.takeCommitEffect()
         harness.run(effect)
         harness.drain()
-        assertEquals(ReviewCommitState.COMMITTED, harness.ledger.snapshot().single().state)
+        assertEquals(ReviewCommitStatus.COMMITTED, harness.ledger.snapshot().single().status)
         assertEquals(1, harness.fake.backendEffectCount)
 
         // Re-delivering the identical request (a resend, not a new turn) applies nothing new.
@@ -211,7 +211,7 @@ class FakeCommitLaboratoryTest {
         harness.rate(Rating.EASY)
         harness.commitOnce()
 
-        assertEquals(ReviewCommitState.COMMITTED, harness.ledger.snapshot().single().state)
+        assertEquals(ReviewCommitStatus.COMMITTED, harness.ledger.snapshot().single().status)
         assertEquals(1, harness.fake.deliveryCount)
         assertEquals(1, harness.fake.mutationBoundaryCrossingCount)
         assertEquals(1, harness.fake.backendEffectCount)
@@ -239,11 +239,11 @@ class FakeCommitLaboratoryTest {
         val harness = AnkiCommitHarness(
             fakeMode = FakeCommitMode.OUTCOME_UNKNOWN,
             commitSteps = listOf(FakeAnkiBackend.CommitStep(
-                com.studyagent.client.core.anki.CommitRatingResult.Committed())))
+                com.studyagent.client.core.anki.BackendCommitResult.ConfirmedCommitted())))
         harness.loadToRating()
         harness.rate(Rating.GOOD)
         harness.commitOnce()
-        assertEquals(ReviewCommitState.COMMITTED, harness.ledger.snapshot().single().state)
+        assertEquals(ReviewCommitStatus.COMMITTED, harness.ledger.snapshot().single().status)
         assertEquals(1, harness.fake.backendEffectCount)
     }
 }

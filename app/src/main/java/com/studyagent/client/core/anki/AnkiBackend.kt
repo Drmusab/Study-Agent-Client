@@ -102,12 +102,15 @@ interface AnkiBackend {
      * Ambiguous writes block progression and blind resubmission until reconciled.
      * This interface supplies correlation, NOT a claim of distributed exactly-once delivery.
      *
-     * GATE 11 result contract (see [CommitRatingResult]): `Committed` only when the backend has
-     * proof the scheduler applied the rating; `RetryableFailure`/`Rejected` only when it is proven
-     * NOT applied; everything uncertain — a timeout, a lost response, an unclassified exception
-     * after dispatch — is `Ambiguous`. "No exception" is not proof of success.
+     * GATE 11B result contract (see [BackendCommitResult]): [BackendCommitResult.ConfirmedCommitted]
+     * only when the backend has proof the scheduler applied the rating;
+     * [BackendCommitResult.ConfirmedNotCommitted] only when it is proven NOT applied — the backend
+     * never decides whether a retry is *offered* (GATE 11B §10: that is the coordinator's job, from
+     * the durable status); everything uncertain — a timeout, a lost response, an unclassified
+     * exception after dispatch — is [BackendCommitResult.OutcomeUnknown]. "No exception" is not
+     * proof of success.
      */
-    suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult
+    suspend fun commitRating(request: CommitRatingRequest): BackendCommitResult
 
     /**
      * Transaction executor's durable boundary. [mutationEntry] MUST be called once, after any
@@ -117,8 +120,8 @@ interface AnkiBackend {
      * The default has no separate preflight: it writes the marker before [commitRating].
      * AnkiDroid overrides this so its queue/deck checks stay on the PREPARED side of the boundary.
      */
-    suspend fun commitRating(request: CommitRatingRequest, mutationEntry: suspend () -> Boolean): CommitRatingResult {
-        if (!mutationEntry()) return CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable())
+    suspend fun commitRating(request: CommitRatingRequest, mutationEntry: suspend () -> Boolean): BackendCommitResult {
+        if (!mutationEntry()) return BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitLedgerUnavailable())
         return commitRating(request)
     }
 

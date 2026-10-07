@@ -3,7 +3,7 @@ package com.studyagent.client.study
 import com.studyagent.client.anki.fake.FakeCommitMode
 import com.studyagent.client.core.anki.CommitPhaseSink
 import com.studyagent.client.core.anki.ReviewCommitId
-import com.studyagent.client.core.anki.ReviewCommitState
+import com.studyagent.client.core.anki.ReviewCommitStatus
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.study.AnkiStudyEffectExecutor
 import org.junit.Assert.assertEquals
@@ -41,7 +41,7 @@ class CommitDiagnosticsCorrelationTest {
         harness.drain()
 
         assertEquals(
-            listOf("CREATED", "PREPARED", "CALL_ENTERED", "LOCAL_COMMIT_PERSISTED"),
+            listOf("CREATED", "INTENT_PERSISTED", "MUTATION_BOUNDARY_ENTERED", "FINAL_STATUS_PERSISTED"),
             marks.map { it.phase }
         )
         val commit = harness.ledger.snapshot().single()
@@ -67,8 +67,8 @@ class CommitDiagnosticsCorrelationTest {
         harness.drain()
 
         val row = harness.ledger.snapshot().single()
-        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, row.state)
-        assertTrue(row.safeToRetry)
+        assertEquals(ReviewCommitStatus.RETRY_ALLOWED, row.status)
+        assertTrue(row.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertEquals("the backend was called once and never mutated", 1, harness.fake.deliveryCount)
         assertEquals(0, harness.fake.mutationAttemptCount)
         assertEquals(0, harness.fake.backendEffectCount)

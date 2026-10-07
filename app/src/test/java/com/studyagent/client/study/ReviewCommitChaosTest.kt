@@ -55,10 +55,10 @@ class ReviewCommitChaosTest {
 
     private fun steps(random: Random): List<CommitStep> = List(24) {
         when (random.nextInt(10)) {
-            0, 1 -> CommitStep(CommitRatingResult.RetryableFailure(AnkiError.QueryFailure("chaos_busy")))
-            2 -> CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("chaos_ack_lost")), appliedWhenAmbiguous = true)
-            3 -> CommitStep(CommitRatingResult.Ambiguous(AnkiError.Unknown("chaos_timeout")), appliedWhenAmbiguous = false)
-            else -> CommitStep(CommitRatingResult.Committed())
+            0, 1 -> CommitStep(BackendCommitResult.ConfirmedNotCommitted(AnkiError.QueryFailure("chaos_busy")))
+            2 -> CommitStep(BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("chaos_ack_lost")), appliedWhenAmbiguous = true)
+            3 -> CommitStep(BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("chaos_timeout")), appliedWhenAmbiguous = false)
+            else -> CommitStep(BackendCommitResult.ConfirmedCommitted())
         }
     }
 
@@ -101,7 +101,7 @@ class ReviewCommitChaosTest {
             h.fake.recordedCommits().forEach { rc ->
                 if (rc.mutationCount > 1) problems += "I1 ${rc.request.commitId} applied ${rc.mutationCount}x"
             }
-            val committed = records.count { it.state == ReviewCommitState.COMMITTED }
+            val committed = records.count { it.status == ReviewCommitStatus.COMMITTED }
             val reviewed = h.state.session?.totalReviewedInSession ?: 0
             if (reviewed != committed) problems += "I2 reviewed=$reviewed committed=$committed"
             if (problems.isNotEmpty()) {
@@ -115,8 +115,8 @@ class ReviewCommitChaosTest {
             if (effect is AnkiStudyEffect.CommitRating) {
                 val id = effect.request.commitId.toString()
                 val physicalBefore = h.fake.physicalCommitCalls
-                val stateNow = h.ledger.get(effect.request.commitId)?.state
-                val wasTerminal = stateNow == ReviewCommitState.AMBIGUOUS || stateNow == ReviewCommitState.COMMITTED
+                val stateNow = h.ledger.get(effect.request.commitId)?.status
+                val wasTerminal = stateNow == ReviewCommitStatus.AMBIGUOUS || stateNow == ReviewCommitStatus.COMMITTED
                 crash.arm()
                 try {
                     h.run(effect)
@@ -157,7 +157,7 @@ class ReviewCommitChaosTest {
                     if (!reconcilable && stuck++ > 1) break // AnkiDroid: unknown stays unknown; user ends
                     h.send(AnkiStudyEvent.ReconcileRatingCommit(h.state.epoch, commit.commitId)); "reconcile"
                 }
-                phase == SessionPhase.RatingCommitFailed && commit != null && commit.safeToRetry -> {
+                phase == SessionPhase.RatingCommitFailed && commit != null && commit.status == ReviewCommitStatus.RETRY_ALLOWED -> {
                     h.send(AnkiStudyEvent.RetryRatingCommit(h.state.epoch, commit.commitId)); "retry"
                 }
                 phase == SessionPhase.RatingCommitFailed -> break // not safe to retry: user must act

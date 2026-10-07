@@ -251,14 +251,12 @@ fun StudyScreen(
                         InfoBanner(
                             title = recovery.title,
                             message = recovery.message,
-                            tone = when (recovery.status) {
-                                RatingCommitRecoveryUi.Status.NOT_SAVED,
-                                RatingCommitRecoveryUi.Status.UNCONFIRMED -> BannerTone.DANGER
-                                RatingCommitRecoveryUi.Status.EARLIER_UNCONFIRMED -> BannerTone.WARNING
-                                RatingCommitRecoveryUi.Status.PERSISTENCE_FAULT -> BannerTone.DANGER
-                                RatingCommitRecoveryUi.Status.SAVING,
-                                RatingCommitRecoveryUi.Status.CHECKING,
-                                RatingCommitRecoveryUi.Status.SAVED -> BannerTone.INFO
+                            tone = when (recovery.commitUiState) {
+                                is RatingCommitUiState.RetryAvailable,
+                                is RatingCommitUiState.VerificationRequired -> BannerTone.DANGER
+                                is RatingCommitUiState.AwaitingRating -> BannerTone.WARNING
+                                is RatingCommitUiState.Saving,
+                                is RatingCommitUiState.Saved -> BannerTone.INFO
                             },
                             actionLabel = when {
                                 recovery.canRetry -> "Retry same rating"
@@ -446,7 +444,7 @@ fun StudyScreen(
                         onExplain = { viewModel.onRequestExplanation() },
                         onSkip = { viewModel.onSkipCard() },
                         skipEnabled = ratingCommitRecovery == null ||
-                            ratingCommitRecovery.status == RatingCommitRecoveryUi.Status.EARLIER_UNCONFIRMED
+                            ratingCommitRecovery.commitUiState is RatingCommitUiState.AwaitingRating
                     )
 
                     val suggestedRating = when (val s = studyState) {

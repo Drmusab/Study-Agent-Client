@@ -9,7 +9,7 @@ import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiSessionContext
-import com.studyagent.client.core.anki.CommitRatingResult
+import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.ReviewCommitId
 import com.studyagent.client.core.anki.ReviewTurnId
 import com.studyagent.client.core.anki.isReadyForReview
@@ -237,11 +237,11 @@ class AnkiArchitectureContractTest {
     @Test
     fun `commit outcomes require mutation evidence not error category matching`() {
         val error = AnkiError.BackendUnavailable()
-        val safe: CommitRatingResult = CommitRatingResult.RetryableFailure(error)
-        val uncertain: CommitRatingResult = CommitRatingResult.Ambiguous(error)
+        val safe: BackendCommitResult = BackendCommitResult.ConfirmedNotCommitted(error)
+        val uncertain: BackendCommitResult = BackendCommitResult.OutcomeUnknown(error)
         assertNotEquals(safe, uncertain)
-        assertEquals(error, (uncertain as CommitRatingResult.Ambiguous).error)
-        assertTrue(CommitRatingResult.Rejected(AnkiError.StaleTurn()).error is AnkiError.StaleTurn)
+        assertEquals(error, (uncertain as BackendCommitResult.OutcomeUnknown).reason)
+        assertTrue(BackendCommitResult.ConfirmedNotCommitted(AnkiError.StaleTurn()).reason is AnkiError.StaleTurn)
     }
 
     // ------------------------------------------------------------------ session context lock

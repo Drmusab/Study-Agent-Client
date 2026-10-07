@@ -14,27 +14,38 @@ sealed interface NextCardResult {
 }
 
 /**
- * GATE 11 mutation-boundary classification of one commit attempt:
+ * GATE 11B §11 — **backend evidence**, not ledger truth.
  *
- * | Result | Scheduler state | Ledger | Next card | Retry |
- * |---|---|---|---|---|
- * | [Committed] | applied (proven) | COMMITTED | exactly once | never |
- * | [RetryableFailure] | NOT applied (proven) | FAILED_SAFE_TO_RETRY | no | manual, same commit id + rating |
- * | [Rejected] | NOT applied (proven) | FAILED_NOT_RETRYABLE | no | no — end the session |
- * | [Ambiguous] | unknown | AMBIGUOUS | blocked | never blind; reconcile first |
+ * A backend reports *facts about its own execution*. It never reports a transaction policy: there
+ * is deliberately no `RetryAllowed` here, because "may be submitted again" is a conclusion the
+ * [ReviewCommitCoordinator] draws (GATE 11B §12).
+ *
+ * | Backend result | Meaning | Maps to |
+ * |---|---|---|
+ * | [ConfirmedCommitted] | the scheduler applied it (proven) | [ReviewCommitStatus.COMMITTED] |
+ * | [ConfirmedNotCommitted] | the scheduler did **not** apply it (proven) | [ReviewCommitStatus.RETRY_ALLOWED] |
+ * | [OutcomeUnknown] | may or may not have been applied | [ReviewCommitStatus.AMBIGUOUS] |
+ *
+ * The mapping is total and lives in [BackendCommitResult.toReviewCommitStatus].
  */
-sealed interface CommitRatingResult {
-    data class Committed(
+sealed interface BackendCommitResult {
+
+    /** The backend has proof the scheduler applied the rating. */
+    data class ConfirmedCommitted(
         val scheduling: AnkiSchedulingInfo? = null,
         /** Only a backend can issue a backend receipt; this is null for AnkiDroid. */
         val receipt: CommitReceipt? = null
-    ) : CommitRatingResult
-    /** Refused before mutation. Surface/reconcile, do not automatically retry. */
-    data class Rejected(val error: AnkiError) : CommitRatingResult
-    /** Proven not applied. Retry exactly the same identity and payload. */
-    data class RetryableFailure(val error: AnkiError) : CommitRatingResult
+    ) : BackendCommitResult
+
+    /**
+     * The backend has proof the scheduler did **not** apply it. This covers both a transient
+     * failure and an outright refusal: the canonical status set has one "proven not applied"
+     * status, and re-submitting a permanently refused rating is safe (it fails the same way).
+     */
+    data class ConfirmedNotCommitted(val reason: AnkiError? = null) : BackendCommitResult
+
     /** May have been applied. Never reinterpret as a safe failure based on error category. */
-    data class Ambiguous(val error: AnkiError? = null) : CommitRatingResult
+    data class OutcomeUnknown(val reason: AnkiError? = null) : BackendCommitResult
 }
 
 /** GATE 11 — outcome of the read-only [AnkiBackend.prepareCommit] step. */
@@ -52,8 +63,8 @@ sealed interface CommitPreparation {
 sealed interface ReconcileCommitResult {
     /** Evidence shows exactly one answer attributable to this commit's mutation window. */
     data class Applied(val detail: String) : ReconcileCommitResult
-    /** Evidence shows the rating was not applied. [safeToRetry] = the card is still in the state it was rated in. */
-    data class NotApplied(val detail: String, val safeToRetry: Boolean) : ReconcileCommitResult
+    /** Evidence shows the rating was not applied, so the same logical commit may be submitted again. */
+    data class NotApplied(val detail: String) : ReconcileCommitResult
     /** Evidence exists but cannot be attributed (external activity, missing baseline, ...). */
     data class StillAmbiguous(val detail: String) : ReconcileCommitResult
     /** The backend cannot observe enough state to reconcile at all. */

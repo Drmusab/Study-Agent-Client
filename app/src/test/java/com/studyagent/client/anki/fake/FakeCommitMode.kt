@@ -12,13 +12,13 @@ import com.studyagent.client.core.anki.CommitGuaranteeLevel
  * | Mode | Effect | Response | Client must classify as |
  * |---|---|---|---|
  * | [SUCCESS] | 1 | committed | COMMITTED |
- * | [FAIL_BEFORE_MUTATION] | 0 | retryable refusal | FAILED_SAFE_TO_RETRY |
+ * | [FAIL_BEFORE_MUTATION] | 0 | retryable refusal | RETRY_ALLOWED |
  * | [MUTATE_THEN_DROP_RESPONSE] | 1 | lost (throws after the effect) | AMBIGUOUS |
  * | [OUTCOME_UNKNOWN] | 0 | unknown, nothing applied | AMBIGUOUS |
  * | [DELAYED_SUCCESS] | 1 | committed, withheld until released | COMMITTED (after release) |
  * | [IDEMPOTENT_REPLAY] | 1 | replay returns the recorded result | COMMITTED, one effect |
  * | [NON_IDEMPOTENT_REPLAY] | 1 per delivery | replay applies again | client ledger must stop it |
- * | [BACKEND_UNAVAILABLE] | 0 | refused before dispatch | FAILED_SAFE_TO_RETRY (zero submissions) |
+ * | [BACKEND_UNAVAILABLE] | 0 | refused before dispatch | RETRY_ALLOWED (zero submissions) |
  *
  * [OUTCOME_UNKNOWN] is the pessimistic case that matters: a backend that *cannot* know whether it
  * applied must not be turned into a safe retry. The client has to fail closed.

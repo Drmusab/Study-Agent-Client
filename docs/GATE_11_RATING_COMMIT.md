@@ -1105,3 +1105,140 @@ collection (checkpoint 16 / INV-48) and Gradle/CI evidence. Until then the AnkiD
 stays **AT_MOST_ONCE_FAIL_CLOSED**, which is a statement about local duplicate suppression, one
 mutation path, safe pre-mutation retry and no blind uncertain retry — not about crash-safe
 exactly-once execution on the device.
+
+---
+
+# XV. GATE 11B — Commit Orchestration, StudySession Rating Flow & Recovery
+
+Everything above is GATE 11 in the vocabulary it shipped with. This part replaces that vocabulary
+with the canonical one (§1–§31 of the 11B spec), adds the coordinator as a first-class object, and
+moves the rating flow onto a turn-scoped UI projection instead of inventing new top-level Study
+states. **Read this part first**; the sections above are kept for history and are superseded
+wherever they disagree.
+
+## XV.1 One vocabulary, and why
+
+| Concept | Canonical name | Retired spellings |
+|---|---|---|
+| Durable transaction status | `ReviewCommitStatus` | `ReviewCommitState` |
+| Attempt diagnostics marker | `ReviewCommitPhase` | `CommitAttemptPhase` |
+| Proven-not-applied status | `RETRY_ALLOWED` | `FAILED_SAFE_TO_RETRY`, `FAILED_NOT_RETRYABLE`, `SafeToRetry`, `Retryable` |
+| Coordinator outcome | `ReviewCommitOutcome` (`Committed`, `RetryAllowed`, `Ambiguous`, `Conflict`) | `AnkiCommitOutcome.Failed(safeToRetry = …)` |
+| Backend result | `BackendCommitResult` (`ConfirmedCommitted`, `ConfirmedNotCommitted`, `OutcomeUnknown`) | `CommitRatingResult` (`Committed`, `RetryableFailure`, `Rejected`, `Ambiguous`) |
+| Recovery decision | `ReviewCommitRecoveryAction` (`ResumeCommitted`, `OfferRetry`, `Reconcile`, `RemainBlocked`, `IntegrityFailure`) | inference from `status + phase` |
+| Presentation | `RatingCommitUiState` (`AwaitingRating`, `Saving`, `RetryAvailable`, `VerificationRequired`, `Saved`) | `RatingCommitRecoveryUi.Status` (`NOT_SAVED`, `UNCONFIRMED`, `CHECKING`, `PERSISTENCE_FAULT`, `EARLIER_UNCONFIRMED`) |
+
+`ReviewCommitStatus` has exactly five values — `PREPARED`, `SUBMITTING`, `COMMITTED`,
+`RETRY_ALLOWED`, `AMBIGUOUS`. There is deliberately **no `NOT_STARTED`** (INV-11B-05): a
+transaction that does not exist has no record, and "no record" is not a status.
+
+`ReviewCommitPhase` (`INTENT_PERSISTED`, `MUTATION_BOUNDARY_ENTERED`, `BACKEND_RESPONSE_RECEIVED`,
+`FINAL_STATUS_PERSISTED`) is **diagnostics only**. No recovery decision reads it; only the durable
+status decides (§27). Two vocabularies for one truth is how a double-submit gets shipped.
+
+## XV.2 Source of truth (§32–§35)
+
+| Question | Owner | Not the owner |
+|---|---|---|
+| *That* a rating was selected, and what the user may do next | `StudySessionMachine` (interaction truth) | the UI, the ledger |
+| Whether the scheduler mutation happened | `ReviewCommitLedger` (durable transaction truth) | `StudySessionMachine`, the UI projection |
+| When the card is due next | Anki / `AnkiBackend` (scheduler truth) | the ledger, the machine |
+| What the button looks like | `RatingCommitUiState` (transient projection) | nothing durable, ever |
+
+The projection is recomputed from the durable status on every change
+(`AnkiRatingCommit.commitUiState`, GATE 11B §14). It is never written back.
+
+## XV.3 The coordinator (§36)
+
+`ReviewCommitCoordinator` is an interface with three entry points:
+
+- `suspend fun commit(request: CommitRatingRequest): ReviewCommitOutcome`
+- `suspend fun retry(commitId: ReviewCommitId): ReviewCommitOutcome`
+- `suspend fun recover(commitId: ReviewCommitId): ReviewCommitRecoveryResult`
+
+`AnkiStudyEffectExecutor` implements it (GATE 11B §36): the study interaction owns *that* a rating
+was selected, the executor owns *whether and how* it may reach the scheduler exactly once.
+
+`commit()` with an existing durable record (§23):
+
+| Durable status | Behaviour |
+|---|---|
+| `PREPARED` | no new id; the existing transaction proceeds |
+| `SUBMITTING` | already in progress; the in-flight attempt reports |
+| `COMMITTED` | the prior outcome is returned; the backend is never called again |
+| `RETRY_ALLOWED` | `retry()` is required — an automatic resubmission does not exist |
+| `AMBIGUOUS` | `recover()` is required; a direct retry is refused |
+
+## XV.4 The fixed commit order (§28, §29) and the claim
+
+```
+1. ledger.prepare          → durable PREPARED / INTENT_PERSISTED
+2. backend.prepareCommit   → read-only baseline evidence (first attempt only)
+3. ledger.claim            → durable exclusive claim, STILL PREPARED
+4. ledger.markMutationEntered → durable SUBMITTING / MUTATION_BOUNDARY_ENTERED
+                               (written inside the boundary callback, immediately
+                                before the real scheduler mutation)
+5. ledger.markResponseReceived → durable classified answer
+6. ledger.complete         → durable terminal status
+7. only now: next-card
+```
+
+Retries always go `RETRY_ALLOWED → BeginRetry → PREPARED → claim → boundary`. Never straight to
+`SUBMITTING` (INV-11B-09). `COMMITTED` is terminal (INV-11B-08). `AMBIGUOUS` cannot retry directly;
+only `ReconciliationConfirmedNotCommitted` may move it to `RETRY_ALLOWED` (INV-11B-11).
+
+**The durable claim.** Step 3 does not change the status — canonical `SUBMITTING` means "the
+mutation boundary was entered", and claiming is not entering. Exclusivity is carried by
+`ReviewCommitRecord.claimedAtEpochMs`, a durable fact *about the attempt* rather than a sixth
+status: one claim at a time, released by every transition that leaves `PREPARED`, and released at
+load time when a `PREPARED` row is seen with the marker still set (the process died before the
+boundary, so nothing can have been applied). This is what keeps "one mutation attempt per
+transaction" true under concurrent input **and** keeps a crash during AnkiDroid preflight
+provably safe instead of forcing the user into an unresolvable `AMBIGUOUS` (§28).
+
+## XV.5 Recovery policy (§45)
+
+The classification reads the durable status alone:
+
+| Durable status | Recovery action | Meaning |
+|---|---|---|
+| `PREPARED` | `OfferRetry` | the boundary was never entered; safe to submit |
+| `RETRY_ALLOWED` | `OfferRetry` | proven not applied; safe to submit |
+| `SUBMITTING` | `Reconcile` | the boundary was entered; the outcome is unknown until proven |
+| `AMBIGUOUS` | `Reconcile` | unknown; evidence may resolve it in either direction |
+| `COMMITTED` | `ResumeCommitted` | done; never replayed |
+
+Reconciliation evidence for a non-`AMBIGUOUS` record is an `IntegrityFailure`, never a shortcut.
+`recover()` **never blind-replays a mutation**: the only backend call it makes is the read-only
+`AnkiBackend.reconcileCommit`, and the only writes it performs are "finish writing an answer we
+already hold" or "finalize an answer that is already durable".
+
+AnkiDroid keeps its `AT_MOST_ONCE_FAIL_CLOSED` guarantee with `frozenAuthoritativeReconciliation =
+false`, so an AnkiDroid `AMBIGUOUS` stays `AMBIGUOUS` (§26). Reconciliation is timeout-bounded
+(10 s → `StillAmbiguous`).
+
+## XV.6 Migration check
+
+Every legacy occurrence is now classified. Nothing is left "temporarily both":
+
+| Occurrence | Classification |
+|---|---|
+| `FAILED_SAFE_TO_RETRY`, `FAILED_NOT_RETRYABLE`, `safeToRetry`, `NOT_STARTED` in `ReviewCommitLedger.normalizeLegacyVocabulary` / `migrateLegacy` | **TEMPORARY MIGRATION ADAPTER** — schema ≤ 3 rows only; output is canonical |
+| `SubmissionLedger.SubmissionState.NOT_STARTED` | **LEGITIMATE UNRELATED USE** — a different ledger (the PC submission), untouched by 11B |
+| everything else | **RENAME / REMOVE** — done; a grep for the fixed search list is clean |
+
+## XV.7 Evidence (JVM harness)
+
+`main errors: 0 (files: 196)` · `test errors: 0 (files: 137)` ·
+`RESULT classes=117 tests=1326 passed=1326 failed=0 ignored=0`.
+
+The branch started from 11 failing tests on `36220bf` (measured in the same harness, in a
+throwaway worktree at HEAD) and ends at 0. Go/no-go note: `gradlew` cannot run in this sandbox (no
+JDK on `PATH`, Maven mirrors blocked), so this is the harness's **equivalence** evidence class, not
+CI evidence — see `tools/jvm-harness/README.md`.
+
+## XV.8 Still owed
+
+- Real AnkiDroid rating mutation on a disposable collection (out of scope here by design).
+- Gradle/CI evidence: `./gradlew --stop / clean / testDebugUnitTest / lint / assembleDebug /
+  assembleRelease` on a machine that can run it.

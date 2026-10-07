@@ -253,7 +253,7 @@ class StudySessionMachine(
             SessionPhase.Idle -> StudyState.Idle
             SessionPhase.Starting -> StudyState.Loading("Starting session...")
             SessionPhase.WaitingForFirstCard -> StudyState.Loading(
-                if (machine.anki?.commit?.state == com.studyagent.client.core.anki.ReviewCommitState.COMMITTED)
+                if (machine.anki?.commit?.status == com.studyagent.client.core.anki.ReviewCommitStatus.COMMITTED)
                     "Rating saved. Loading the next card..." else "Waiting for first card..."
             )
             SessionPhase.SpeakingQuestion -> {
@@ -427,9 +427,9 @@ class StudySessionMachine(
         machine.anki?.let { local ->
             val commit = local.commit
             if (commit != null && !local.restoredCommit &&
-                commit.state != com.studyagent.client.core.anki.ReviewCommitState.COMMITTED) {
+                commit.status != com.studyagent.client.core.anki.ReviewCommitStatus.COMMITTED) {
                 if (local.turn == null) {
-                    recordInvariantViolation("anki-advanced-without-commit", "turn released while commit is ${commit.state}")
+                    recordInvariantViolation("anki-advanced-without-commit", "turn released while commit is ${commit.status}")
                 } else if (commit.commitId.turnId != local.turn.turnId) {
                     recordInvariantViolation("anki-commit-turn-mismatch", "commit turn ${commit.commitId.turnId} != ${local.turn.turnId}")
                 }
@@ -1230,10 +1230,10 @@ class StudySessionMachine(
         put("guarantee", commit.guaranteeLevel?.name ?: "unfrozen")
         put("rating", commit.rating.name.lowercase())
         put("committed",
-            if (commit.state == com.studyagent.client.core.anki.ReviewCommitState.COMMITTED)
+            if (commit.status == com.studyagent.client.core.anki.ReviewCommitStatus.COMMITTED)
                 commit.rating.name.lowercase() else "-")
         // The stable failure token is folded into the state so the fixed key budget cannot drop it.
-        put("state", commit.state.name + (commit.failureCategory?.let { "($it)" } ?: ""))
+        put("state", commit.status.name + (commit.failureCategory?.let { "($it)" } ?: ""))
         put("attempt", commit.attempt.toString())
     }
 
@@ -1254,13 +1254,13 @@ class StudySessionMachine(
         val base = commitMetadata(commit) + ("elapsedMs" to elapsed)
         if (reconciliation) {
             tl.record(DiagnosticCategory.SESSION, "ANKI_RECONCILIATION_RESULT", sessionEpoch = epoch, turnId = turn,
-                metadata = base + ("result" to outcome.state.name))
+                metadata = base + ("result" to outcome.status.name))
         }
         val name = when (outcome) {
             is AnkiCommitOutcome.Committed -> "ANKI_COMMIT_COMMITTED"
-            // A proven not-applied failure that may be retried is a distinct fact from a refusal:
-            // only the safe one may ever be retried, and only by explicit user action.
-            is AnkiCommitOutcome.Failed -> if (outcome.safeToRetry) "ANKI_COMMIT_SAFE_FAILURE" else "ANKI_COMMIT_FAILED"
+            // A proven not-applied failure is always safe to re-submit: the backend proved the
+            // scheduler did not mutate, so the retry cannot duplicate anything.
+            is AnkiCommitOutcome.Failed -> "ANKI_COMMIT_SAFE_FAILURE"
             is AnkiCommitOutcome.Ambiguous -> "ANKI_COMMIT_AMBIGUOUS"
             is AnkiCommitOutcome.PersistenceFailure -> "ANKI_COMMIT_PERSISTENCE_FAILURE"
         }
@@ -1271,7 +1271,7 @@ class StudySessionMachine(
                     "reviewed" to (transition.newState.session?.totalReviewedInSession ?: 0).toString()))
         }
         if (before.phase != transition.newState.phase) {
-            AppLogger.i(tag, "ANKI_COMMIT_OUTCOME state=${outcome.state} commit=${commitHash(commit.commitId)} attempt=${commit.attempt}")
+            AppLogger.i(tag, "ANKI_COMMIT_OUTCOME state=${outcome.status} commit=${commitHash(commit.commitId)} attempt=${commit.attempt}")
         }
     }
 

@@ -35,7 +35,7 @@ class ReviewCommitEnduranceTest {
         val harness = AnkiCommitHarness(
             cards = List(committedTransactions + 4) { AnkiCommitHarness.card("E$it") },
             commitSteps = List(committedTransactions) {
-                FakeAnkiBackend.CommitStep(CommitRatingResult.Committed())
+                FakeAnkiBackend.CommitStep(BackendCommitResult.ConfirmedCommitted())
             }
         )
         harness.loadToRating()
@@ -53,7 +53,7 @@ class ReviewCommitEnduranceTest {
 
             harness.run(harness.takeCommitEffect())
             val record = requireNotNull(harness.ledger.get(turn.commitId)) { "no record for $turn" }
-            assertEquals("transaction $index state", ReviewCommitState.COMMITTED, record.state)
+            assertEquals("transaction $index state", ReviewCommitStatus.COMMITTED, record.status)
             assertEquals("the requested rating is the recorded one", rating, record.rating)
 
             // Sampling the backend's own table costs O(rows), so it is checked rather than
@@ -70,7 +70,7 @@ class ReviewCommitEnduranceTest {
                 val rows = harness.ledger.snapshot()
                 assertEquals("no row may be added before its turn is rated", ratedTurns.size, rows.size)
                 assertTrue("committed rows stay committed at $index",
-                    rows.all { it.state == ReviewCommitState.COMMITTED })
+                    rows.all { it.status == ReviewCommitStatus.COMMITTED })
             }
 
             harness.drain()
@@ -107,7 +107,7 @@ class ReviewCommitEnduranceTest {
                 store = store,
                 cards = listOf(AnkiCommitHarness.card("A")),
                 commitSteps = listOf(FakeAnkiBackend.CommitStep(
-                    CommitRatingResult.Ambiguous(AnkiError.Unknown("endurance_timeout")),
+                    BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("endurance_timeout")),
                     appliedWhenAmbiguous = false))
             )
             ambiguous.loadToRating()
@@ -117,8 +117,8 @@ class ReviewCommitEnduranceTest {
             ambiguous.run(ambiguous.takeCommitEffect())
 
             val record = requireNotNull(ambiguous.ledger.get(turn.commitId))
-            assertEquals("ambiguous transaction $index", ReviewCommitState.AMBIGUOUS, record.state)
-            assertFalse("ambiguous never becomes retryable", record.safeToRetry)
+            assertEquals("ambiguous transaction $index", ReviewCommitStatus.AMBIGUOUS, record.status)
+            assertFalse("ambiguous never becomes retryable", record.status == ReviewCommitStatus.RETRY_ALLOWED)
             assertEquals("one row per rated turn", 1, ambiguous.ledger.snapshot().size)
             val backendRecord = ambiguous.fake.recordedCommits().single()
             assertEquals("no automatic retry for $turn", 1, backendRecord.attempts)
@@ -137,13 +137,13 @@ class ReviewCommitEnduranceTest {
             if (index % 25 == 0) {
                 ambiguous.restartLedger()
                 assertEquals("the unresolved transaction survives a restart",
-                    ReviewCommitState.AMBIGUOUS, ambiguous.ledger.get(turn.commitId)!!.state)
+                    ReviewCommitStatus.AMBIGUOUS, ambiguous.ledger.get(turn.commitId)!!.status)
 
                 val replacement = AnkiCommitHarness(store = store, cards = listOf(AnkiCommitHarness.card("A")))
                 replacement.startAndLoad()
                 assertEquals("an unresolved transaction blocks a new session",
                     SessionPhase.ReconciliationRequired, replacement.state.phase)
-                assertEquals(ReviewCommitState.AMBIGUOUS, replacement.ledger.get(turn.commitId)!!.state)
+                assertEquals(ReviewCommitStatus.AMBIGUOUS, replacement.ledger.get(turn.commitId)!!.status)
                 assertEquals("no blind redelivery in the new process", 0, replacement.fake.deliveryCount)
                 assertEquals(0, replacement.fake.mutationAttemptCount)
             }

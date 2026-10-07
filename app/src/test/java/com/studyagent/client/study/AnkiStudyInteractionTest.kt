@@ -29,7 +29,7 @@ class AnkiStudyInteractionTest {
                 nextCalls++
                 return fake.nextCard(session)
             }
-            override suspend fun commitRating(request: CommitRatingRequest): CommitRatingResult {
+            override suspend fun commitRating(request: CommitRatingRequest): BackendCommitResult {
                 commitCalls++
                 // These read-path tests never *execute* a CommitRating effect; GATE 11's commit
                 // flow is covered by AnkiRatingCommitFlowTest with a durable ledger.

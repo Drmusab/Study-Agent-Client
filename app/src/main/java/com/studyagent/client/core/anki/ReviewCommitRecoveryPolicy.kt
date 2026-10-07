@@ -1,46 +1,97 @@
 package com.studyagent.client.core.anki
 
-/** No UI strings or scheduler reads: the single decision table for restart and reconciliation. */
-sealed interface CommitRecoveryAction {
-    data object RetryAllowed : CommitRecoveryAction
-    data object ResumeCommitted : CommitRecoveryAction
-    data object ReconciliationRequired : CommitRecoveryAction
-    data object BlockedUnresolved : CommitRecoveryAction
-    data object IntegrityError : CommitRecoveryAction
+/**
+ * GATE 11B §25 — recovery **decisions**. No UI strings, no scheduler reads.
+ *
+ * These names are deliberately not [ReviewCommitStatus] names, so a log line never has to guess
+ * which layer it belongs to (INV-11B-14):
+ *
+ * ```text
+ * status = RETRY_ALLOWED   → durable transaction truth
+ * action = OfferRetry      → what recovery decided to do about it
+ * ```
+ */
+sealed interface ReviewCommitRecoveryAction {
+    /** Durable success. Resume the study flow; never replay the mutation. */
+    data object ResumeCommitted : ReviewCommitRecoveryAction
+
+    /** The backend mutation is proven not to have been entered or not to have happened. */
+    data object OfferRetry : ReviewCommitRecoveryAction
+
+    /** The outcome is unknown: gather read-only backend evidence before anything else. */
+    data object Reconcile : ReviewCommitRecoveryAction
+
+    /** Nothing may be done yet: stay blocked and keep the user informed. */
+    data object RemainBlocked : ReviewCommitRecoveryAction
+
+    /** The durable record contradicts itself. Never guess, never replay. */
+    data class IntegrityFailure(val reason: String) : ReviewCommitRecoveryAction
 }
 
+/**
+ * Result of [ReviewCommitCoordinator.recover]. `NoTransaction` is explicit rather than a fifth
+ * action name: "there is no transaction" is not a decision about a transaction (GATE 11B §45,
+ * first row).
+ */
+sealed interface ReviewCommitRecoveryResult {
+    /** No durable transaction exists for this commit id: the normal rating flow applies. */
+    data class NoTransaction(val commitId: ReviewCommitId) : ReviewCommitRecoveryResult
+
+    /**
+     * A durable transaction was found. [action] is what recovery decided; [outcome] is non-null
+     * when recovery also resolved the transaction without any mutation (durable evidence or
+     * read-only reconciliation).
+     */
+    data class Recovered(
+        val action: ReviewCommitRecoveryAction,
+        val record: ReviewCommitRecord,
+        val outcome: ReviewCommitOutcome? = null
+    ) : ReviewCommitRecoveryResult {
+        val commitId: ReviewCommitId get() = record.commitId
+    }
+
+    /**
+     * The durable ledger could not be read or written, so recovery refuses to classify anything.
+     * Distinct from [NoTransaction]: unknown is not the same as absent.
+     */
+    data class Indeterminate(val commitId: ReviewCommitId, val reason: String) : ReviewCommitRecoveryResult
+}
+
+/**
+ * The normative recovery decision table (GATE 11B §45). Safety classification reads the durable
+ * [ReviewCommitStatus] only — never `status + phase` (GATE 11B §27).
+ *
+ * | Durable status | Meaning | Action |
+ * |---|---|---|
+ * | no record | no transaction | normal rating flow (`NoTransaction`) |
+ * | `PREPARED` | backend not entered | `OfferRetry` |
+ * | `SUBMITTING` | backend may have mutated | `Reconcile` |
+ * | `RETRY_ALLOWED` | proven no mutation | `OfferRetry` |
+ * | `AMBIGUOUS` | outcome unknown | `Reconcile` |
+ * | `COMMITTED` | durable success | `ResumeCommitted` |
+ */
 class ReviewCommitRecoveryPolicy {
-    fun classify(record: ReviewCommitRecord, proof: ReconcileCommitResult? = null): CommitRecoveryAction {
-        if (proof != null && record.state != ReviewCommitState.AMBIGUOUS) return CommitRecoveryAction.IntegrityError
-        if (record.state == ReviewCommitState.AMBIGUOUS && proof != null) return when (proof) {
-            is ReconcileCommitResult.Applied -> CommitRecoveryAction.ResumeCommitted
-            is ReconcileCommitResult.NotApplied -> if (proof.safeToRetry) CommitRecoveryAction.RetryAllowed
-                else CommitRecoveryAction.BlockedUnresolved
-            is ReconcileCommitResult.StillAmbiguous, is ReconcileCommitResult.Unsupported,
-            is ReconcileCommitResult.Unavailable -> CommitRecoveryAction.BlockedUnresolved
+
+    /**
+     * [proof] is authoritative read-only reconciliation evidence. It is only ever meaningful for an
+     * [ReviewCommitStatus.AMBIGUOUS] record; supplying it for any other status is an integrity
+     * failure, never a shortcut to a decision.
+     */
+    fun classify(record: ReviewCommitRecord, proof: ReconcileCommitResult? = null): ReviewCommitRecoveryAction {
+        if (record.status == ReviewCommitStatus.AMBIGUOUS && proof != null) return when (proof) {
+            is ReconcileCommitResult.Applied -> ReviewCommitRecoveryAction.ResumeCommitted
+            is ReconcileCommitResult.NotApplied -> ReviewCommitRecoveryAction.OfferRetry
+            is ReconcileCommitResult.StillAmbiguous,
+            is ReconcileCommitResult.Unsupported,
+            is ReconcileCommitResult.Unavailable -> ReviewCommitRecoveryAction.RemainBlocked
         }
-        return when (record.state) {
-            ReviewCommitState.NOT_STARTED -> if (record.phase == null && record.attemptCount == 0)
-                CommitRecoveryAction.RetryAllowed else CommitRecoveryAction.IntegrityError
-            ReviewCommitState.SUBMITTING -> when (record.phase) {
-                CommitAttemptPhase.PREPARED -> CommitRecoveryAction.RetryAllowed
-                CommitAttemptPhase.MUTATION_CALL_ENTERED -> CommitRecoveryAction.ReconciliationRequired
-                CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED -> when (record.response?.kind) {
-                    CommitResponseKind.CONFIRMED_COMMITTED -> CommitRecoveryAction.ResumeCommitted
-                    CommitResponseKind.CONFIRMED_NOT_APPLIED -> if (record.response.failure?.safeToRetry == true)
-                        CommitRecoveryAction.RetryAllowed else CommitRecoveryAction.BlockedUnresolved
-                    CommitResponseKind.OUTCOME_UNKNOWN -> CommitRecoveryAction.ReconciliationRequired
-                    null -> CommitRecoveryAction.IntegrityError
-                }
-                CommitAttemptPhase.LOCAL_RESULT_PERSISTED -> CommitRecoveryAction.IntegrityError
-                // A v1 SUBMITTING row must be migrated to CALL_ENTERED, never guessed PREPARED.
-                null -> CommitRecoveryAction.ReconciliationRequired
-            }
-            ReviewCommitState.COMMITTED -> if (record.phase == CommitAttemptPhase.LOCAL_RESULT_PERSISTED ||
-                record.phase == null) CommitRecoveryAction.ResumeCommitted else CommitRecoveryAction.IntegrityError
-            ReviewCommitState.FAILED_SAFE_TO_RETRY -> CommitRecoveryAction.RetryAllowed
-            ReviewCommitState.FAILED_NOT_RETRYABLE -> CommitRecoveryAction.BlockedUnresolved
-            ReviewCommitState.AMBIGUOUS -> CommitRecoveryAction.BlockedUnresolved
+        if (proof != null) return ReviewCommitRecoveryAction.IntegrityFailure("proof_for_${record.status.name.lowercase()}")
+        return when (record.status) {
+            ReviewCommitStatus.PREPARED -> ReviewCommitRecoveryAction.OfferRetry
+            ReviewCommitStatus.SUBMITTING -> ReviewCommitRecoveryAction.Reconcile
+            ReviewCommitStatus.RETRY_ALLOWED -> ReviewCommitRecoveryAction.OfferRetry
+            ReviewCommitStatus.AMBIGUOUS -> ReviewCommitRecoveryAction.Reconcile
+            ReviewCommitStatus.COMMITTED -> ReviewCommitRecoveryAction.ResumeCommitted
         }
     }
 }

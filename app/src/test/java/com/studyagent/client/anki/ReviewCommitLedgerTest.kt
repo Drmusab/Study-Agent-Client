@@ -33,30 +33,38 @@ class ReviewCommitLedgerTest {
     private suspend fun enter(ledger: ReviewCommitLedger, request: CommitRatingRequest = request()) {
         assertTrue(ledger.prepare(request) is ReviewCommitLedger.PrepareResult.Prepared)
         assertTrue(ledger.claim(request.commitId, evidence, allowRetry = false) is ReviewCommitLedger.ClaimResult.Claimed)
-        assertEquals(CommitAttemptPhase.MUTATION_CALL_ENTERED, ledger.markMutationEntered(request.commitId)?.phase)
+        assertEquals(ReviewCommitPhase.MUTATION_BOUNDARY_ENTERED, ledger.markMutationEntered(request.commitId)?.phase)
     }
 
-    private suspend fun finish(ledger: ReviewCommitLedger, request: CommitRatingRequest, result: CommitRatingResult): ReviewCommitRecord {
-        assertEquals(CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED,
+    private suspend fun finish(ledger: ReviewCommitLedger, request: CommitRatingRequest, result: BackendCommitResult): ReviewCommitRecord {
+        assertEquals(ReviewCommitPhase.BACKEND_RESPONSE_RECEIVED,
             ledger.markResponseReceived(request.commitId, result)?.phase)
         return ledger.complete(request.commitId, result)!!
     }
 
-    @Test fun `prepare and claim persist distinct intent and phase before mutation`() = runTest {
+    @Test fun `prepare and claim persist durable intent then the exclusive claim before mutation`() = runTest {
         val store = InMemoryReviewCommitStore()
         val ledger = ReviewCommitLedger(store, clock)
         val r = request()
         val prepared = ledger.prepare(r) as ReviewCommitLedger.PrepareResult.Prepared
-        assertEquals(ReviewCommitState.NOT_STARTED, store.durableRecords().single().state)
-        assertNull(prepared.record.phase)
+        assertEquals(ReviewCommitStatus.PREPARED, store.durableRecords().single().status)
+        assertEquals(ReviewCommitPhase.INTENT_PERSISTED, prepared.record.phase)
+        assertNull("a prepared transaction has not been claimed yet", prepared.record.claimedAtEpochMs)
         assertEquals(prepared.record, (ledger.prepare(r) as ReviewCommitLedger.PrepareResult.Existing).record)
         assertEquals(r.commitId, prepared.record.toRequest().commitId)
         val claimed = ledger.claim(r.commitId, evidence, false) as ReviewCommitLedger.ClaimResult.Claimed
-        assertEquals(ReviewCommitState.SUBMITTING, claimed.record.state)
-        assertEquals(CommitAttemptPhase.PREPARED, store.durableRecords().single().phase)
-        assertEquals(CommitAttemptPhase.MUTATION_CALL_ENTERED, ledger.markMutationEntered(r.commitId)?.phase)
-        assertEquals(CommitAttemptPhase.MUTATION_CALL_ENTERED, store.durableRecords().single().phase)
-        assertEquals(listOf(null, CommitAttemptPhase.PREPARED, CommitAttemptPhase.MUTATION_CALL_ENTERED),
+        // GATE 11B §28: the claim is durable and the status is still PREPARED — the boundary has
+        // not been entered, so a crash here is provably safe, not unknown.
+        assertEquals(ReviewCommitStatus.PREPARED, claimed.record.status)
+        assertNotNull(claimed.record.claimedAtEpochMs)
+        assertEquals(1, claimed.record.attemptCount)
+        assertEquals(ReviewCommitPhase.INTENT_PERSISTED, store.durableRecords().single().phase)
+        // …and a second claim is refused while the first one is outstanding.
+        assertTrue(ledger.claim(r.commitId, evidence, false) is ReviewCommitLedger.ClaimResult.InFlight)
+        assertEquals(ReviewCommitPhase.MUTATION_BOUNDARY_ENTERED, ledger.markMutationEntered(r.commitId)?.phase)
+        assertEquals(ReviewCommitPhase.MUTATION_BOUNDARY_ENTERED, store.durableRecords().single().phase)
+        assertEquals(listOf(ReviewCommitPhase.INTENT_PERSISTED, ReviewCommitPhase.INTENT_PERSISTED,
+            ReviewCommitPhase.MUTATION_BOUNDARY_ENTERED),
             store.writes.map { (ReviewCommitLedgerCodec.decode(it) as ReviewCommitLedgerCodec.Decoded.Records).records.single().phase })
     }
 
@@ -118,9 +126,9 @@ class ReviewCommitLedgerTest {
 
         val entered = ledger.claim(first.commitId, evidence, false) as ReviewCommitLedger.ClaimResult.Claimed
         ledger.markMutationEntered(first.commitId)
-        ledger.markResponseReceived(first.commitId, CommitRatingResult.Committed())
-        ledger.complete(first.commitId, CommitRatingResult.Committed())
-        assertEquals(ReviewCommitState.COMMITTED, ledger.get(entered.record.commitId)?.state)
+        ledger.markResponseReceived(first.commitId, BackendCommitResult.ConfirmedCommitted())
+        ledger.complete(first.commitId, BackendCommitResult.ConfirmedCommitted())
+        assertEquals(ReviewCommitStatus.COMMITTED, ledger.get(entered.record.commitId)?.status)
         assertTrue(ledger.prepare(second) is ReviewCommitLedger.PrepareResult.Conflict)
 
         now = 10_000
@@ -132,10 +140,18 @@ class ReviewCommitLedgerTest {
         val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), clock)
         val original = request()
         ledger.prepare(original)
-        assertTrue(ledger.prepare(original.copy(collectionRef = AnkiCollectionIdentity(backend, "other")))
+        // A second payload for the *same* commit id may never move to another collection or deck:
+        // the identity is frozen with the transaction, so the write is a conflict, not an update.
+        fun otherIdentity(deckId: String, collectionKey: String) = CommitRatingRequest(
+            original.commitId, card.copy(collectionKey = collectionKey), original.rating,
+            ratedAtEpochMs = original.ratedAtEpochMs, answerDurationMs = original.answerDurationMs,
+            deckRef = AnkiDeckRef(backend, deckId, collectionKey),
+            collectionRef = AnkiCollectionIdentity(backend, collectionKey))
+        assertTrue(ledger.prepare(otherIdentity("1", "other-collection"))
             is ReviewCommitLedger.PrepareResult.Conflict)
-        assertTrue(ledger.prepare(original.copy(deckRef = AnkiDeckRef(backend, "other", "collection")))
+        assertTrue(ledger.prepare(otherIdentity("other-deck", "collection"))
             is ReviewCommitLedger.PrepareResult.Conflict)
+        assertEquals("the recorded identity is untouched", deck, ledger.get(original.commitId)!!.deckRef)
     }
 
     @Test fun `only one mutation attempt can be claimed under concurrent duplicate input`() = runTest {
@@ -152,15 +168,15 @@ class ReviewCommitLedgerTest {
         val ledger = ReviewCommitLedger(store, clock)
         val r = request()
         enter(ledger, r)
-        val saved = finish(ledger, r, CommitRatingResult.Committed())
-        assertEquals(ReviewCommitState.COMMITTED, saved.state)
+        val saved = finish(ledger, r, BackendCommitResult.ConfirmedCommitted())
+        assertEquals(ReviewCommitStatus.COMMITTED, saved.status)
         assertEquals(Rating.GOOD, saved.selectedRating)
         assertEquals(Rating.GOOD, saved.committedRating)
-        assertEquals(CommitAttemptPhase.LOCAL_RESULT_PERSISTED, store.durableRecords().single().phase)
+        assertEquals(ReviewCommitPhase.FINAL_STATUS_PERSISTED, store.durableRecords().single().phase)
         assertEquals(CommitResponseKind.CONFIRMED_COMMITTED, saved.response?.kind)
-        assertNull(ledger.complete(r.commitId, CommitRatingResult.Ambiguous()))
+        assertNull(ledger.complete(r.commitId, BackendCommitResult.OutcomeUnknown()))
         assertTrue(store.restart(clock).claim(r.commitId, null, true) is ReviewCommitLedger.ClaimResult.AlreadyCommitted)
-        assertEquals(ReviewCommitState.COMMITTED, ledger.get(r.commitId)?.state)
+        assertEquals(ReviewCommitStatus.COMMITTED, ledger.get(r.commitId)?.status)
     }
 
     @Test fun `pre-call failure and retry use the same commit and original rating`() = runTest {
@@ -168,16 +184,16 @@ class ReviewCommitLedgerTest {
         val ledger = ReviewCommitLedger(store, clock)
         val r = request(rating = Rating.HARD)
         ledger.prepare(r)
-        val failed = ledger.markRefused(r.commitId, "permission_required", true)!!
+        val failed = ledger.markRefused(r.commitId, "permission_required")!!
         assertEquals(0, failed.attemptCount)
-        assertTrue(failed.safeToRetry)
+        assertTrue(failed.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertTrue(ledger.claim(r.commitId, null, false) is ReviewCommitLedger.ClaimResult.NotClaimable)
         val claimed = ledger.claim(r.commitId, evidence, true) as ReviewCommitLedger.ClaimResult.Claimed
         assertEquals(1, claimed.record.attemptCount)
         assertEquals(r.rating, claimed.record.toRequest().rating)
         assertEquals(r.commitId, claimed.record.toRequest().commitId)
         ledger.markMutationEntered(r.commitId)
-        assertEquals(ReviewCommitState.COMMITTED, finish(ledger, r, CommitRatingResult.Committed()).state)
+        assertEquals(ReviewCommitStatus.COMMITTED, finish(ledger, r, BackendCommitResult.ConfirmedCommitted()).status)
         assertEquals(1, ledger.snapshot().size)
     }
 
@@ -188,18 +204,24 @@ class ReviewCommitLedgerTest {
         first.prepare(prepared); first.claim(prepared.commitId, evidence, false)
         val restored = store.restart(clock)
         val safe = restored.get(prepared.commitId)!!
-        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, safe.state)
-        assertTrue(safe.safeToRetry)
-        assertEquals(ReviewCommitResolution.RECOVERED_PREPARED, safe.resolution)
+        // GATE 11B §45: PREPARED means the boundary was never entered, so it is offered for retry
+        // (not marked as a failure, and never reclassified as an unknown outcome).
+        assertEquals(ReviewCommitStatus.PREPARED, safe.status)
+        assertEquals(ReviewCommitPhase.INTENT_PERSISTED, safe.phase)
+        assertNull("the interrupted claim is released so the attempt can be taken again",
+            safe.claimedAtEpochMs)
+        assertEquals(1, restored.recoveryReport().restorable)
         assertEquals(0, restored.pendingRecovery(backend).size)
+        // The same process claims it again without a restart: no lost attempt, no second mutation.
+        assertTrue(restored.claim(prepared.commitId, evidence, false) is ReviewCommitLedger.ClaimResult.Claimed)
 
-        val other = request(session = "s2")
+        val other = request(turn = "t2", session = "s2")
         enter(restored, other)
         val again = store.restart(clock)
         val uncertain = again.get(other.commitId)!!
-        assertEquals(ReviewCommitState.AMBIGUOUS, uncertain.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, uncertain.status)
         assertEquals(ReviewCommitResolution.PROCESS_RESTART_WHILE_SUBMITTING, uncertain.resolution)
-        assertFalse(uncertain.safeToRetry)
+        assertFalse(uncertain.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertTrue(again.claim(other.commitId, null, true) is ReviewCommitLedger.ClaimResult.NotClaimable)
         assertEquals(listOf(uncertain), again.pendingRecovery(backend))
         assertEquals(1, again.recoveryReport().interruptedSubmissions)
@@ -210,11 +232,11 @@ class ReviewCommitLedgerTest {
         val ledger = ReviewCommitLedger(store, clock)
         val r = request()
         enter(ledger, r)
-        ledger.markResponseReceived(r.commitId, CommitRatingResult.Committed())
-        assertEquals(ReviewCommitState.SUBMITTING, store.durableRecords().single().state)
-        assertEquals(CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED, store.durableRecords().single().phase)
+        ledger.markResponseReceived(r.commitId, BackendCommitResult.ConfirmedCommitted())
+        assertEquals(ReviewCommitStatus.SUBMITTING, store.durableRecords().single().status)
+        assertEquals(ReviewCommitPhase.BACKEND_RESPONSE_RECEIVED, store.durableRecords().single().phase)
         val restarted = store.restart(clock)
-        assertEquals(ReviewCommitState.COMMITTED, restarted.get(r.commitId)!!.state)
+        assertEquals(ReviewCommitStatus.COMMITTED, restarted.get(r.commitId)!!.status)
         assertEquals(ReviewCommitResolution.RECOVERED_RESPONSE, restarted.get(r.commitId)!!.resolution)
     }
 
@@ -224,9 +246,9 @@ class ReviewCommitLedgerTest {
         val r = request()
         enter(ledger, r)
         store.failNextWrites = 1
-        assertNull(ledger.markResponseReceived(r.commitId, CommitRatingResult.Committed()))
-        assertEquals(CommitAttemptPhase.MUTATION_CALL_ENTERED, ledger.get(r.commitId)?.phase)
-        assertEquals(ReviewCommitState.AMBIGUOUS, store.restart(clock).get(r.commitId)?.state)
+        assertNull(ledger.markResponseReceived(r.commitId, BackendCommitResult.ConfirmedCommitted()))
+        assertEquals(ReviewCommitPhase.MUTATION_BOUNDARY_ENTERED, ledger.get(r.commitId)?.phase)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, store.restart(clock).get(r.commitId)?.status)
 
         // In an independent run, the *terminal* write alone fails; the durable response
         // lets the next process finish without replaying a mutation.
@@ -234,15 +256,15 @@ class ReviewCommitLedgerTest {
         val second = ReviewCommitLedger(secondStore, clock)
         val r2 = request(session = "s2")
         enter(second, r2)
-        second.markResponseReceived(r2.commitId, CommitRatingResult.Committed())
+        second.markResponseReceived(r2.commitId, BackendCommitResult.ConfirmedCommitted())
         secondStore.failNextWrites = 1
-        assertNull(second.complete(r2.commitId, CommitRatingResult.Committed()))
+        assertNull(second.complete(r2.commitId, BackendCommitResult.ConfirmedCommitted()))
         assertEquals("failed durable write is not counted as success", 0L,
             second.diagnosticsSnapshot().successTotal)
-        assertEquals(ReviewCommitState.SUBMITTING, second.get(r2.commitId)?.state)
-        assertEquals(CommitAttemptPhase.MUTATION_RESPONSE_RECEIVED, secondStore.durableRecords().single().phase)
+        assertEquals(ReviewCommitStatus.SUBMITTING, second.get(r2.commitId)?.status)
+        assertEquals(ReviewCommitPhase.BACKEND_RESPONSE_RECEIVED, secondStore.durableRecords().single().phase)
         val recovered = secondStore.restart(clock)
-        assertEquals(ReviewCommitState.COMMITTED, recovered.get(r2.commitId)?.state)
+        assertEquals(ReviewCommitStatus.COMMITTED, recovered.get(r2.commitId)?.status)
         assertEquals("durable response recovery counts once", 1L, recovered.diagnosticsSnapshot().successTotal)
     }
 
@@ -254,7 +276,7 @@ class ReviewCommitLedgerTest {
         val restarted = store.restart(clock)
         assertTrue(restarted.health() is ReviewCommitLedger.Health.Unavailable)
         assertTrue(restarted.prepare(request(session = "other")) is ReviewCommitLedger.PrepareResult.Unavailable)
-        assertEquals(CommitAttemptPhase.MUTATION_CALL_ENTERED, store.durableRecords().single().phase)
+        assertEquals(ReviewCommitPhase.MUTATION_BOUNDARY_ENTERED, store.durableRecords().single().phase)
     }
 
     @Test fun `no false COMMITTED on contradictory response or unsupported transition`() = runTest {
@@ -263,11 +285,11 @@ class ReviewCommitLedgerTest {
         ledger.prepare(r)
         assertNull(ledger.markMutationEntered(r.commitId))
         ledger.claim(r.commitId, evidence, false)
-        assertNull(ledger.markResponseReceived(r.commitId, CommitRatingResult.Committed()))
+        assertNull(ledger.markResponseReceived(r.commitId, BackendCommitResult.ConfirmedCommitted()))
         ledger.markMutationEntered(r.commitId)
-        ledger.markResponseReceived(r.commitId, CommitRatingResult.Committed())
-        assertNull(ledger.complete(r.commitId, CommitRatingResult.RetryableFailure(AnkiError.BackendUnavailable())))
-        assertEquals(ReviewCommitState.COMMITTED, ledger.finalizeRecordedResponse(r.commitId)?.state)
+        ledger.markResponseReceived(r.commitId, BackendCommitResult.ConfirmedCommitted())
+        assertNull(ledger.complete(r.commitId, BackendCommitResult.ConfirmedNotCommitted(AnkiError.BackendUnavailable())))
+        assertEquals(ReviewCommitStatus.COMMITTED, ledger.finalizeRecordedResponse(r.commitId)?.status)
         assertNull(ledger.markAmbiguous(r.commitId, "late_unknown"))
     }
 
@@ -276,24 +298,24 @@ class ReviewCommitLedgerTest {
         val ledger = ReviewCommitLedger(store, clock)
         val a = request(session = "s1")
         enter(ledger, a)
-        finish(ledger, a, CommitRatingResult.Ambiguous())
-        assertEquals(ReviewCommitState.AMBIGUOUS,
-            ledger.reconcile(a.commitId, ReconcileCommitResult.StillAmbiguous("no_receipt"))?.state)
-        assertFalse(ledger.get(a.commitId)!!.safeToRetry)
-        assertEquals(ReviewCommitState.COMMITTED,
-            ledger.reconcile(a.commitId, ReconcileCommitResult.Applied("backend_receipt"))?.state)
-        assertEquals(ReviewCommitState.COMMITTED, store.restart(clock).get(a.commitId)?.state)
+        finish(ledger, a, BackendCommitResult.OutcomeUnknown())
+        assertEquals(ReviewCommitStatus.AMBIGUOUS,
+            ledger.reconcile(a.commitId, ReconcileCommitResult.StillAmbiguous("no_receipt"))?.status)
+        assertFalse(ledger.get(a.commitId)!!.status == ReviewCommitStatus.RETRY_ALLOWED)
+        assertEquals(ReviewCommitStatus.COMMITTED,
+            ledger.reconcile(a.commitId, ReconcileCommitResult.Applied("backend_receipt"))?.status)
+        assertEquals(ReviewCommitStatus.COMMITTED, store.restart(clock).get(a.commitId)?.status)
         assertNull(ledger.markMutationEntered(a.commitId))
-        val b = request(session = "s2")
-        enter(ledger, b); finish(ledger, b, CommitRatingResult.Ambiguous())
-        assertTrue(ledger.reconcile(b.commitId, ReconcileCommitResult.NotApplied("backend_receipt", true))!!.safeToRetry)
-        assertTrue(store.restart(clock).get(b.commitId)!!.safeToRetry)
+        val b = request(turn = "t2", session = "s2")
+        enter(ledger, b); finish(ledger, b, BackendCommitResult.OutcomeUnknown())
+        assertTrue(ledger.reconcile(b.commitId, ReconcileCommitResult.NotApplied("backend_receipt"))!!.status == ReviewCommitStatus.RETRY_ALLOWED)
+        assertTrue(store.restart(clock).get(b.commitId)!!.status == ReviewCommitStatus.RETRY_ALLOWED)
     }
 
     @Test fun `unresolved collection is blocked but unrelated backend and collection are not`() = runTest {
         val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), clock)
         val r = request()
-        enter(ledger, r); finish(ledger, r, CommitRatingResult.Ambiguous())
+        enter(ledger, r); finish(ledger, r, BackendCommitResult.OutcomeUnknown())
         assertEquals(r.commitId, ledger.recoveryBlocker(backend, "collection", "new")?.commitId)
         assertEquals(r.commitId, ledger.recoveryBlocker(backend, "other", "s1")?.commitId)
         assertNull(ledger.recoveryBlocker(backend, "other", "new"))
@@ -327,7 +349,7 @@ class ReviewCommitLedgerTest {
         assertEquals("Ready", active.health)
         assertEquals(1, active.submitting)
         store.failNextWrites = 1
-        assertNull(ledger.markResponseReceived(request().commitId, CommitRatingResult.Committed()))
+        assertNull(ledger.markResponseReceived(request().commitId, BackendCommitResult.ConfirmedCommitted()))
         val failed = ledger.diagnosticsSnapshot()
         assertEquals("Last write failed", failed.health)
         assertTrue(failed.lastWriteFailed)
@@ -339,11 +361,11 @@ class ReviewCommitLedgerTest {
     @Test fun `capacity never evicts ambiguous or committed identity even after acknowledgment`() = runTest {
         val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), clock, maxRecords = 2)
         val a = request(session = "s1")
-        enter(ledger, a); finish(ledger, a, CommitRatingResult.Ambiguous())
+        enter(ledger, a); finish(ledger, a, BackendCommitResult.OutcomeUnknown())
         ledger.acknowledge(a.commitId)
-        val b = request(session = "s2")
-        enter(ledger, b); finish(ledger, b, CommitRatingResult.Committed())
-        assertEquals(ReviewCommitLedger.PrepareResult.Full, ledger.prepare(request(session = "s3")))
+        val b = request(turn = "t2", session = "s2")
+        enter(ledger, b); finish(ledger, b, BackendCommitResult.ConfirmedCommitted())
+        assertEquals(ReviewCommitLedger.PrepareResult.Full, ledger.prepare(request(turn = "t3", session = "s3")))
         assertEquals(2, ledger.snapshot().size)
         assertEquals(1, ledger.pendingRecovery().size)
     }
@@ -359,8 +381,8 @@ class ReviewCommitLedgerTest {
         val a = (ledger.prepare(request()) as ReviewCommitLedger.PrepareResult.Prepared).record
         store.overwrite(ReviewCommitLedgerCodec.encode(listOf(a, a.copy(commitId = request(turn = "t2").commitId))))
         assertTrue(store.restart(clock).health() is ReviewCommitLedger.Health.Unavailable)
-        store.overwrite(ReviewCommitLedgerCodec.encode(listOf(a.copy(state = ReviewCommitState.SUBMITTING,
-            attemptCount = 1, phase = CommitAttemptPhase.LOCAL_RESULT_PERSISTED))))
+        store.overwrite(ReviewCommitLedgerCodec.encode(listOf(a.copy(status = ReviewCommitStatus.SUBMITTING,
+            attemptCount = 1, phase = ReviewCommitPhase.FINAL_STATUS_PERSISTED))))
         assertTrue(store.restart(clock).health() is ReviewCommitLedger.Health.Unavailable)
     }
 
@@ -378,51 +400,39 @@ class ReviewCommitLedgerTest {
             }.let(::JsonObject)
         })
         store.overwrite(JsonObject(root).toString())
-        assertEquals(ReviewCommitState.AMBIGUOUS, store.restart(clock).get(r.commitId)?.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, store.restart(clock).get(r.commitId)?.status)
     }
 
-    @Test fun `schema v2 generic failure migrates using the explicit safe-to-retry fact`() = runTest {
-        val store = InMemoryReviewCommitStore()
-        val ledger = ReviewCommitLedger(store, clock)
-        val r = request()
-        ledger.prepare(r)
-        ledger.markRefused(r.commitId, "safe_preflight", safeToRetry = true)
-        val root = Json.parseToJsonElement(store.snapshot!!).jsonObject.toMutableMap()
-        root["schemaVersion"] = JsonPrimitive(2)
-        val legacyRecords = root.getValue("records").jsonArray.map { element ->
-            element.jsonObject.toMutableMap().apply {
-                this["state"] = JsonPrimitive("FAILED")
-                remove("collectionRef")
-                remove("committedRating")
-            }.let(::JsonObject)
+    /**
+     * Schemas 1/2 spelled every not-applied outcome as one `FAILED` status plus a retryability bit.
+     * GATE 11B §21 collapses that: both migrate to [ReviewCommitStatus.RETRY_ALLOWED], because the
+     * bit never described the scheduler — it described a UI policy that the status now owns.
+     */
+    @Test fun `schema v2 legacy failures migrate to retry_allowed with or without the retry bit`() = runTest {
+        for (legacy in listOf("FAILED_SAFE_TO_RETRY", "FAILED_NOT_RETRYABLE")) {
+            val store = InMemoryReviewCommitStore()
+            val ledger = ReviewCommitLedger(store, clock)
+            val r = request()
+            ledger.prepare(r)
+            ledger.markRefused(r.commitId, "safe_preflight")
+            val root = Json.parseToJsonElement(store.snapshot!!).jsonObject.toMutableMap()
+            root["schemaVersion"] = JsonPrimitive(2)
+            root["records"] = JsonArray(root.getValue("records").jsonArray.map { element ->
+                element.jsonObject.toMutableMap().apply {
+                    this["state"] = JsonPrimitive(legacy)
+                    remove("status")
+                    remove("collectionRef")
+                    remove("committedRating")
+                }.let(::JsonObject)
+            })
+            store.overwrite(JsonObject(root).toString())
+
+            val migrated = store.restart(clock).get(r.commitId)!!
+            assertEquals("$legacy migrates to the one durable not-applied status",
+                ReviewCommitStatus.RETRY_ALLOWED, migrated.status)
+            assertNotNull("a migrated not-applied row keeps its reason", migrated.failure)
+            assertEquals(ReviewCommitPhase.FINAL_STATUS_PERSISTED, migrated.phase)
         }
-        root["records"] = JsonArray(legacyRecords)
-        store.overwrite(JsonObject(root).toString())
-        val migrated = store.restart(clock).get(r.commitId)!!
-        assertEquals(ReviewCommitState.FAILED_SAFE_TO_RETRY, migrated.state)
-        assertTrue(migrated.safeToRetry)
-    }
-
-    @Test fun `schema v2 generic failure with safeToRetry false migrates as non-retryable`() = runTest {
-        val store = InMemoryReviewCommitStore()
-        val ledger = ReviewCommitLedger(store, clock)
-        val r = request()
-        ledger.prepare(r)
-        ledger.markRefused(r.commitId, "not_retryable", safeToRetry = false)
-        val root = Json.parseToJsonElement(store.snapshot!!).jsonObject.toMutableMap()
-        root["schemaVersion"] = JsonPrimitive(2)
-        root["records"] = JsonArray(root.getValue("records").jsonArray.map { element ->
-            element.jsonObject.toMutableMap().apply {
-                this["state"] = JsonPrimitive("FAILED")
-                remove("collectionRef")
-                remove("committedRating")
-            }.let(::JsonObject)
-        })
-        store.overwrite(JsonObject(root).toString())
-
-        val migrated = store.restart(clock).get(r.commitId)!!
-        assertEquals(ReviewCommitState.FAILED_NOT_RETRYABLE, migrated.state)
-        assertFalse(migrated.safeToRetry)
     }
 
     @Test fun `schema v3 persists explicit failure names and rejects legacy ambiguity`() = runTest {
@@ -430,13 +440,14 @@ class ReviewCommitLedgerTest {
         val ledger = ReviewCommitLedger(store, clock)
         val r = request()
         ledger.prepare(r)
-        ledger.markRefused(r.commitId, "safe_preflight", safeToRetry = true)
+        ledger.markRefused(r.commitId, "safe_preflight")
         val raw = store.snapshot!!
-        assertTrue(raw.contains("\"state\":\"FAILED_SAFE_TO_RETRY\""))
-        assertFalse(raw.contains("\"state\":\"FAILED\""))
+        assertTrue(raw.contains("\"status\":\"RETRY_ALLOWED\""))
+        assertFalse(raw.contains("\"FAILED\""))
         val ambiguousLegacyName = raw.replace(
-            "\"state\":\"FAILED_SAFE_TO_RETRY\"", "\"state\":\"FAILED\"")
-        assertTrue(ReviewCommitLedgerCodec.decode(ambiguousLegacyName) is ReviewCommitLedgerCodec.Decoded.Unreadable)
+            "\"status\":\"RETRY_ALLOWED\"", "\"status\":\"FAILED_SAFE_TO_RETRY\"")
+        assertTrue("the ambiguous legacy name is no longer a status the codec will accept",
+            ReviewCommitLedgerCodec.decode(ambiguousLegacyName) is ReviewCommitLedgerCodec.Decoded.Unreadable)
     }
 
     @Test fun `codec preserves metadata but no educational content`() = runTest {
@@ -444,7 +455,7 @@ class ReviewCommitLedgerTest {
         val ledger = ReviewCommitLedger(store, clock)
         val r = request()
         enter(ledger, r)
-        val result = CommitRatingResult.Committed(receipt = CommitReceipt(backend, "receipt-from-fake", r.rating))
+        val result = BackendCommitResult.ConfirmedCommitted(receipt = CommitReceipt(backend, "receipt-from-fake", r.rating))
         finish(ledger, r, result)
         assertEquals("receipt-from-fake", store.durableRecords().single().response?.backendReceiptId)
         assertEquals(Rating.GOOD, store.durableRecords().single().receipt?.committedRating)
@@ -463,14 +474,15 @@ class ReviewCommitLedgerTest {
         val prepared = ledger.prepare(r) as ReviewCommitLedger.PrepareResult.Prepared
         val before = store.snapshot
         val rejected = ledger.transition(
-            r.commitId, ReviewCommitState.NOT_STARTED, prepared.record.version,
-            ReviewCommitTransition.MarkCommitted(CommitRatingResult.Committed(), "forged")
+            r.commitId, ReviewCommitStatus.PREPARED, prepared.record.version,
+            ReviewCommitTransition.BackendCommitted(BackendCommitResult.ConfirmedCommitted(), "forged")
         )
         assertTrue(rejected is ReviewCommitLedger.TransitionResult.Rejected)
-        assertEquals(ReviewCommitTransitionRejection.INVALID_BACKEND_RESULT,
+        assertEquals("a forged COMMITTED cannot be written onto a PREPARED row",
+            ReviewCommitTransitionRejection.ILLEGAL_STATUS_TRANSITION,
             (rejected as ReviewCommitLedger.TransitionResult.Rejected).reason)
         assertEquals(before, store.snapshot)
-        assertEquals(ReviewCommitState.NOT_STARTED, ledger.get(r.commitId)?.state)
+        assertEquals(ReviewCommitStatus.PREPARED, ledger.get(r.commitId)?.status)
         assertEquals(0, ledger.diagnosticsSnapshot().successTotal)
     }
 
@@ -482,7 +494,7 @@ class ReviewCommitLedgerTest {
         val before = store.snapshot
         store.failNextWrites = 1
         val result = ledger.transition(
-            r.commitId, ReviewCommitState.NOT_STARTED, prepared.record.version,
+            r.commitId, ReviewCommitStatus.PREPARED, prepared.record.version,
             ReviewCommitTransition.NoteAbandoned(abandonedAtEpochMs = 50L)
         )
         assertTrue(result is ReviewCommitLedger.TransitionResult.StoreFailed)
@@ -496,17 +508,17 @@ class ReviewCommitLedgerTest {
         val r = request()
         val prepared = ledger.prepare(r) as ReviewCommitLedger.PrepareResult.Prepared
         val first = ledger.transition(
-            r.commitId, ReviewCommitState.NOT_STARTED, prepared.record.version,
+            r.commitId, ReviewCommitStatus.PREPARED, prepared.record.version,
             ReviewCommitTransition.NoteAbandoned(abandonedAtEpochMs = 50L)
         ) as ReviewCommitLedger.TransitionResult.Applied
         val stale = ledger.transition(
-            r.commitId, ReviewCommitState.NOT_STARTED, prepared.record.version,
+            r.commitId, ReviewCommitStatus.PREPARED, prepared.record.version,
             ReviewCommitTransition.NoteAbandoned(abandonedAtEpochMs = 99L)
         )
         assertTrue(stale is ReviewCommitLedger.TransitionResult.VersionMismatch ||
-            stale is ReviewCommitLedger.TransitionResult.StateMismatch)
+            stale is ReviewCommitLedger.TransitionResult.StatusMismatch)
         assertEquals(50L, first.record.abandonedAtEpochMs)
-        assertEquals(ReviewCommitState.NOT_STARTED, ledger.get(r.commitId)?.state)
+        assertEquals(ReviewCommitStatus.PREPARED, ledger.get(r.commitId)?.status)
         assertEquals(50L, ledger.get(r.commitId)?.abandonedAtEpochMs)
     }
 
@@ -516,8 +528,8 @@ class ReviewCommitLedgerTest {
         enter(ledger, r)
         ledger.markAmbiguous(r.commitId, "lost")
         val noted = ledger.noteAbandoned(r.commitId, 80L)
-        assertEquals(ReviewCommitState.AMBIGUOUS, noted?.state)
-        assertFalse(noted!!.safeToRetry)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, noted?.status)
+        assertFalse(noted!!.status == ReviewCommitStatus.RETRY_ALLOWED)
         assertEquals(80L, noted.abandonedAtEpochMs)
         assertTrue(ledger.claim(r.commitId, evidence, allowRetry = true) is ReviewCommitLedger.ClaimResult.NotClaimable)
     }
@@ -526,14 +538,14 @@ class ReviewCommitLedgerTest {
         val ledger = ReviewCommitLedger(InMemoryReviewCommitStore(), clock)
         val committed = request(turn = "done", session = "s-done")
         enter(ledger, committed)
-        finish(ledger, committed, CommitRatingResult.Committed())
+        finish(ledger, committed, BackendCommitResult.ConfirmedCommitted())
         val ambiguous = request(turn = "open", session = "s-open")
         enter(ledger, ambiguous)
         ledger.markAmbiguous(ambiguous.commitId, "lost")
         now = 10_000L
         assertEquals(1, ledger.pruneCommitted(olderThanEpochMs = 9_000L))
         assertTrue(ledger.get(committed.commitId) == null)
-        assertEquals(ReviewCommitState.AMBIGUOUS, ledger.get(ambiguous.commitId)?.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, ledger.get(ambiguous.commitId)?.status)
         assertTrue(ledger.prepare(committed) is ReviewCommitLedger.PrepareResult.Tombstoned)
         assertEquals(1, ledger.unresolved().size)
     }

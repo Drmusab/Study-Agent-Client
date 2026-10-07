@@ -17,7 +17,7 @@ import com.studyagent.client.core.anki.AnkiSchedulingInfo
 import com.studyagent.client.core.anki.AnkiSessionContext
 import com.studyagent.client.core.anki.BeginReviewRequest
 import com.studyagent.client.core.anki.CommitRatingRequest
-import com.studyagent.client.core.anki.CommitRatingResult
+import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.ReviewCommitId
 import com.studyagent.client.core.anki.ReviewTurnId
@@ -587,11 +587,11 @@ class AnkiDroidReviewSessionTest {
         )
         val result = h.backend.commitRating(request)
 
-        assertTrue(result is CommitRatingResult.Rejected)
+        assertTrue(result is BackendCommitResult.ConfirmedNotCommitted)
         // GATE 11: this harness wires no rating gateway, so the refusal names the missing writer.
         assertEquals(
             "ratingCommit",
-            ((result as CommitRatingResult.Rejected).error as AnkiError.UnsupportedAction).action
+            ((result as BackendCommitResult.ConfirmedNotCommitted).reason as AnkiError.UnsupportedAction).action
         )
         // GATE 06 §35/§175: zero rating mutations, so the scheduler is never asked again either.
         assertEquals(1, h.review.queryCalls)

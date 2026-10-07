@@ -31,21 +31,23 @@ enum class CommitFailureKind {
     UNCLASSIFIED
 }
 
-fun classifyCommitFailure(kind: CommitFailureKind, boundary: MutationBoundary): CommitRatingResult {
+fun classifyCommitFailure(kind: CommitFailureKind, boundary: MutationBoundary): BackendCommitResult {
     if (boundary == MutationBoundary.AFTER_CALL_ENTERED) {
         return when (kind) {
-            CommitFailureKind.STORAGE -> CommitRatingResult.Ambiguous(AnkiError.CommitLedgerUnavailable())
-            CommitFailureKind.VALIDATION -> CommitRatingResult.Ambiguous(AnkiError.Unknown("validation_after_entry"))
-            else -> CommitRatingResult.Ambiguous(AnkiError.Unknown(kind.name.lowercase()))
+            CommitFailureKind.STORAGE -> BackendCommitResult.OutcomeUnknown(AnkiError.CommitLedgerUnavailable())
+            CommitFailureKind.VALIDATION -> BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("validation_after_entry"))
+            else -> BackendCommitResult.OutcomeUnknown(AnkiError.Unknown(kind.name.lowercase()))
         }
     }
     return when (kind) {
+        // Proven not applied, whether the refusal is transient or permanent: the canonical status
+        // set has one "proven not applied" status and re-submitting a refused rating is safe.
         CommitFailureKind.VALIDATION, CommitFailureKind.PROVIDER_REJECTION ->
-            CommitRatingResult.Rejected(AnkiError.InvalidRequest(kind.name.lowercase()))
+            BackendCommitResult.ConfirmedNotCommitted(AnkiError.InvalidRequest(kind.name.lowercase()))
         CommitFailureKind.STORAGE ->
-            CommitRatingResult.RetryableFailure(AnkiError.CommitLedgerUnavailable())
+            BackendCommitResult.ConfirmedNotCommitted(AnkiError.CommitLedgerUnavailable())
         CommitFailureKind.TIMEOUT ->
-            CommitRatingResult.Ambiguous(AnkiError.Unknown("timeout_without_boundary"))
-        else -> CommitRatingResult.RetryableFailure(AnkiError.Unknown(kind.name.lowercase()))
+            BackendCommitResult.OutcomeUnknown(AnkiError.Unknown("timeout_without_boundary"))
+        else -> BackendCommitResult.ConfirmedNotCommitted(AnkiError.Unknown(kind.name.lowercase()))
     }
 }

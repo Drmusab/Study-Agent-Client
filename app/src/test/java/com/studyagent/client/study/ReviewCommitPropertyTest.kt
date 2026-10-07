@@ -2,7 +2,7 @@ package com.studyagent.client.study
 
 import com.studyagent.client.anki.fake.FakeCommitMode
 import com.studyagent.client.core.anki.ReviewCommitRecord
-import com.studyagent.client.core.anki.ReviewCommitState
+import com.studyagent.client.core.anki.ReviewCommitStatus
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.study.AnkiStudyEvent
 import com.studyagent.client.core.study.AnkiStudyEffect
@@ -45,18 +45,18 @@ class ReviewCommitPropertyTest {
         assertEquals("one ledger row per turn", rows.map { it.turnId }.distinct().size, rows.size)
 
         // COMMITTED -> always COMMITTED: state, rating and identity never move again.
-        for (row in rows.filter { it.state == ReviewCommitState.COMMITTED }) {
+        for (row in rows.filter { it.status == ReviewCommitStatus.COMMITTED }) {
             val key = row.commitId.stableKey
             val known = tracker.committedRatings[key]
             if (known == null) tracker.committedRatings[key] = row.rating
             else assertEquals("a committed rating is immutable", known, row.rating)
             assertTrue("a committed row keeps its phase",
-                row.phase == com.studyagent.client.core.anki.CommitAttemptPhase.LOCAL_RESULT_PERSISTED)
+                row.phase == com.studyagent.client.core.anki.ReviewCommitPhase.FINAL_STATUS_PERSISTED)
         }
 
         // nextCardRequested(turn) -> commitState(turn) == COMMITTED: every next card except the
         // session's first is preceded by a durable COMMITTED row.
-        val committedRows = rows.count { it.state == ReviewCommitState.COMMITTED }
+        val committedRows = rows.count { it.status == ReviewCommitStatus.COMMITTED }
         assertTrue(
             "next card requests (${harness.fake.nextCardCount}) outran COMMITTED rows ($committedRows)",
             harness.fake.nextCardCount <= committedRows + 1
@@ -64,7 +64,7 @@ class ReviewCommitPropertyTest {
 
         // activeMutationAttempts(session) <= 1: at most one commit row per study session is in a
         // dispatched state at any moment.
-        val dispatched = rows.count { it.state == ReviewCommitState.SUBMITTING }
+        val dispatched = rows.count { it.status == ReviewCommitStatus.SUBMITTING }
         assertTrue("at most one in-flight mutation per session", dispatched <= 1)
 
         for (row in rows) assertConsistent(row)
@@ -84,7 +84,7 @@ class ReviewCommitPropertyTest {
     /** No AMBIGUOUS row may gain a mutation attempt while it stays ambiguous. */
     private suspend fun assertAmbiguousNeverRetried(harness: AnkiCommitHarness, tracker: Tracker) {
         val attempted = harness.fake.recordedCommits().associate { it.request.commitId.stableKey to it.attempts }
-        for (row in harness.ledger.snapshot().filter { it.state == ReviewCommitState.AMBIGUOUS }) {
+        for (row in harness.ledger.snapshot().filter { it.status == ReviewCommitStatus.AMBIGUOUS }) {
             val key = row.commitId.stableKey
             val frozen = tracker.attemptsPerCommit[key] ?: continue
             assertEquals("an AMBIGUOUS commit may not be re-attempted", frozen, attempted[key] ?: 0)
@@ -121,7 +121,7 @@ class ReviewCommitPropertyTest {
         // Explicit, proven-safe retry only.
         { h ->
             val commit = h.commit
-            if (commit != null && commit.safeToRetry && h.state.phase == SessionPhase.RatingCommitFailed)
+            if (commit != null && commit.status == ReviewCommitStatus.RETRY_ALLOWED && h.state.phase == SessionPhase.RatingCommitFailed)
                 h.send(AnkiStudyEvent.RetryRatingCommit(h.state.epoch, commit.commitId)).accepted
             else false
         },
@@ -168,7 +168,7 @@ class ReviewCommitPropertyTest {
         harness.drain()
         observe(harness, tracker)
         assertEquals(1, harness.fake.backendEffectCount)
-        assertEquals(1, harness.ledger.snapshot().count { it.state == ReviewCommitState.COMMITTED })
+        assertEquals(1, harness.ledger.snapshot().count { it.status == ReviewCommitStatus.COMMITTED })
         assertEquals("the first card plus the post-commit advance", 2, harness.fake.nextCardCount)
 
         // Re-executing the same commit effect cannot create a second row or a second effect.
@@ -196,7 +196,7 @@ class ReviewCommitPropertyTest {
         observeAttempts(harness, tracker)
         val frozen = harness.fake.recordedCommits().single().attempts
         val ambiguous = harness.ledger.snapshot().single()
-        assertEquals(ReviewCommitState.AMBIGUOUS, ambiguous.state)
+        assertEquals(ReviewCommitStatus.AMBIGUOUS, ambiguous.status)
 
         repeat(10) {
             val cardId = harness.state.currentCardId
@@ -215,11 +215,11 @@ class ReviewCommitPropertyTest {
 
     private fun assertConsistent(row: ReviewCommitRecord) {
         assertTrue("a phase is present for every dispatched attempt", row.attemptCount == 0 || row.phase != null)
-        assertTrue("a COMMITTED row has no failure", row.state != ReviewCommitState.COMMITTED || row.failure == null)
+        assertTrue("a COMMITTED row has no failure", row.status != ReviewCommitStatus.COMMITTED || row.failure == null)
         assertTrue("an AMBIGUOUS row is never safe to retry",
-            !(row.state == ReviewCommitState.AMBIGUOUS && row.safeToRetry))
+            !(row.status == ReviewCommitStatus.AMBIGUOUS && row.status == ReviewCommitStatus.RETRY_ALLOWED))
         assertTrue("a known-not-applied row explains itself",
-            row.state !in setOf(ReviewCommitState.FAILED_SAFE_TO_RETRY, ReviewCommitState.FAILED_NOT_RETRYABLE) ||
+            row.status !in setOf(ReviewCommitStatus.RETRY_ALLOWED, ReviewCommitStatus.RETRY_ALLOWED) ||
                 row.failure != null)
     }
 }

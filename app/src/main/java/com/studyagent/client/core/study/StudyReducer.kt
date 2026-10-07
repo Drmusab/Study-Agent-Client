@@ -202,9 +202,9 @@ object StudyReducer {
                 val record = event.record
                 if (event.epoch != state.epoch || state.phase != SessionPhase.Starting ||
                     record.backendId != local.request.deck.backendId ||
-                    record.state == ReviewCommitState.COMMITTED) return reject("stale-anki-recovery")
-                val unresolved = record.state == ReviewCommitState.AMBIGUOUS
-                val pendingWrite = record.state == ReviewCommitState.SUBMITTING
+                    record.status == ReviewCommitStatus.COMMITTED) return reject("stale-anki-recovery")
+                val unresolved = record.status == ReviewCommitStatus.AMBIGUOUS
+                val pendingWrite = record.status == ReviewCommitStatus.SUBMITTING
                 val phase = when {
                     pendingWrite -> SessionPhase.CommitPersistenceFailure
                     unresolved -> SessionPhase.ReconciliationRequired
@@ -213,8 +213,8 @@ object StudyReducer {
                 moved(state.copy(
                     phase = phase,
                     session = StudySessionSnapshot(local.request.studySessionId, "Anki review", startedAtEpochMs = now),
-                    anki = local.copy(commit = AnkiRatingCommit(record.toRequest(), record.state,
-                        attempt = record.attemptCount.coerceAtLeast(1), safeToRetry = false,
+                    anki = local.copy(commit = AnkiRatingCommit(record.toRequest(), record.status,
+                        attempt = record.attemptCount.coerceAtLeast(1),
                         failureCategory = record.failure?.category),
                         restoredCommit = true,
                         blockedByPriorCommit = record.sessionId != local.request.studySessionId),
@@ -325,11 +325,15 @@ object StudyReducer {
             }
             is AnkiStudyEvent.RatingCommitStarted -> {
                 val commit = local.commit
+                // The interaction projection mirrors the durable status: an attempt that has been
+                // claimed but has not entered the mutation boundary is still PREPARED (GATE 11B
+                // §28). "An attempt is running" is the turn-scoped phase, not a second status.
                 if (event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ||
-                    state.phase != SessionPhase.SubmittingRating || commit.state != ReviewCommitState.NOT_STARTED
+                    state.phase != SessionPhase.SubmittingRating || commit.status != ReviewCommitStatus.PREPARED ||
+                    event.attempt != commit.attempt
                 ) reject("stale-anki-commit-start")
                 else moved(state.copy(anki = local.copy(commit = commit.copy(
-                    state = ReviewCommitState.SUBMITTING,
+                    attempt = event.attempt,
                     guaranteeLevel = event.guaranteeLevel ?: commit.guaranteeLevel))))
             }
             is AnkiStudyEvent.RatingCommitResolved ->
@@ -342,14 +346,15 @@ object StudyReducer {
                     event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ->
                         reject("stale-anki-retry")
                     state.phase != SessionPhase.RatingCommitFailed ||
-                        commit.state != ReviewCommitState.FAILED_SAFE_TO_RETRY ->
+                        commit.status != ReviewCommitStatus.RETRY_ALLOWED ->
                         reject("illegal-phase-for-anki-retry")
                     // Explicit and only when proven safe: never after AMBIGUOUS, never automatic.
-                    !commit.safeToRetry || local.restoredCommit || local.turn == null -> reject("anki-retry-not-safe")
+                    // GATE 11B §22: the retry returns to PREPARED and repeats the whole sequence.
+                    local.restoredCommit || local.turn == null -> reject("anki-retry-not-safe")
                     else -> moved(state.copy(
                         phase = SessionPhase.SubmittingRating,
-                        anki = local.copy(commit = commit.copy(state = ReviewCommitState.NOT_STARTED,
-                            attempt = commit.attempt + 1, safeToRetry = false, failureCategory = null)),
+                        anki = local.copy(commit = commit.copy(status = ReviewCommitStatus.PREPARED,
+                            attempt = commit.attempt + 1, failureCategory = null)),
                         error = null
                     ), listOf(AnkiStudyEffect.CommitRating(state.epoch, commit.request, retry = true)))
                 }
@@ -359,7 +364,7 @@ object StudyReducer {
                 when {
                     event.epoch != state.epoch || commit == null || commit.commitId != event.commitId ->
                         reject("stale-anki-reconcile")
-                    !(state.phase == SessionPhase.ReconciliationRequired && commit.state == ReviewCommitState.AMBIGUOUS ||
+                    !(state.phase == SessionPhase.ReconciliationRequired && commit.status == ReviewCommitStatus.AMBIGUOUS ||
                         state.phase == SessionPhase.CommitPersistenceFailure) ->
                         reject("illegal-phase-for-anki-reconcile")
                     commit.reconciling -> reject("anki-reconcile-in-flight")
@@ -373,7 +378,7 @@ object StudyReducer {
                 // Read-only retry: allowed only when no turn is open and nothing is unresolved, so
                 // it can never replay a rating (a COMMITTED commit is never re-sent).
                 if (event.epoch != state.epoch || session == null || state.phase !is SessionPhase.Error ||
-                    local.turn != null || (commit != null && commit.state != ReviewCommitState.COMMITTED)
+                    local.turn != null || (commit != null && commit.status != ReviewCommitStatus.COMMITTED)
                 ) reject("illegal-anki-next-retry")
                 else moved(state.copy(phase = SessionPhase.WaitingForFirstCard, error = null,
                     anki = local.copy(failure = null)), listOf(AnkiStudyEffect.Next(state.epoch, session)))
@@ -462,7 +467,7 @@ object StudyReducer {
         )
         val next = state.copy(
             phase = SessionPhase.SubmittingRating,
-            anki = local.copy(commit = AnkiRatingCommit(request, ReviewCommitState.NOT_STARTED)),
+            anki = local.copy(commit = AnkiRatingCommit(request, ReviewCommitStatus.PREPARED)),
             error = null,
             activeSpeechEffectId = null,
             activeRecognitionEffectId = null
@@ -492,7 +497,7 @@ object StudyReducer {
         if (epoch != state.epoch || commit == null || commit.commitId != commitId ||
             (!local.restoredCommit && (session == null || commitId.studySessionId != session.context.studySessionId))
         ) return Transition.reject(state, event, "stale-anki-commit-result")
-        if (commit.state == ReviewCommitState.COMMITTED) return Transition.reject(state, event, "duplicate-anki-commit-result")
+        if (commit.status == ReviewCommitStatus.COMMITTED) return Transition.reject(state, event, "duplicate-anki-commit-result")
         if (local.restoredCommit) {
             // A process cannot resurrect an AnkiDroid turn handle. Never create a fresh turn or
             // retry the old rating before resolving the durable transaction. Once resolved, begin
@@ -505,11 +510,11 @@ object StudyReducer {
                 is AnkiCommitOutcome.Committed -> movedRecovery(state, event, local, now)
                 is AnkiCommitOutcome.Failed -> if (local.blockedByPriorCommit) movedRecovery(state, event, local, now)
                     else Transition(state.copy(phase = SessionPhase.RatingCommitFailed,
-                        anki = local.copy(commit = commit.copy(state = ReviewCommitState.FAILED_NOT_RETRYABLE,
-                            safeToRetry = false, reconciling = false))), emptyList())
+                        anki = local.copy(commit = commit.copy(status = ReviewCommitStatus.RETRY_ALLOWED,
+                            reconciling = false))), emptyList())
                 is AnkiCommitOutcome.Ambiguous -> Transition(state.copy(phase = SessionPhase.ReconciliationRequired,
-                    anki = local.copy(commit = commit.copy(state = ReviewCommitState.AMBIGUOUS,
-                        safeToRetry = false, reconciling = false))), emptyList())
+                    anki = local.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS,
+                        reconciling = false))), emptyList())
                 is AnkiCommitOutcome.PersistenceFailure -> Transition(state.copy(phase = SessionPhase.CommitPersistenceFailure,
                     anki = local.copy(commit = commit.copy(reconciling = false))), emptyList())
             }
@@ -526,8 +531,8 @@ object StudyReducer {
             is AnkiCommitOutcome.Committed -> state.copy(
                 phase = SessionPhase.WaitingForFirstCard,
                 anki = local.copy(turn = null, transcript = null, turnPresentedAtMs = null,
-                    commit = commit.copy(state = ReviewCommitState.COMMITTED, reconciling = false,
-                        safeToRetry = false, failureCategory = null,
+                    commit = commit.copy(status = ReviewCommitStatus.COMMITTED, reconciling = false,
+                        failureCategory = null,
                         verifiedByReconciliation = reconciliation)),
                 cardTurn = null,
                 // Counters move only after COMMITTED (never on selection, failure or ambiguity).
@@ -539,20 +544,18 @@ object StudyReducer {
             is AnkiCommitOutcome.Failed -> state.copy(
                 phase = SessionPhase.RatingCommitFailed,
                 anki = local.copy(commit = commit.copy(
-                    state = if (outcome.safeToRetry) ReviewCommitState.FAILED_SAFE_TO_RETRY
-                        else ReviewCommitState.FAILED_NOT_RETRYABLE,
-                    reconciling = false, safeToRetry = outcome.safeToRetry, failureCategory = outcome.category)),
+                    status = ReviewCommitStatus.RETRY_ALLOWED,
+                    reconciling = false, failureCategory = outcome.category)),
                 error = SessionProblemHolder(
                     SessionProblem.ANKI_RATING_NOT_SAVED,
-                    if (outcome.safeToRetry) "Anki did not save this rating. Retry the same rating or end the session."
-                    else "Anki did not accept this rating. End the session; Anki will show the card again when it is due.",
+                    "Anki did not save this rating. Retry the same rating or end the session.",
                     true, now
                 )
             )
             is AnkiCommitOutcome.Ambiguous -> state.copy(
                 phase = SessionPhase.ReconciliationRequired,
-                anki = local.copy(commit = commit.copy(state = ReviewCommitState.AMBIGUOUS, reconciling = false,
-                    safeToRetry = false, failureCategory = outcome.category)),
+                anki = local.copy(commit = commit.copy(status = ReviewCommitStatus.AMBIGUOUS, reconciling = false,
+                    failureCategory = outcome.category)),
                 error = SessionProblemHolder(
                     SessionProblem.ANKI_RATING_UNCONFIRMED,
                     "The rating may already have been saved in Anki. Study-Agent will not submit it " +
@@ -562,8 +565,7 @@ object StudyReducer {
             )
             is AnkiCommitOutcome.PersistenceFailure -> state.copy(
                 phase = SessionPhase.CommitPersistenceFailure,
-                anki = local.copy(commit = commit.copy(reconciling = false, safeToRetry = false,
-                    failureCategory = outcome.category)),
+                anki = local.copy(commit = commit.copy(reconciling = false, failureCategory = outcome.category)),
                 error = SessionProblemHolder(SessionProblem.ANKI_COMMIT_PERSISTENCE_FAILURE,
                     "Study-Agent could not safely record the review result. It will not retry or " +
                         "load another card until the record is saved.", true, now)
