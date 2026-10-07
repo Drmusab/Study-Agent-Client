@@ -171,7 +171,14 @@ class DiagnosticTimeline(
         /** How many events the text export includes by default. */
         const val DEFAULT_EXPORT_LIMIT = 200
 
-        const val MAX_METADATA_ENTRIES = 8
+        /**
+         * GATE 11E PART I §8 — one commit timeline fits in one record. Eleven keys cover the
+         * canonical transaction correlation set (session, commit, backend, guarantee, selected
+         * and committed rating, status, attempt, durable phase, recovery action) plus the measured
+         * latency, so no correlation field is silently truncated out of an export. The values stay
+         * short ([MAX_METADATA_VALUE_CHARS]) and content-free, so a wider map is still cheap.
+         */
+        const val MAX_METADATA_ENTRIES = 12
         const val MAX_METADATA_KEY_CHARS = 24
         const val MAX_METADATA_VALUE_CHARS = 48
     }

@@ -400,8 +400,9 @@ object StudyReducer {
                 val commit = local.commit
                 // Read-only retry: allowed only when no turn is open and nothing is unresolved, so
                 // it can never replay a rating (a COMMITTED commit is never re-sent).
+                // GATE 11E PART I §6 — the barrier is the shared rule, not a local comparison.
                 if (event.epoch != state.epoch || session == null || state.phase !is SessionPhase.Error ||
-                    local.turn != null || (commit != null && commit.status != ReviewCommitStatus.COMMITTED)
+                    local.turn != null || (commit != null && !nextCardAllowed(commit.status))
                 ) reject("illegal-anki-next-retry")
                 else moved(state.copy(phase = SessionPhase.WaitingForFirstCard, error = null,
                     anki = local.copy(failure = null)), listOf(AnkiStudyEffect.Next(state.epoch, session)))
@@ -682,7 +683,10 @@ object StudyReducer {
             is AnkiCommitOutcome.Ambiguous -> SessionPhase.ReconciliationRequired
             is AnkiCommitOutcome.PersistenceFailure -> SessionPhase.CommitPersistenceFailure
         })
-        val effects = if (outcome is AnkiCommitOutcome.Committed) listOf(AnkiStudyEffect.Next(state.epoch, session)) else emptyList()
+        // GATE 11E PART I §6 / INV-11E-18 — the single authoritative next-card rule. An outcome
+        // may only advance the session when the durable status it reflects allows it, and no
+        // second copy of that rule exists anywhere in the app.
+        val effects = if (outcome.allowsNextCard()) listOf(AnkiStudyEffect.Next(state.epoch, session)) else emptyList()
         return Transition(next, effects)
     }
 

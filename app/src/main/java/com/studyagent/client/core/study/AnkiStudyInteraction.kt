@@ -136,6 +136,17 @@ sealed interface AnkiCommitOutcome {
 }
 
 /**
+ * GATE 11E PART I §6 — the **one** production next-card barrier.
+ *
+ * The rule itself lives in the transaction domain as [nextCardAllowed]
+ * (`nextCardAllowed(status) ⟺ status == COMMITTED`); this is its only call form for a delivered
+ * outcome. A new site that wants to advance the session to the next card must go through one of
+ * the two functions — never through another `status == COMMITTED` comparison (INV-11E-18), because
+ * a second copy of the rule is a second rule, and two rules drift.
+ */
+fun AnkiCommitOutcome.allowsNextCard(): Boolean = nextCardAllowed(status)
+
+/**
  * Every read result is scoped to the session epoch; hydration also carries the original turn.
  * GATE 11 commit events are additionally correlated by [ReviewCommitId], which carries the study
  * session id and the review turn id (`sessionId` / `turnId` below), so a result that arrives for
