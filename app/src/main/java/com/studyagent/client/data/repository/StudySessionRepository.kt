@@ -129,6 +129,30 @@ interface StudySessionRepository {
 
     /** GATE 11 — read-only reconciliation of an unconfirmed rating. Never re-sends it. */
     suspend fun reconcileRatingCommit() {}
+
+    /**
+     * GATE 12 — backend-neutral answer reveal, reference comparison, AI feedback and rating model
+     * for the active Anki review turn. `null` when no Anki review turn is active.
+     */
+    val answerReview: StateFlow<com.studyagent.client.core.study.AnswerReviewModel?>? get() = null
+
+    /** GATE 12 — explicit reveal of the active turn's answer without querying the scheduler. */
+    suspend fun revealAnswer() = requestAnswer()
+
+    /** GATE 12 — switch post-reveal presentation mode (`ORIGINAL`, `CLEAN`, `COMPARE`). */
+    suspend fun selectAnswerCompareMode(mode: com.studyagent.client.core.study.AnswerCompareMode) {}
+
+    /** GATE 12 — toggle optional raw reference (`pureAnswerText`) view in `COMPARE` mode. */
+    suspend fun setShowRawReferenceAnswer(showRaw: Boolean) {}
+
+    /** GATE 12 — speak `answerText` for the revealed turn without mutating turn or scheduler state. */
+    suspend fun repeatAnswer() {}
+
+    /** GATE 12 — speak AI feedback for the revealed turn without mutating turn or scheduler state. */
+    suspend fun repeatFeedback() {}
+
+    /** GATE 12 — notify the machine that HTML answer rendering degraded to `CLEAN` mode. */
+    suspend fun reportAnswerRenderFallback(reason: String) {}
 }
 
 /**
@@ -1128,6 +1152,8 @@ class DefaultStudySessionRepository(
                 is VoiceCommand.Easy -> rateCurrentCard(Rating.EASY)
 
                 is VoiceCommand.Repeat -> requestRepeat()
+                is VoiceCommand.RepeatAnswer -> repeatAnswer()
+                is VoiceCommand.RepeatFeedback -> repeatFeedback()
                 is VoiceCommand.Hint -> requestHint()
                 is VoiceCommand.Explain -> requestExplanation()
                 is VoiceCommand.ShowAnswer -> requestAnswer()

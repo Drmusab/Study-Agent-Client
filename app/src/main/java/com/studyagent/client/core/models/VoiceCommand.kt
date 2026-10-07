@@ -7,6 +7,8 @@ sealed interface VoiceCommand {
     data object Easy : VoiceCommand
 
     data object Repeat : VoiceCommand
+    data object RepeatAnswer : VoiceCommand
+    data object RepeatFeedback : VoiceCommand
     data object Hint : VoiceCommand
     data object Explain : VoiceCommand
     data object ShowAnswer : VoiceCommand

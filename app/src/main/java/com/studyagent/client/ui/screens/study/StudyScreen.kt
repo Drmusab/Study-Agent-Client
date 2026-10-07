@@ -130,6 +130,9 @@ fun StudyScreen(
     // GATE 11 — rating transaction status, backend-neutral (the screen never asks which backend).
     val ratingCommitRecoveryState = viewModel.ratingCommitRecovery?.collectAsStateWithLifecycle()
     val ratingCommitRecovery = ratingCommitRecoveryState?.value
+    // GATE 12 — answer reveal, reference comparison, evaluation & rating model for Anki turns.
+    val answerReviewState = viewModel.answerReview?.collectAsStateWithLifecycle()
+    val answerReview = answerReviewState?.value
     var phoneNoticeDismissed by rememberSaveable { mutableStateOf(false) }
 
     val phase = remember(studyState) { studyPhaseOf(studyState) }
@@ -293,14 +296,29 @@ fun StudyScreen(
                         )
                     }
 
-                    // Question hero.
-                    QuestionCard(
-                        question = currentCard?.question,
-                        loadingMessage = (studyState as? StudyState.Loading)?.message,
-                        isListening = isListening || studyState is StudyState.Listening,
-                        isSpeaking = isSpeaking,
-                        dimmed = isPaused
-                    )
+                    // GATE 12 — Anki turn answer reveal, reference answer, compare & AI feedback experience.
+                    if (answerReview != null) {
+                        AnkiAnswerReviewSection(
+                            model = answerReview,
+                            recovery = ratingCommitRecovery,
+                            onRevealAnswer = { viewModel.onRevealAnswer() },
+                            onSelectCompareMode = { mode -> viewModel.onSelectAnswerCompareMode(mode) },
+                            onToggleRawReference = { show -> viewModel.onToggleRawReferenceAnswer(show) },
+                            onRepeatAnswer = { viewModel.onRepeatAnswer() },
+                            onRepeatFeedback = { viewModel.onRepeatFeedback() },
+                            onRenderFallback = { reason -> viewModel.onAnswerRenderFallback(reason) },
+                            onRateCard = { rating -> viewModel.onRateCard(rating) }
+                        )
+                    } else {
+                        // Question hero (PC Agent path).
+                        QuestionCard(
+                            question = currentCard?.question,
+                            loadingMessage = (studyState as? StudyState.Loading)?.message,
+                            isListening = isListening || studyState is StudyState.Listening,
+                            isSpeaking = isSpeaking,
+                            dimmed = isPaused
+                        )
+                    }
 
                     // Live / final transcript — partial feels temporary (muted), final is clear.
                     val transcriptText = when (val s = studyState) {
@@ -372,7 +390,7 @@ fun StudyScreen(
                         is StudyState.WaitingForRating -> s.evaluation
                         else -> null
                     }
-                    AnimatedVisibility(visible = evaluation != null) {
+                    AnimatedVisibility(visible = answerReview == null && evaluation != null) {
                         evaluation?.let { EvaluationCard(evaluation = it) }
                     }
 
@@ -447,17 +465,19 @@ fun StudyScreen(
                             ratingCommitRecovery.commitUiState is RatingCommitUiState.AwaitingRating
                     )
 
-                    val suggestedRating = when (val s = studyState) {
-                        is StudyState.WaitingForRating -> s.suggestedRating
-                        is StudyState.ShowingFeedback -> s.evaluation.suggestedRating
-                        else -> null
+                    if (answerReview == null) {
+                        val suggestedRating = when (val s = studyState) {
+                            is StudyState.WaitingForRating -> s.suggestedRating
+                            is StudyState.ShowingFeedback -> s.evaluation.suggestedRating
+                            else -> null
+                        }
+                        RatingButtonGroup(
+                            onRate = { rating -> viewModel.onRateCard(rating) },
+                            suggestedRating = suggestedRating,
+                            enabled = ratingControlsEnabled(studyState) &&
+                                (ratingCommitRecovery?.ratingControlsEnabled ?: true)
+                        )
                     }
-                    RatingButtonGroup(
-                        onRate = { rating -> viewModel.onRateCard(rating) },
-                        suggestedRating = suggestedRating,
-                        enabled = ratingControlsEnabled(studyState) &&
-                            (ratingCommitRecovery?.ratingControlsEnabled ?: true)
-                    )
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),

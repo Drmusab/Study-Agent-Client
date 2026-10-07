@@ -43,7 +43,12 @@ class AnkiStudyEffectExecutor(
      * and enforces the backend's reconciliation capability; tests may substitute a scripted one.
      */
     private val reconciler: ReviewCommitReconciler =
-        AnkiReviewCommitReconciler(registry, clock, reconcileTimeoutMs)
+        AnkiReviewCommitReconciler(registry, clock, reconcileTimeoutMs),
+    /**
+     * GATE 12 — optional pluggable evaluator for Anki study turns. When absent or when the
+     * evaluator fails, the turn degrades cleanly to manual review on the same [ReviewTurnId].
+     */
+    private val answerEvaluator: AnkiAnswerEvaluator? = null
 ) : ReviewCommitCoordinator {
     init { require(reconcileTimeoutMs > 0) }
 
@@ -85,7 +90,52 @@ class AnkiStudyEffectExecutor(
                 endReview(effect)
                 null
             }
+            is AnkiStudyEffect.EvaluateAnswer -> evaluateAnswer(effect)
             is AnkiStudyEffect.Begin, is AnkiStudyEffect.Next, is AnkiStudyEffect.Hydrate -> read(effect)
+        }
+    }
+
+    private suspend fun evaluateAnswer(effect: AnkiStudyEffect.EvaluateAnswer): AnkiStudyEvent {
+        val req = effect.request
+        val evaluator = answerEvaluator ?: return AnkiStudyEvent.AnswerEvaluationFailed(
+            epoch = effect.epoch,
+            sessionId = req.sessionId,
+            turnId = req.turnId,
+            cardRef = req.cardRef,
+            requestId = req.requestId,
+            reason = "evaluator_unavailable"
+        )
+        return try {
+            when (val result = evaluator.evaluate(req)) {
+                is AnkiAnswerEvaluationResult.Success -> AnkiStudyEvent.AnswerEvaluationCompleted(
+                    epoch = effect.epoch,
+                    sessionId = req.sessionId,
+                    turnId = req.turnId,
+                    cardRef = req.cardRef,
+                    requestId = req.requestId,
+                    evaluation = result.evaluation,
+                    speakFeedback = effect.speakFeedback
+                )
+                is AnkiAnswerEvaluationResult.Failure -> AnkiStudyEvent.AnswerEvaluationFailed(
+                    epoch = effect.epoch,
+                    sessionId = req.sessionId,
+                    turnId = req.turnId,
+                    cardRef = req.cardRef,
+                    requestId = req.requestId,
+                    reason = result.reason
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            AnkiStudyEvent.AnswerEvaluationFailed(
+                epoch = effect.epoch,
+                sessionId = req.sessionId,
+                turnId = req.turnId,
+                cardRef = req.cardRef,
+                requestId = req.requestId,
+                reason = error.message?.takeIf { it.isNotBlank() } ?: "evaluator_exception"
+            )
         }
     }
 

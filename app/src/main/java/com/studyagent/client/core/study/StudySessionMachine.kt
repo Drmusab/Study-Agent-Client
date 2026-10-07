@@ -114,6 +114,11 @@ class StudySessionMachine(
     /** Backend-neutral recovery/progress model for the current rating transaction (GATE 11). */
     val ratingCommitRecovery: StateFlow<RatingCommitRecoveryUi?> = _ratingCommitRecovery.asStateFlow()
 
+    private val _answerReview = MutableStateFlow<AnswerReviewModel?>(null)
+
+    /** Backend-neutral answer reveal, reference comparison, evaluation & rating model (GATE 12). */
+    val answerReview: StateFlow<AnswerReviewModel?> = _answerReview.asStateFlow()
+
     private val eventChannel = Channel<StudyEvent>(capacity = Channel.UNLIMITED)
 
     private val _machineState = MutableStateFlow(SessionMachineState.initial(initialEpoch))
@@ -411,6 +416,7 @@ class StudySessionMachine(
         }
         _studyState.value = derivedState
         _ratingCommitRecovery.value = RatingCommitRecoveryUi.from(machine)
+        _answerReview.value = AnswerReviewModel.from(machine)
         _currentSession.value = machine.session?.let { snap ->
             StudySession(
                 sessionId = snap.sessionId,
@@ -836,6 +842,7 @@ class StudySessionMachine(
                         when (effect.request.purpose) {
                             com.studyagent.client.core.voice.tts.SpeechPurpose.QUESTION -> dispatch(StudyEvent.QuestionSpeechCompleted(cardId, effect.effectId, result is SpeechResult.Completed))
                             com.studyagent.client.core.voice.tts.SpeechPurpose.FEEDBACK -> dispatch(StudyEvent.FeedbackSpeechCompleted(cardId, effect.effectId, result is SpeechResult.Completed))
+                            com.studyagent.client.core.voice.tts.SpeechPurpose.ANSWER -> dispatch(StudyEvent.AnswerSpeechCompleted(cardId, effect.effectId, result is SpeechResult.Completed))
                             com.studyagent.client.core.voice.tts.SpeechPurpose.HINT -> dispatch(StudyEvent.HintSpeechCompleted(cardId, effect.effectId, result is SpeechResult.Completed))
                             com.studyagent.client.core.voice.tts.SpeechPurpose.EXPLANATION -> dispatch(StudyEvent.ExplanationSpeechCompleted(cardId, effect.effectId, result is SpeechResult.Completed))
                             else -> {
@@ -1092,15 +1099,35 @@ class StudySessionMachine(
                             // "good" or "next" can never rate or end the session (§13).
                             handleCommandOutcome(outcome)
                         } else {
-                            dispatch(
-                                StudyEvent.RecognitionCompleted(
-                                    outcome.cardId,
-                                    turnId,
-                                    outcome.selectedText,
-                                    isCommand = false,
-                                    requestId = outcome.requestId
+                            // In an Anki answer window, explicit answer-safe control phrases
+                            // ("show answer", "reveal answer", "repeat question", "pause study")
+                            // route through StudyEvents (GATE 12 STEP 29).
+                            val ankiSafeCommand = if (_machineState.value.anki != null) {
+                                (commandInterpreter.interpret(
+                                    outcome = outcome,
+                                    context = CommandContext.ANSWER_EXPECTED,
+                                    settings = currentSettings.toSttSettings()
+                                ) as? CommandDecision.Execute)?.takeIf { it.parsed.isExecutable }
+                            } else {
+                                null
+                            }
+                            if (ankiSafeCommand != null) {
+                                _lastRecognizedCommand.tryEmit(ankiSafeCommand.parsed.command)
+                                SpokenCommandRouter.toEvent(
+                                    ankiSafeCommand.parsed.command,
+                                    _machineState.value.currentCardId
+                                )?.let(::dispatch)
+                            } else {
+                                dispatch(
+                                    StudyEvent.RecognitionCompleted(
+                                        outcome.cardId,
+                                        turnId,
+                                        outcome.selectedText,
+                                        isCommand = false,
+                                        requestId = outcome.requestId
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                     is RecognitionTurnResult.Failed -> {
@@ -1166,6 +1193,75 @@ class StudySessionMachine(
                 )
             )
             return
+        }
+        // GATE 12 — structured metadata-only answer review diagnostics (STEP 46, INV-12-25).
+        val beforeAnki = before.anki
+        val afterAnki = transition.newState.anki
+        if (afterAnki != null) {
+            val ankiTurnId = afterAnki.turn?.turnId?.value ?: turnId
+            if (beforeAnki?.revealState != AnswerRevealState.REVEALED &&
+                afterAnki.revealState == AnswerRevealState.REVEALED
+            ) {
+                tl?.record(
+                    DiagnosticCategory.SESSION,
+                    AnkiAnswerReviewDiagnostics.EVENT_ANKI_ANSWER_REVEALED,
+                    sessionEpoch = epoch,
+                    turnId = ankiTurnId,
+                    metadata = AnkiAnswerReviewDiagnostics.answerRevealedMetadata(afterAnki)
+                )
+                val eval = afterAnki.evaluation
+                if (afterAnki.evaluationStatus == AnswerEvaluationStatus.COMPLETED && eval != null) {
+                    tl?.record(
+                        DiagnosticCategory.SESSION,
+                        AnkiAnswerReviewDiagnostics.EVENT_ANKI_EVALUATION_DISPLAYED,
+                        sessionEpoch = epoch,
+                        turnId = ankiTurnId,
+                        metadata = AnkiAnswerReviewDiagnostics.evaluationDisplayedMetadata(eval)
+                    )
+                } else if (afterAnki.evaluationStatus == AnswerEvaluationStatus.NOT_REQUESTED ||
+                    afterAnki.evaluationStatus == AnswerEvaluationStatus.UNAVAILABLE
+                ) {
+                    tl?.record(
+                        DiagnosticCategory.SESSION,
+                        AnkiAnswerReviewDiagnostics.EVENT_ANKI_EVALUATION_SKIPPED_OR_UNAVAILABLE,
+                        sessionEpoch = epoch,
+                        turnId = ankiTurnId,
+                        metadata = AnkiAnswerReviewDiagnostics.evaluationSkippedOrUnavailableMetadata(
+                            afterAnki.evaluationStatus,
+                            afterAnki.evaluationFailureReason
+                        )
+                    )
+                }
+            }
+            if (beforeAnki != null &&
+                beforeAnki.turn?.turnId == afterAnki.turn?.turnId &&
+                beforeAnki.compareMode != afterAnki.compareMode
+            ) {
+                tl?.record(
+                    DiagnosticCategory.SESSION,
+                    AnkiAnswerReviewDiagnostics.EVENT_ANKI_COMPARE_MODE_CHANGED,
+                    sessionEpoch = epoch,
+                    turnId = ankiTurnId,
+                    metadata = AnkiAnswerReviewDiagnostics.compareModeChangedMetadata(
+                        beforeAnki.compareMode,
+                        afterAnki.compareMode
+                    )
+                )
+            }
+            if (afterAnki.renderFallbackReason != null &&
+                beforeAnki?.renderFallbackReason != afterAnki.renderFallbackReason
+            ) {
+                tl?.record(
+                    DiagnosticCategory.SESSION,
+                    AnkiAnswerReviewDiagnostics.EVENT_ANKI_ANSWER_RENDER_FALLBACK,
+                    sessionEpoch = epoch,
+                    turnId = ankiTurnId,
+                    metadata = AnkiAnswerReviewDiagnostics.renderFallbackMetadata(
+                        afterAnki.renderFallbackReason,
+                        afterAnki.compareMode
+                    )
+                )
+            }
         }
         // GATE 11 — touch, voice, headset and keyboard all reach the commit through different
         // events (UserRateCard / SelectRating), so the selection is detected from the state change.

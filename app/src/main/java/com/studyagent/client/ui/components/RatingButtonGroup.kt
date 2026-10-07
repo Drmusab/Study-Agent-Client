@@ -59,19 +59,24 @@ fun RatingButtonGroup(
     onRate: (Rating) -> Unit,
     suggestedRating: Rating? = null,
     enabled: Boolean = true,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    availableRatings: List<Rating> = listOf(Rating.AGAIN, Rating.HARD, Rating.GOOD, Rating.EASY),
+    intervalLabels: Map<Rating, String> = emptyMap()
 ) {
-    val ratings = remember { listOf(Rating.AGAIN, Rating.HARD, Rating.GOOD, Rating.EASY) }
+    val ratings = remember(availableRatings) {
+        availableRatings.ifEmpty { listOf(Rating.AGAIN, Rating.HARD, Rating.GOOD, Rating.EASY) }
+    }
 
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        val useGrid = maxWidth < AppSpacing.ratingGridBreakpoint
+        val useGrid = maxWidth < AppSpacing.ratingGridBreakpoint && ratings.size > 2
         if (useGrid) {
+            val splitIndex = (ratings.size + 1) / 2
             Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.XS)) {
-                RatingRow(ratings.subList(0, 2), suggestedRating, enabled, onRate)
-                RatingRow(ratings.subList(2, 4), suggestedRating, enabled, onRate)
+                RatingRow(ratings.subList(0, splitIndex), suggestedRating, enabled, intervalLabels, onRate)
+                RatingRow(ratings.subList(splitIndex, ratings.size), suggestedRating, enabled, intervalLabels, onRate)
             }
         } else {
-            RatingRow(ratings, suggestedRating, enabled, onRate)
+            RatingRow(ratings, suggestedRating, enabled, intervalLabels, onRate)
         }
     }
 }
@@ -81,6 +86,7 @@ private fun RatingRow(
     ratings: List<Rating>,
     suggestedRating: Rating?,
     enabled: Boolean,
+    intervalLabels: Map<Rating, String>,
     onRate: (Rating) -> Unit
 ) {
     Row(
@@ -92,6 +98,7 @@ private fun RatingRow(
                 rating = rating,
                 suggested = rating == suggestedRating,
                 enabled = enabled,
+                intervalLabel = intervalLabels[rating],
                 onRate = onRate,
                 modifier = Modifier.weight(1f)
             )
@@ -104,13 +111,15 @@ private fun RatingButton(
     rating: Rating,
     suggested: Boolean,
     enabled: Boolean,
+    intervalLabel: String? = null,
     onRate: (Rating) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val visual = ratingVisual(rating)
     val description = buildString {
         append(visual.label).append(" rating")
-        if (suggested) append(", suggested")
+        if (!intervalLabel.isNullOrBlank()) append(", next review ").append(intervalLabel)
+        if (suggested) append(", Suggested Rating")
         if (!enabled) append(", unavailable")
     }
     Button(
@@ -127,13 +136,22 @@ private fun RatingButton(
             disabledContainerColor = AppColors.surfaceInteractive.copy(alpha = 0.5f),
             disabledContentColor = AppColors.contentMuted
         ),
-        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
     ) {
-        Text(
-            text = if (suggested) "★ ${visual.label}" else visual.label,
-            style = MaterialTheme.typography.labelLarge,
-            maxLines = 1
-        )
+        Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
+            Text(
+                text = if (suggested) "★ ${visual.label}" else visual.label,
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1
+            )
+            if (!intervalLabel.isNullOrBlank()) {
+                Text(
+                    text = intervalLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1
+                )
+            }
+        }
     }
 }
 

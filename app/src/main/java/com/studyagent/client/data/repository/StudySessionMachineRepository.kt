@@ -98,6 +98,71 @@ class StudySessionMachineRepository(
         machine.dispatch(AnkiStudyEvent.ReconcileRatingCommit(state.epoch, commit.commitId))
     }
 
+    /** GATE 12 — derived by the machine from its authoritative state; never written here. */
+    override val answerReview: StateFlow<AnswerReviewModel?>
+        get() = machine.answerReview
+
+    override suspend fun revealAnswer() {
+        val state = machine.machineState.value
+        val turnId = state.anki?.turn?.turnId
+        if (turnId != null) {
+            machine.dispatch(StudyEvent.RevealAnswerRequested(turnId, state.epoch, state.currentCardId))
+        } else {
+            requestAnswer()
+        }
+    }
+
+    override suspend fun selectAnswerCompareMode(mode: AnswerCompareMode) {
+        val state = machine.machineState.value
+        val turnId = state.anki?.turn?.turnId ?: return
+        machine.dispatch(StudyEvent.SelectAnswerCompareMode(turnId, mode, state.epoch))
+    }
+
+    override suspend fun setShowRawReferenceAnswer(showRaw: Boolean) {
+        val state = machine.machineState.value
+        val turnId = state.anki?.turn?.turnId ?: return
+        machine.dispatch(StudyEvent.SetShowRawReferenceAnswer(turnId, showRaw, state.epoch))
+    }
+
+    override suspend fun repeatAnswer() {
+        val state = machine.machineState.value
+        val turnId = state.anki?.turn?.turnId
+        machine.dispatch(
+            StudyEvent.RepeatAnswerRequested(
+                turnId = turnId,
+                cardId = state.currentCardId,
+                epoch = state.epoch
+            )
+        )
+    }
+
+    override suspend fun repeatFeedback() {
+        val state = machine.machineState.value
+        val turnId = state.anki?.turn?.turnId
+        machine.dispatch(
+            StudyEvent.RepeatFeedbackRequested(
+                turnId = turnId,
+                cardId = state.currentCardId,
+                epoch = state.epoch
+            )
+        )
+    }
+
+    override suspend fun reportAnswerRenderFallback(reason: String) {
+        val state = machine.machineState.value
+        val local = state.anki ?: return
+        val turn = local.turn ?: return
+        machine.dispatch(
+            StudyEvent.AnswerRenderFallbackTriggered(
+                turnId = turn.turnId,
+                reason = reason,
+                epoch = state.epoch,
+                sessionId = local.request.studySessionId,
+                cardRef = turn.cardRef
+            )
+        )
+    }
+
     override suspend fun startStudy(deckName: String?, mode: String, config: com.studyagent.client.core.models.SessionStartConfig?) {
         startOrBlock(deckName, mode, config)
     }
@@ -273,6 +338,8 @@ class StudySessionMachineRepository(
             is VoiceCommand.Good -> { val id = machine.machineState.value.currentCardId ?: return; machine.dispatch(StudyEvent.UserRateCard(Rating.GOOD, id)) }
             is VoiceCommand.Easy -> { val id = machine.machineState.value.currentCardId ?: return; machine.dispatch(StudyEvent.UserRateCard(Rating.EASY, id)) }
             is VoiceCommand.Repeat -> machine.dispatch(StudyEvent.UserRequestRepeat(machine.machineState.value.currentCardId))
+            is VoiceCommand.RepeatAnswer -> machine.dispatch(StudyEvent.RepeatAnswerRequested(cardId = machine.machineState.value.currentCardId))
+            is VoiceCommand.RepeatFeedback -> machine.dispatch(StudyEvent.RepeatFeedbackRequested(cardId = machine.machineState.value.currentCardId))
             is VoiceCommand.Hint -> machine.dispatch(StudyEvent.UserRequestHint(machine.machineState.value.currentCardId))
             is VoiceCommand.Explain -> machine.dispatch(StudyEvent.UserRequestExplanation(machine.machineState.value.currentCardId))
             is VoiceCommand.ShowAnswer -> machine.dispatch(StudyEvent.UserRequestAnswer(machine.machineState.value.currentCardId))
