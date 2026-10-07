@@ -2,6 +2,13 @@
 
 Session: `arena/37584f79-study-agent-client` · Branch base: `7eec42d4` · Date: 2026-10-07
 
+> **Follow-up (session `arena/60ab94ba-study-agent-client`, 2026-10-07):** the locked GATE 11D
+> transition model was re-audited against this implementation. The §2 recovery-event vocabulary,
+> the §36/§37 pure closed `recoveryTransition` function, SUBMITTING-capable reconciliation (§23),
+> the §39 recovery projection and the §40/§41 mandatory test names were added;
+> `docs/GATE_11D_TRANSITION_AUDIT.md` is the authoritative conformance record (1434/1434 harness
+> tests). The semantics below are unchanged.
+
 ## 1. Result
 
 **GATE 11D: PASS (JVM level) — with two documented, fail-closed ceilings.**

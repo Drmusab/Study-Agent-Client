@@ -671,12 +671,22 @@ class ReviewCommitLedger(
                 category = category, resolution = ReviewCommitResolution.REFUSED_BEFORE_DISPATCH))
         }
 
-    /** Only the backend adapter may supply authoritative reconciliation; callers gate on its semantics. */
+    /**
+     * Only the backend adapter may supply authoritative reconciliation; callers gate on its semantics.
+     *
+     * GATE 11D §23 — the exact reconciliation mapping applies to the two unfinished statuses whose
+     * outcome an authoritative query may resolve: SUBMITTING (the mutation boundary was crossed)
+     * and AMBIGUOUS. Evidence moves SUBMITTING/AMBIGUOUS → COMMITTED / RETRY_ALLOWED / AMBIGUOUS
+     * through the one closed recovery table ([recoveryTransition]); any other current status is
+     * not a reconciliation input and is returned unchanged.
+     */
     suspend fun reconcile(commitId: ReviewCommitId, result: ReconcileCommitResult): ReviewCommitRecord? =
         mutex.withLock {
             val current = loadedLocked() ?: return@withLock null
             val record = current[commitId.stableKey] ?: return@withLock null
-            if (record.status != ReviewCommitStatus.AMBIGUOUS) return@withLock record
+            if (record.status != ReviewCommitStatus.AMBIGUOUS &&
+                record.status != ReviewCommitStatus.SUBMITTING
+            ) return@withLock record
             val command = when (recoveryPolicy.classify(record, result)) {
                 ReviewCommitRecoveryAction.ResumeCommitted -> ReviewCommitTransition.ReconciliationConfirmedCommitted(
                     // A backend-issued receipt travels through when the backend provided one; a
@@ -803,7 +813,11 @@ class ReviewCommitLedger(
                 val command = if (record.phase == ReviewCommitPhase.BACKEND_RESPONSE_RECEIVED) {
                     ReviewCommitTransition.FinalizeRecordedResponse
                 } else when (val action = recoveryPolicy.classify(record)) {
-                    ReviewCommitRecoveryAction.Reconcile -> ReviewCommitTransition.BackendOutcomeUnknown(
+                    // GATE 11D §28 — a recovered SUBMITTING that cannot be immediately
+                    // authoritatively classified is normalized into explicit uncertainty through
+                    // the one closed recovery table: SUBMITTING + ReconciliationUnresolved →
+                    // AMBIGUOUS. Startup code issues recovery events, never pipeline commands.
+                    ReviewCommitRecoveryAction.Reconcile -> ReviewCommitTransition.ReconciliationInconclusive(
                         category = "interrupted_after_mutation_entry",
                         resolution = ReviewCommitResolution.PROCESS_RESTART_WHILE_SUBMITTING)
                     // A SUBMITTING row can only be Reconcile-eligible; anything else is unusable.

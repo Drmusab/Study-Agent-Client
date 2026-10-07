@@ -66,3 +66,29 @@ fun ReviewCommitStatus?.projectForUi(commitId: ReviewCommitId, rating: Rating): 
     ReviewCommitStatus.AMBIGUOUS -> RatingCommitUiState.VerificationRequired(commitId)
     ReviewCommitStatus.COMMITTED -> RatingCommitUiState.Saved(commitId, rating)
 }
+
+/**
+ * GATE 11D §39 — the **recovery** projection, derived from the durable status of a restored or
+ * otherwise recovered transaction:
+ *
+ * ```text
+ * PREPARED      → RetryAvailable       (boundary provably un-entered; retry offered, never automatic)
+ * SUBMITTING    → VerificationRequired (mutation may have occurred; verify, never blind-retry)
+ * RETRY_ALLOWED → RetryAvailable       (proven not applied)
+ * AMBIGUOUS     → VerificationRequired (cannot prove either direction)
+ * COMMITTED     → Saved                (durable success)
+ * ```
+ *
+ * This is the projection recovery surfaces; the live pipeline projection above ([projectForUi],
+ * GATE 11B §14) keeps PREPARED/SUBMITTING as `Saving` while a submission the user started is in
+ * flight. Either way the projection is a pure function of the durable status: UI actions cannot
+ * cause a reverse transition, and the projection never becomes transaction truth.
+ */
+fun ReviewCommitStatus.recoveryUiProjection(commitId: ReviewCommitId, rating: Rating): RatingCommitUiState =
+    when (this) {
+        ReviewCommitStatus.PREPARED, ReviewCommitStatus.RETRY_ALLOWED ->
+            RatingCommitUiState.RetryAvailable(commitId)
+        ReviewCommitStatus.SUBMITTING, ReviewCommitStatus.AMBIGUOUS ->
+            RatingCommitUiState.VerificationRequired(commitId)
+        ReviewCommitStatus.COMMITTED -> RatingCommitUiState.Saved(commitId, rating)
+    }

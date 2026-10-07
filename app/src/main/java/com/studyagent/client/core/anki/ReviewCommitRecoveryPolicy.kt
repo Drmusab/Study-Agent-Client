@@ -84,12 +84,18 @@ sealed interface ReviewCommitRecoveryResult {
 class ReviewCommitRecoveryPolicy {
 
     /**
-     * [proof] is authoritative read-only reconciliation evidence. It is only ever meaningful for an
-     * [ReviewCommitStatus.AMBIGUOUS] record; supplying it for any other status is an integrity
-     * failure, never a shortcut to a decision.
+     * [proof] is authoritative read-only reconciliation evidence. GATE 11D §23: it is meaningful
+     * exactly for the two statuses whose outcome reconciliation may resolve —
+     * [ReviewCommitStatus.SUBMITTING] (the mutation boundary was crossed) and
+     * [ReviewCommitStatus.AMBIGUOUS] — and maps per the exact reconciliation table. Supplying it
+     * for a status that provably needs no proof ([PREPARED], [RETRY_ALLOWED]) or that already
+     * carries proven truth ([COMMITTED]) is an integrity failure, never a shortcut to a decision
+     * (GATE 11D §32).
      */
     fun classify(record: ReviewCommitRecord, proof: ReconcileCommitResult? = null): ReviewCommitRecoveryAction {
-        if (record.status == ReviewCommitStatus.AMBIGUOUS && proof != null) return when (proof) {
+        if (proof != null && record.status in setOf(
+                ReviewCommitStatus.AMBIGUOUS, ReviewCommitStatus.SUBMITTING)
+        ) return when (proof) {
             is ReconcileCommitResult.Applied -> ReviewCommitRecoveryAction.ResumeCommitted
             is ReconcileCommitResult.NotApplied -> ReviewCommitRecoveryAction.OfferRetry
             is ReconcileCommitResult.StillAmbiguous,
