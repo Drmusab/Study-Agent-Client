@@ -137,6 +137,32 @@ sealed interface AnkiError {
         override val message: String = "Review history could not be verified. No rating was submitted."
     ) : AnkiError
 
+    /**
+     * GATE 13 §15/§25 — the action was refused **before** any dispatch because another transaction
+     * already owns this review turn's mutation slot: a rating commit exists for the turn, another
+     * reviewer action is active for it, or the same action is already in flight. Refusing is
+     * fail-closed, not an error state, and [detail] is a small stable token (for example
+     * `action_in_flight`, `rating_commit_active`), never provider text.
+     */
+    data class ActionConflict(
+        val detail: String,
+        override val message: String = "Another change to this card was already being applied."
+    ) : AnkiError
+
+    /**
+     * GATE 13 §14 — the **reviewer-action** ledger could not be read or written, so no action
+     * mutation may be entered (§17: the durable `SUBMITTING` write precedes the backend call; if it
+     * cannot be made durable, the call must not happen). Fail closed, never "assume it was fine".
+     *
+     * Deliberately distinct from [CommitLedgerUnavailable]: that one is the *rating* transaction
+     * ledger, and the two ledgers never share truth (INV-13-02/INV-13-03). [detail] is a small
+     * stable token (for example `store_write_failed`), never provider text.
+     */
+    data class ActionLedgerUnavailable(
+        val detail: String? = null,
+        override val message: String = "The reviewer action could not be recorded, so nothing was changed in Anki."
+    ) : AnkiError
+
     data class StaleTurn(
         override val message: String = "The rating does not belong to the active review turn."
     ) : AnkiError

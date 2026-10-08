@@ -23,7 +23,13 @@ import com.studyagent.client.core.anki.ReconcileCommitRequest
 import com.studyagent.client.core.anki.ReconcileCommitResult
 import com.studyagent.client.core.anki.ReconciliationSupport
 import com.studyagent.client.core.anki.ReviewerAction
-import com.studyagent.client.core.anki.ReviewerActionResult
+import com.studyagent.client.core.anki.ReviewerActionBackendResult
+import com.studyagent.client.core.anki.ReviewerActionKind
+import com.studyagent.client.core.anki.ReviewerActionReceipt
+import com.studyagent.client.core.anki.ReviewerActionReconciliationResult
+import com.studyagent.client.core.anki.ReviewerActionSemantics
+import com.studyagent.client.core.anki.ReconcileReviewerActionRequest
+import com.studyagent.client.core.anki.ReviewerCardState
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.AnkiReviewSession
 import com.studyagent.client.core.common.AppClock
@@ -596,39 +602,104 @@ class AnkiDroidBackend(
     }
 
     /**
-     * GATE 13 STEP 7/§8/§34 — the reviewer-action entry point (flag/bury/suspend).
+     * GATE 13 §8/§9 — the reviewer-action entry point (flag/bury/suspend).
      *
-     * Not a rating, and not modelled as one (INV-13-01/02): this method never touches the commit
+     * Not a rating, and not modelled as one (INV-13-04/05): this method never touches the commit
      * pipeline, never writes a `ReviewCommitStatus` and never fabricates review history. It reaches
      * the provider through exactly one component ([AnkiDroidReviewerActionCommitter]), which shares
      * the rating gateway's physical-write permit so an action can never overlap an answer.
      *
-     * The mutable state this backend owns is the *review turn* record; unlike a rating commit, a
-     * reviewer action does **not** publish a durable transaction, because the audit showed the
-     * pinned contract offers no transaction identity to correlate (STEP 30). The turn is retired
-     * only by the study layer, after the action's outcome is confirmed.
+     * The mutable state this backend owns is the *review turn* record; the durable action
+     * transaction lives in the reviewer-action ledger above it (GATE 13 §14), never here.
      */
     override suspend fun performReviewerAction(
         cardRef: AnkiCardRef,
         action: ReviewerAction
-    ): ReviewerActionResult {
+    ): ReviewerActionBackendResult = dispatchReviewerAction(cardRef, action) { true }
+
+    /**
+     * GATE 13 §17 — the boundary-carrying entry point. The committer calls [mutationEntry]
+     * immediately before its single provider write (and before its verified no-op answer), so the
+     * ledger's `SUBMITTING` marker is durable first and the read-only card-state preflight stays on
+     * the `PREPARED` side of the boundary (INV-13-08).
+     */
+    override suspend fun performReviewerAction(
+        cardRef: AnkiCardRef,
+        action: ReviewerAction,
+        mutationEntry: suspend () -> Boolean
+    ): ReviewerActionBackendResult = dispatchReviewerAction(cardRef, action, mutationEntry)
+
+    private suspend fun dispatchReviewerAction(
+        cardRef: AnkiCardRef,
+        action: ReviewerAction,
+        mutationEntry: suspend () -> Boolean = { true }
+    ): ReviewerActionBackendResult {
         if (cardRef.backendId != id) {
-            return ReviewerActionResult.Rejected(AnkiError.InvalidRequest("card_ref_foreign_backend"))
+            return ReviewerActionBackendResult.ConfirmedNotApplied(
+                AnkiError.InvalidRequest("card_ref_foreign_backend"))
         }
         val performer = reviewerActionCommitter
-            ?: return ReviewerActionResult.Rejected(AnkiError.UnsupportedAction(action.key))
+            ?: return ReviewerActionBackendResult.ConfirmedNotApplied(
+                AnkiError.UnsupportedAction(action.key))
         return try {
             val authority = currentAuthority()
-                ?: return ReviewerActionResult.Rejected(AnkiError.QueryFailure("authority-unknown"))
-            performer.perform(authority, cardRef, action)
+                ?: return ReviewerActionBackendResult.ConfirmedNotApplied(
+                    AnkiError.QueryFailure("authority-unknown"))
+            performer.perform(authority, cardRef, action, mutationEntry)
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (throwable: Throwable) {
             // The call may already have reached the provider: never report a typed failure that
-            // would license a retry (INV-13-13). This mirrors the rating path's rule that anything
-            // unclassified after dispatch is an unknown outcome.
+            // would license a retry. This mirrors the rating path's rule that anything unclassified
+            // after dispatch is an unknown outcome.
             AppLogger.w(TAG, "ANKI_REVIEWER_ACTION_UNEXPECTED error=${throwable::class.java.simpleName}")
-            ReviewerActionResult.OutcomeUnknown(AnkiError.Unknown("action_threw"))
+            ReviewerActionBackendResult.OutcomeUnknown(AnkiError.Unknown("action_threw"), "action_threw")
+        }
+    }
+
+    /**
+     * GATE 13 §28 — the audited semantics of the pinned contract, per action.
+     *
+     * Bury/suspend: the committer checks the card's own queue *before* dispatching and reports the
+     * desired state without a provider write (`already_in_desired_state`), which is the audited
+     * idempotent-replay path; and the immediate post-mutation card-state read is authoritative
+     * evidence for both directions of reconciliation. Flag: the pinned contract cannot express it
+     * at all, so nothing is claimed.
+     */
+    override fun reviewerActionSemantics(action: ReviewerAction): ReviewerActionSemantics =
+        when (action.kind) {
+            ReviewerActionKind.BURY, ReviewerActionKind.SUSPEND -> ReviewerActionSemantics(
+                supportsIdempotentReplay = true,
+                supportsAuthoritativeReconciliation = true
+            )
+            ReviewerActionKind.FLAG -> ReviewerActionSemantics.UNVERIFIED
+        }
+
+    /**
+     * GATE 13 §27 — read-only reconciliation through the same card-state evidence the committer
+     * uses after a mutation. It dispatches nothing: a positive observation confirms the action is
+     * in effect, and anything else stays unresolved (bury is day-scoped and both operations can be
+     * undone outside Study-Agent, so absence of the desired state proves nothing).
+     */
+    override suspend fun reconcileReviewerAction(
+        request: ReconcileReviewerActionRequest
+    ): ReviewerActionReconciliationResult {
+        if (request.cardRef.backendId != id) {
+            return ReviewerActionReconciliationResult.Unresolved(
+                AnkiError.InvalidRequest("card_ref_foreign_backend"))
+        }
+        val performer = reviewerActionCommitter
+            ?: return ReviewerActionReconciliationResult.Unresolved(
+                AnkiError.UnsupportedAction(request.action.key))
+        return try {
+            val authority = currentAuthority()
+                ?: return ReviewerActionReconciliationResult.Unresolved(
+                    AnkiError.QueryFailure("authority-unknown"))
+            performer.reconcile(authority, request.cardRef, request.action)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (throwable: Throwable) {
+            ReviewerActionReconciliationResult.Unresolved(AnkiError.Unknown("reconcile_threw"))
         }
     }
 

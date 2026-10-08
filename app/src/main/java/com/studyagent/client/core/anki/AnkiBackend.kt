@@ -149,15 +149,16 @@ interface AnkiBackend {
         ReconcileCommitResult.Unsupported()
 
     /**
-     * GATE 13 STEP 7 — the one reviewer-action entry point (flag / bury / suspend).
+     * GATE 13 §8 — the one reviewer-action entry point (flag / bury / suspend).
      *
      * A separate mutation family from [commitRating], by construction:
      *
      * - it is **not** routed through the rating transaction pipeline and never writes a
-     *   [ReviewCommitStatus] (INV-13-02): burying a card is not rating it, and no review history
-     *   may be fabricated for it (INV-13-11);
-     * - it returns [ReviewerActionResult], whose [ReviewerActionResult.OutcomeUnknown] is a
-     *   first-class outcome — a lost response is never reinterpreted as a safe failure;
+     *   [ReviewCommitStatus] (INV-13-04): burying a card is not rating it, and no review history
+     *   may be fabricated for it;
+     * - it returns [ReviewerActionBackendResult] — never a `Boolean` (§8) — whose
+     *   [ReviewerActionBackendResult.OutcomeUnknown] is a first-class outcome that a lost response
+     *   is never reinterpreted out of ([ReviewerActionStatus.AMBIGUOUS]);
      * - the default implementation refuses with [AnkiError.UnsupportedAction], so a backend that
      *   has not audited its own action contract cannot silently accept one (capability truth).
      *
@@ -168,7 +169,65 @@ interface AnkiBackend {
     suspend fun performReviewerAction(
         cardRef: AnkiCardRef,
         action: ReviewerAction
-    ): ReviewerActionResult = ReviewerActionResult.Rejected(AnkiError.UnsupportedAction(action.key))
+    ): ReviewerActionBackendResult =
+        ReviewerActionBackendResult.ConfirmedNotApplied(AnkiError.UnsupportedAction(action.key))
+
+    /**
+     * GATE 13 §17/INV-13-08 — the same entry point with the transaction executor's durable boundary.
+     *
+     * [mutationEntry] MUST be called once, after any read-only preflight but immediately BEFORE
+     * invoking the real backend mutation. A backend must not invoke that mutation if this callback
+     * returns `false`. If it returns before calling the callback it certifies that **no backend
+     * mutation was dispatched by this attempt**, which is what lets the coordinator record a
+     * pre-dispatch refusal as provably-not-applied.
+     *
+     * The default has no separate preflight: it writes the boundary marker before
+     * [performReviewerAction]. AnkiDroid overrides this so its card-state reads stay on the
+     * `PREPARED` side of the boundary.
+     */
+    suspend fun performReviewerAction(
+        cardRef: AnkiCardRef,
+        action: ReviewerAction,
+        mutationEntry: suspend () -> Boolean
+    ): ReviewerActionBackendResult {
+        if (!mutationEntry()) {
+            return ReviewerActionBackendResult.ConfirmedNotApplied(AnkiError.ActionLedgerUnavailable())
+        }
+        return performReviewerAction(cardRef, action)
+    }
+
+    /**
+     * GATE 13 §28 — the *verified* semantics of one reviewer action on this backend.
+     *
+     * The default claims nothing ([ReviewerActionSemantics.UNVERIFIED]): an audit is a fact about a
+     * public contract, so a backend that has not audited one cannot inherit a promise. Without
+     * verified semantics an unresolved action can never be reconciled and is never replayed (§29).
+     */
+    fun reviewerActionSemantics(action: ReviewerAction): ReviewerActionSemantics =
+        ReviewerActionSemantics.UNVERIFIED
+
+    /**
+     * GATE 13 §27 — decide an unresolved action from backend-observable evidence, **without**
+     * mutating.
+     *
+     * Implemented only where the backend exposes enough state to decide; the default answers
+     * [ReviewerActionReconciliationResult.Unresolved], which keeps the record `AMBIGUOUS`.
+     * Implementations must not report `ConfirmedApplied` from a change that cannot be attributed to
+     * this action, and must never dispatch a mutation from here (read-only by contract).
+     */
+    suspend fun reconcileReviewerAction(
+        request: ReconcileReviewerActionRequest
+    ): ReviewerActionReconciliationResult = ReviewerActionReconciliationResult.Unresolved()
+
+    /**
+     * GATE 06 §86 — close a review session and forget its runtime record. Releasing a handle is
+     * **not** a mutation towards the scheduler: it never rates, buries, suspends or queries the
+     * next card. `true` when the backend released (or never held) the handle.
+     *
+     * The default answers `false`: a backend that has not modelled session handles cannot claim one
+     * was released.
+     */
+    suspend fun endReview(session: AnkiReviewSession): Boolean = false
 }
 
 /** Scheduled review only. Null deck means backend-defined collection-wide review. */

@@ -4,6 +4,7 @@ import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiRatingOptions
 import com.studyagent.client.core.anki.AnkiRenderedCard
 import com.studyagent.client.core.anki.ReviewTurnId
+import com.studyagent.client.core.anki.ReviewerActionKind
 import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.render.AnkiCardSide
@@ -262,13 +263,22 @@ data class AnswerReviewModel(
     val ratingControlsEnabled: Boolean = false,
     val audioSequencePhase: AnswerAudioSequencePhase = AnswerAudioSequencePhase.IDLE,
     // ---- GATE 13 reviewer actions (flag / bury / suspend) ----
-    /** The current turn's reviewer-action projection; [ReviewerActionUiState.Idle] when none. */
+    /**
+     * The current turn's reviewer-action projection; [ReviewerActionUiState.Idle] when none. It is
+     * derived from the durable [com.studyagent.client.core.anki.ReviewerActionStatus] (§7), never a
+     * second state model.
+     */
     val reviewerActionState: ReviewerActionUiState = ReviewerActionUiState.Idle,
     /**
      * The action kinds this session's frozen capability set allows (STEP 22/INV-13-17). The menu
      * renders exactly this list — never a disabled control standing in for an unsupported action.
      */
     val availableReviewerActionKinds: List<ReviewerActionKind> = emptyList(),
+    /**
+     * Presentation-only: why the last action request was refused *before* anything was recorded
+     * (§15/§23). Never a transaction state — nothing was sent, nothing changed.
+     */
+    val reviewerActionRefusal: ReviewerActionRefusal? = null,
     /** True while the turn presented here is the one an action may act on. */
     val reviewerActionsEnabled: Boolean = false
 ) {
@@ -364,13 +374,10 @@ data class AnswerReviewModel(
             val ratingAllowedPhase = phase == SessionPhase.WaitingForRating ||
                 phase == SessionPhase.SpeakingFeedback ||
                 phase == SessionPhase.ShowingAnswer
-            // GATE 13 §40 — an in-flight or unresolved reviewer action blocks rating: the card may
-            // be mid-mutation or may already have left the queue. A rejected action changes nothing
-            // here (the projection is back to Failed, which does not block).
-            val ratingBlockedByAction = ReviewerActionPolicy.ratingBlockReason(
-                actionInFlight = local.reviewerActionInFlight,
-                actionOutcomeUnresolved = local.reviewerActionUnresolved
-            ) != null
+            // GATE 13 §25 — an unresolved reviewer action blocks rating: the card may be
+            // mid-mutation or may already have left the queue. The reason comes from the one policy
+            // (derived from the durable status), never from a UI-local comparison.
+            val ratingBlockedByAction = local.ratingBlockedByAction != null
             val ratingEnabled = revealed &&
                 ratingAllowedPhase &&
                 local.commit == null &&
@@ -408,8 +415,9 @@ data class AnswerReviewModel(
                 commitUiState = commitUiState,
                 ratingControlsEnabled = ratingEnabled,
                 audioSequencePhase = local.audioSequencePhase,
-                reviewerActionState = local.reviewerAction,
+                reviewerActionState = local.reviewerActionUi,
                 availableReviewerActionKinds = local.request.reviewerActions.availableKinds,
+                reviewerActionRefusal = local.reviewerActionRefusal,
                 reviewerActionsEnabled = true
             )
         }

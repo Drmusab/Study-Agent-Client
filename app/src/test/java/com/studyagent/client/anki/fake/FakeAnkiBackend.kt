@@ -38,6 +38,12 @@ class FakeAnkiBackend(
     private val instanceId: String = UUID.randomUUID().toString(),
     /** GATE 11 checkpoint 4 — deterministic scheduler behaviour for the failure laboratory. */
     val mode: FakeCommitMode = FakeCommitMode.SUCCESS,
+    /**
+     * GATE 13 — whether this fake also models the flag *write* path. Off by default, because the
+     * pinned AnkiDroid public contract has no flag column at all; a test that exercises the flag
+     * flow turns it on and then gets a backend whose capability set and semantics agree.
+     */
+    private val flagWrites: Boolean = false,
     private val guaranteeLevel: CommitGuaranteeLevel = mode.guarantee,
     private val persistedEffectStore: FakeBackendCommitStore = FakeBackendCommitStore()
 ) : AnkiBackend {
@@ -106,7 +112,7 @@ class FakeAnkiBackend(
         require(deckData.all { it.ref.backendId == id })
         require(cardData.all { it.ref.backendId == id })
         require(deckData.map { it.ref }.distinct().size == deckData.size)
-        requireSupported(initialCapabilities)
+        requireSupported(initialCapabilities, flagWrites)
     }
 
     suspend fun setAvailability(value: AnkiAvailability) = mutex.withLock {
@@ -114,7 +120,7 @@ class FakeAnkiBackend(
     }
 
     suspend fun setCapabilities(value: AnkiCapabilities) = mutex.withLock {
-        requireSupported(value)
+        requireSupported(value, flagWrites)
         // Publish both projections under the operation lock; selector requires both to allow review.
         mutableCapabilities.value = value
         mutableAvailability.value = coherent(mutableAvailability.value, value)
@@ -605,9 +611,142 @@ class FakeAnkiBackend(
     private fun usabilityError(): AnkiError? = availability.value.unavailabilityError()
     private fun unsupported(action: String) = AnkiError.UnsupportedAction(action)
 
+    // ---------------------------------------------------------------- GATE 13 reviewer actions
+
+    /**
+     * One scripted reviewer-action answer. Steps are consumed in order, and the last one that was
+     * used repeats — so a test that only cares about one outcome scripts one step, and a test that
+     * wants "refused, then applied" scripts two.
+     */
+    data class ActionStep(
+        val result: ReviewerActionBackendResult,
+        /** False models an answer that never asks to cross the durable boundary (§17 violation). */
+        val callsMutationEntry: Boolean = true,
+        /** Refuses the boundary, as a backend must when the caller cannot make `SUBMITTING` durable. */
+        val refusesMutationEntry: Boolean = false,
+        /** The read-only evidence `reconcileReviewerAction` reports while this step is current. */
+        val reconciliation: ReviewerActionReconciliationResult? = null
+    )
+
+    private val actionSteps = ArrayDeque<ActionStep>()
+    /** The last step that was used; it repeats once the script runs out. */
+    private var lastActionStep: ActionStep? = null
+    private val actionInvocations = AtomicInteger(0)
+    private val actionBoundaryCrossings = AtomicInteger(0)
+    private val actionReconciliations = AtomicInteger(0)
+
+    /** Every `performReviewerAction` call. */
+    val reviewerActionInvocations: Int get() = actionInvocations.get()
+
+    /** Accepted mutation-boundary crossings: what the ledger actually authorized. */
+    val reviewerActionBoundaryCrossings: Int get() = actionBoundaryCrossings.get()
+
+    /** Read-only reconciliation probes (§27). Never a mutation. */
+    val reviewerActionReconciliationCount: Int get() = actionReconciliations.get()
+
+    /** Scripts the next answers, in order. */
+    fun scriptActions(vararg steps: ActionStep) = actionSteps.addAll(steps)
+
+    override fun reviewerActionSemantics(action: ReviewerAction): ReviewerActionSemantics =
+        when (action.kind) {
+            // Mirrors the pinned AnkiDroid claim: bury/suspend are verified in both directions,
+            // a flag has no public write path at all — unless this fake was asked to model one.
+            ReviewerActionKind.BURY, ReviewerActionKind.SUSPEND -> ReviewerActionSemantics(
+                supportsIdempotentReplay = true,
+                supportsAuthoritativeReconciliation = true
+            )
+            ReviewerActionKind.FLAG -> if (flagWrites) ReviewerActionSemantics(
+                supportsIdempotentReplay = true,
+                supportsAuthoritativeReconciliation = false
+            ) else ReviewerActionSemantics.UNVERIFIED
+        }
+
+    override suspend fun performReviewerAction(
+        cardRef: AnkiCardRef,
+        action: ReviewerAction,
+        mutationEntry: suspend () -> Boolean
+    ): ReviewerActionBackendResult = mutex.withLock {
+        actionInvocations.incrementAndGet()
+        val step = actionSteps.removeFirstOrNull()?.also { lastActionStep = it }
+            ?: lastActionStep
+            ?: defaultActionStep(action)
+        if (step.refusesMutationEntry) {
+            return@withLock ReviewerActionBackendResult.ConfirmedNotApplied(
+                AnkiError.QueryFailure("boundary_refused"))
+        }
+        if (step.callsMutationEntry) {
+            if (!mutationEntry()) {
+                return@withLock ReviewerActionBackendResult.ConfirmedNotApplied(
+                    AnkiError.ActionLedgerUnavailable())
+            }
+            actionBoundaryCrossings.incrementAndGet()
+        }
+        // GATE 13 — a confirmed turn-invalidating action really changes what the scheduler hands
+        // back: the card leaves the queue and the active turn is released, exactly like AnkiDroid's
+        // `sched.buryCards` / `sched.suspendCards`. Without this the fake would keep offering the
+        // buried card and a "fresh scheduler query" assertion would be vacuous.
+        if (step.result is ReviewerActionBackendResult.ConfirmedApplied && action.invalidatesCurrentTurn) {
+            if (active?.cardRef == cardRef) active = null
+            val index = queue.indexOfFirst { it.ref == cardRef }
+            if (index >= 0) {
+                queue = queue.filterIndexed { i, _ -> i != index }
+                if (index < cursor) cursor -= 1
+            }
+        }
+        step.result
+    }
+
+    override suspend fun reconcileReviewerAction(
+        request: ReconcileReviewerActionRequest
+    ): ReviewerActionReconciliationResult = mutex.withLock {
+        actionReconciliations.incrementAndGet()
+        (actionSteps.firstOrNull() ?: lastActionStep)?.reconciliation
+            ?: ReviewerActionReconciliationResult.Unresolved(AnkiError.Unknown("no_evidence"))
+    }
+
+    /** The default answer: a confirmable bury/suspend, or an unsupported flag. */
+    private fun defaultActionStep(action: ReviewerAction): ActionStep = when (action.kind) {
+        ReviewerActionKind.BURY, ReviewerActionKind.SUSPEND -> ActionStep(
+            ReviewerActionBackendResult.ConfirmedApplied(
+                ReviewerActionReceipt(
+                    backendId = id,
+                    actionKey = action.key,
+                    cardState = ReviewerCardState.fromQueue(
+                        if (action.kind == ReviewerActionKind.BURY) ReviewerCardState.QUEUE_MANUALLY_BURIED
+                        else ReviewerCardState.QUEUE_SUSPENDED
+                    ),
+                    detail = "confirmed_by_fake"
+                )
+            )
+        )
+        ReviewerActionKind.FLAG -> if (flagWrites) {
+            ActionStep(
+                ReviewerActionBackendResult.ConfirmedApplied(
+                    ReviewerActionReceipt(
+                        backendId = id,
+                        actionKey = action.key,
+                        flag = (action as? ReviewerAction.SetFlag)?.flag,
+                        detail = "confirmed_by_fake"
+                    )
+                )
+            )
+        } else {
+            ActionStep(
+                ReviewerActionBackendResult.ConfirmedNotApplied(AnkiError.UnsupportedAction(action.key))
+            )
+        }
+    }
+
     companion object {
         val REVIEW_CAPABILITIES = AnkiCapabilities(review = true, scheduledReview = true, deckListing = true,
             renderedCards = true, reviewIntervals = true)
+
+        /**
+         * GATE 13 — the rating capabilities plus the reviewer-action write path the fake models.
+         * Flags stay absent: the pinned AnkiDroid contract cannot express a flag write, so the fake
+         * mirrors that and a test that wants a flag must supply its own backend.
+         */
+        val REVIEW_ACTION_CAPABILITIES = REVIEW_CAPABILITIES.copy(bury = true, suspendCards = true)
 
         /** The stand-in scheduler offers the four buttons the pinned AnkiDroid provider hard-codes. */
         val SCHEDULER_BUTTON_ORDER: List<Rating> =
@@ -616,9 +755,13 @@ class FakeAnkiBackend(
         private fun coherent(state: AnkiAvailability, capabilities: AnkiCapabilities): AnkiAvailability =
             if (state is AnkiAvailability.Ready) AnkiAvailability.Ready(capabilities) else state
 
-        private fun requireSupported(value: AnkiCapabilities) {
-            require(!value.flags && !value.bury && !value.suspendCards && !value.editNotes &&
-                !value.createNotes && !value.search && !value.media) { "Fake does not implement these features" }
+        private fun requireSupported(value: AnkiCapabilities, flagWrites: Boolean) {
+            // GATE 13 — bury/suspend are implemented by this fake (the same reviewer-action family
+            // the AnkiDroid provider contract exposes). Flags are only implemented when the test
+            // asks for them (`flagWrites`), mirroring the pinned AnkiDroid contract where there is
+            // no public flag write to model.
+            require((!value.flags || flagWrites) && !value.editNotes && !value.createNotes &&
+                !value.search && !value.media) { "Fake does not implement these features" }
         }
     }
 }

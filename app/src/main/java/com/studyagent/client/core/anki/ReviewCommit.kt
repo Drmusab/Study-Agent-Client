@@ -338,6 +338,8 @@ fun AnkiError.commitCategory(): String = when (this) {
     is AnkiError.ActionNotApplicable -> "action_not_applicable:${detail}"
     is AnkiError.SessionInvalid -> "session_invalid"
     is AnkiError.CommitLedgerUnavailable -> "commit_ledger_unavailable"
+    is AnkiError.ActionLedgerUnavailable -> "action_ledger_unavailable:${detail ?: "unspecified"}"
+    is AnkiError.ActionConflict -> "action_conflict:${detail}"
     is AnkiError.StaleTurn -> "stale_turn"
     is AnkiError.MediaUnavailable -> "media_unavailable"
 }.take(96)
