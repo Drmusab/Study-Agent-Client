@@ -149,11 +149,26 @@ interface AnkiBackend {
         ReconcileCommitResult.Unsupported()
 
     /**
-     * GATE 11 — forget a review session handle after the user ended the study session. Never a
-     * mutation towards Anki (no rating, no bury): it releases the backend's runtime record so a
-     * fresh session can ask the scheduler for authoritative state. `false` = nothing to release.
+     * GATE 13 STEP 7 — the one reviewer-action entry point (flag / bury / suspend).
+     *
+     * A separate mutation family from [commitRating], by construction:
+     *
+     * - it is **not** routed through the rating transaction pipeline and never writes a
+     *   [ReviewCommitStatus] (INV-13-02): burying a card is not rating it, and no review history
+     *   may be fabricated for it (INV-13-11);
+     * - it returns [ReviewerActionResult], whose [ReviewerActionResult.OutcomeUnknown] is a
+     *   first-class outcome — a lost response is never reinterpreted as a safe failure;
+     * - the default implementation refuses with [AnkiError.UnsupportedAction], so a backend that
+     *   has not audited its own action contract cannot silently accept one (capability truth).
+     *
+     * Implementations must dispatch **at most one** backend mutation per call, must never retry
+     * internally, and must confirm success from the backend's own observable state rather than
+     * from a returned row count.
      */
-    suspend fun endReview(session: AnkiReviewSession): Boolean = false
+    suspend fun performReviewerAction(
+        cardRef: AnkiCardRef,
+        action: ReviewerAction
+    ): ReviewerActionResult = ReviewerActionResult.Rejected(AnkiError.UnsupportedAction(action.key))
 }
 
 /** Scheduled review only. Null deck means backend-defined collection-wide review. */
@@ -236,6 +251,21 @@ data class AnkiReviewTurn(
     val ratingOptions: AnkiRatingOptions get() = content.scheduledCard.ratingOptions
     val backendId: AnkiBackendId get() = cardRef.backendId
     val commitId: ReviewCommitId get() = ReviewCommitId(backendId, studySessionId, turnId)
+
+    /**
+     * GATE 13 STEP 38 — the *minimal* flag projection of a confirmed [ReviewerAction.SetFlag].
+     *
+     * Deliberately narrow: only the flag marker changes. [turnId], the scheduled card, the rating
+     * options, the rendered content, the media and the turn position are all preserved, so a flag
+     * never resets the presentation, the transcript or the reveal/compare state (STEP 37) and never
+     * triggers a re-read of the card just to display a marker. A turn that was never hydrated keeps
+     * its [AnkiReviewTurnContent.Scheduled] shape — there is no rendered card to project onto.
+     */
+    fun withFlag(flag: AnkiFlag): AnkiReviewTurn {
+        val rendered = content as? AnkiReviewTurnContent.Rendered ?: return this
+        if (rendered.card.flag == flag) return this
+        return copy(content = rendered.copy(card = rendered.card.copy(flag = flag)))
+    }
 }
 
 /**

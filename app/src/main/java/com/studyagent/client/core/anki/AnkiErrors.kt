@@ -113,6 +113,21 @@ sealed interface AnkiError {
         override val message: String = "The note no longer exists."
     ) : AnkiError
 
+    /**
+     * GATE 13 amendment — the backend's *public* semantics will not apply the requested reviewer
+     * action to the card's current state, and that is known **before** any mutation is dispatched.
+     *
+     * The first verified instance is burying a suspended card: the pinned scheduler's
+     * `bury_or_suspend_cards` deliberately refuses to bury a suspended card ("do not bury suspended
+     * cards as that would unsuspend them"), so the honest answer is a typed refusal, not a
+     * fabricated "applied" and not a silent attempt. [detail] is a small stable token
+     * (for example `suspended_card_cannot_be_buried`), never provider text.
+     */
+    data class ActionNotApplicable(
+        val detail: String,
+        override val message: String = "This action does not apply to the card's current state."
+    ) : AnkiError
+
     data class SessionInvalid(
         override val message: String = "The review session is invalid or no longer owned by this backend."
     ) : AnkiError

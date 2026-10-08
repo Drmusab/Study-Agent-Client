@@ -335,6 +335,7 @@ fun AnkiError.commitCategory(): String = when (this) {
     is AnkiError.CardNotFound -> "card_not_found"
     is AnkiError.CommitConflict -> "commit_conflict"
     is AnkiError.NoteNotFound -> "note_not_found"
+    is AnkiError.ActionNotApplicable -> "action_not_applicable:${detail}"
     is AnkiError.SessionInvalid -> "session_invalid"
     is AnkiError.CommitLedgerUnavailable -> "commit_ledger_unavailable"
     is AnkiError.StaleTurn -> "stale_turn"

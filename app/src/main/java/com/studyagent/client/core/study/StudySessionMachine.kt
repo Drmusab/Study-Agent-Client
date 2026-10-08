@@ -800,6 +800,7 @@ class StudySessionMachine(
                     when (effect) {
                         is AnkiStudyEffect.CommitRating,
                         is AnkiStudyEffect.ReconcileCommit,
+                        is AnkiStudyEffect.PerformReviewerAction,
                         is AnkiStudyEffect.EndReview -> {
                             // Never touches the read job; ordered behind earlier write effects.
                             if (ankiWriteLane.trySend(effect).isFailure) {

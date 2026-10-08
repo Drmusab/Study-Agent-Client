@@ -647,6 +647,10 @@ object StudyReducer {
                 }
             }
             is AnkiStudyEvent.SelectRating -> selectRating(state, local, event, now, cancelVoice)
+            is AnkiStudyEvent.ReviewerActionRequested -> reviewerActionRequested(state, local, event)
+            is AnkiStudyEvent.ReviewerActionApplied -> reviewerActionApplied(state, local, event, cancelVoice)
+            is AnkiStudyEvent.ReviewerActionRejected -> reviewerActionResultFailure(state, local, event)
+            is AnkiStudyEvent.ReviewerActionAmbiguous -> reviewerActionUnresolved(state, local, event, now)
             is AnkiStudyEvent.RatingCommitPrepared -> {
                 val commit = local.commit
                 if (event.epoch != state.epoch || commit == null || commit.commitId != event.commitId) {
@@ -794,6 +798,190 @@ object StudyReducer {
      * different — is rejected ("first accepted rating wins"). The reducer never calls a backend and
      * never advances: the next card is requested only from a COMMITTED outcome.
      */
+    /**
+     * GATE 13 STEP 16/21/22/24-29 — the one policy gate for a reviewer-action request.
+     *
+     * The reducer owns the decision (not the UI): a request is correlated with the authoritative
+     * turn, the phase must present that turn, and [ReviewerActionPolicy] decides whether the action
+     * may be dispatched at all. An allowed action becomes exactly one
+     * [AnkiStudyEffect.PerformReviewerAction] — every backend call goes through that effect, so a
+     * Compose callback or a voice command can never reach the provider directly (INV-13-05).
+     * A blocked request is a *presentation* change (the user is told why) with no effect at all.
+     */
+    private fun reviewerActionRequested(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: AnkiStudyEvent.ReviewerActionRequested
+    ): Transition {
+        val turn = local.turn
+        if (turn == null ||
+            (event.epoch != null && event.epoch != state.epoch) ||
+            (event.turnId != null && event.turnId != turn.turnId) ||
+            (event.cardId != null && event.cardId != state.currentCardId)
+        ) {
+            return Transition.reject(state, event, "stale-anki-reviewer-action")
+        }
+        if (state.phase !in REVIEWER_ACTION_PHASES) {
+            return Transition.reject(state, event, "illegal-phase-for-anki-reviewer-action")
+        }
+        val decision = ReviewerActionPolicy.decide(
+            action = event.action,
+            capabilities = local.request.reviewerActions,
+            commitStatus = local.commit?.status,
+            actionInFlight = local.reviewerActionInFlight,
+            actionOutcomeUnresolved = local.reviewerActionUnresolved,
+            turnResolved = local.ratingResolved
+        )
+        return when (decision) {
+            is ReviewerActionDecision.Allowed -> moved(
+                state.copy(anki = local.copy(
+                    reviewerAction = ReviewerActionUiState.Applying(event.action)
+                )),
+                listOf(AnkiStudyEffect.PerformReviewerAction(state.epoch, turn.turnId, turn.cardRef, event.action))
+            )
+            // Not an error state: nothing was sent, nothing changed, and the next request is
+            // re-evaluated from scratch (STEP 24-29).
+            is ReviewerActionDecision.Blocked -> moved(state.copy(anki = local.copy(
+                reviewerAction = ReviewerActionUiState.Blocked(event.action, decision.reason, decision.detail)
+            )))
+        }
+    }
+
+    /**
+     * GATE 13 STEP 17/18/19/35/36/37/38 — the one place a confirmed reviewer action is applied.
+     *
+     * **Flag** keeps the turn: same [ReviewTurnId], same card, same phase, same transcript,
+     * reveal state, compare mode, evaluation and audio — only the flag projection (when the backend
+     * can report one) and the action state change. No scheduler query is emitted (STEP 36).
+     *
+     * **Bury / Suspend** invalidate the current turn only *after* this confirmed result: the turn is
+     * closed without a rating, no `ReviewCommitStatus` is created (INV-13-02/11), and a **fresh
+     * scheduler query** ([AnkiStudyEffect.Next]) is emitted — never a preselected next card
+     * (STEP 12/35, INV-13-09/10/12).
+     */
+    private fun reviewerActionApplied(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: AnkiStudyEvent.ReviewerActionApplied,
+        cancelVoice: List<StudyEffect>
+    ): Transition {
+        val turn = local.turn
+        if (turn == null || event.epoch != state.epoch ||
+            event.turnId != turn.turnId || event.cardRef != turn.cardRef
+        ) {
+            return Transition.reject(state, event, "stale-anki-action-result")
+        }
+        val applied = (local.reviewerAction as? ReviewerActionUiState.Applying)?.action
+        if (applied == null || applied != event.action) {
+            return Transition.reject(state, event, "unrequested-anki-action-result")
+        }
+        if (!event.action.invalidatesTurn) {
+            // Minimal projection (STEP 38): the flag itself cannot be read back from the pinned
+            // contract, so the projection only applies when the backend reported one — the action
+            // carries the value it successfully set. Nothing else about the turn moves.
+            val flag = (event.action as? ReviewerAction.SetFlag)?.flag
+            val projectedTurn = flag?.let { value -> turn.withFlag(value) } ?: turn
+            return moved(state.copy(anki = local.copy(
+                turn = projectedTurn,
+                reviewerAction = ReviewerActionUiState.Idle
+            )))
+        }
+        val session = local.reviewSession
+            ?: return Transition.reject(state, event, "no-anki-review-session")
+        // The turn ends here. `commit` stays untouched on purpose: bury/suspend are not ratings,
+        // so nothing is created, promoted or recorded (INV-13-02/11).
+        return Transition(
+            state.copy(
+                phase = SessionPhase.WaitingForFirstCard,
+                cardTurn = null,
+                anki = local.copy(
+                    turn = null,
+                    transcript = null,
+                    turnPresentedAtMs = null,
+                    revealState = AnswerRevealState.HIDDEN,
+                    compareMode = local.request.defaultCompareMode,
+                    evaluation = null,
+                    evaluationStatus = AnswerEvaluationStatus.NOT_REQUESTED,
+                    evaluationFailureReason = null,
+                    activeEvaluationRequestId = null,
+                    audioSequencePhase = AnswerAudioSequencePhase.IDLE,
+                    renderFallbackReason = null,
+                    showRawReferenceAnswer = false,
+                    reviewerAction = ReviewerActionUiState.Idle,
+                    failure = null
+                ),
+                activeSpeechEffectId = null,
+                activeRecognitionEffectId = null,
+                error = null
+            ).recordTransition(event, state.phase, SessionPhase.WaitingForFirstCard),
+            // Ordering is the contract (INV-13-12): the scheduler is asked only now, after the
+            // backend confirmed the mutation — never before, never from a local guess.
+            cancelVoice + AnkiStudyEffect.Next(state.epoch, session)
+        )
+    }
+
+    /**
+     * GATE 13 STEP 39 — proven not applied. The same turn continues with no scheduler progression;
+     * the failure is surfaced as presentation state and the user may try again (the pin's
+     * scheduler-level idempotency makes a repeated bury/suspend harmless).
+     */
+    private fun reviewerActionResultFailure(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: AnkiStudyEvent.ReviewerActionRejected
+    ): Transition {
+        val turn = local.turn
+        if (turn == null || event.epoch != state.epoch ||
+            event.turnId != turn.turnId || event.cardRef != turn.cardRef
+        ) {
+            return Transition.reject(state, event, "stale-anki-action-result")
+        }
+        val applied = (local.reviewerAction as? ReviewerActionUiState.Applying)?.action
+        if (applied == null || applied != event.action) {
+            return Transition.reject(state, event, "unrequested-anki-action-result")
+        }
+        return moved(state.copy(anki = local.copy(
+            reviewerAction = ReviewerActionUiState.Failed(event.action, event.reason)
+        )))
+    }
+
+    /**
+     * GATE 13 STEP 31/40 — the action may have applied. The turn does **not** progress, nothing is
+     * replayed, and rating is blocked by [ReviewerActionPolicy.ratingBlockReason] until an explicit
+     * session restart resolves the state (INV-13-13). The phase deliberately stays put: claiming
+     * "buried" or "not buried" here would be a guess.
+     */
+    private fun reviewerActionUnresolved(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: AnkiStudyEvent.ReviewerActionAmbiguous,
+        now: Long
+    ): Transition {
+        val turn = local.turn
+        if (turn == null || event.epoch != state.epoch ||
+            event.turnId != turn.turnId || event.cardRef != turn.cardRef
+        ) {
+            return Transition.reject(state, event, "stale-anki-action-result")
+        }
+        val applied = (local.reviewerAction as? ReviewerActionUiState.Applying)?.action
+        if (applied == null || applied != event.action) {
+            return Transition.reject(state, event, "unrequested-anki-action-result")
+        }
+        return moved(state.copy(
+            anki = local.copy(
+                reviewerAction = ReviewerActionUiState.VerificationRequired(
+                    event.action, event.reason, event.detail
+                )
+            ),
+            error = SessionProblemHolder(
+                SessionProblem.ANKI_REVIEWER_ACTION_UNCONFIRMED,
+                "Study-Agent could not confirm whether this action was applied in Anki, so it " +
+                    "will not repeat it. End the session to restart safely.",
+                false, now
+            )
+        ))
+    }
+
     private fun selectRating(
         state: SessionMachineState,
         local: AnkiStudyInteraction,
@@ -815,6 +1003,14 @@ object StudyReducer {
             local.revealState != AnswerRevealState.REVEALED
         ) return Transition.reject(state, event, "illegal-phase-for-anki-rating")
         if (session == null) return Transition.reject(state, event, "no-anki-review-session")
+        // GATE 13 §40/INV-13-13 — an in-flight reviewer action mutates the same card, and an
+        // unresolved one means the scheduler may already have moved it out of the queue. Both make
+        // a rating unsafe, so rating fails closed exactly like an unresolved commit blocks the next
+        // card. A *rejected* action leaves nothing to protect and does not appear here.
+        ReviewerActionPolicy.ratingBlockReason(
+            actionInFlight = local.reviewerActionInFlight,
+            actionOutcomeUnresolved = local.reviewerActionUnresolved
+        )?.let { return Transition.reject(state, event, "anki-rating-blocked-by-${it.name.lowercase()}") }
         val options = turn.ratingOptions
         if (options !is AnkiRatingOptions.Known) return Transition.reject(state, event, "anki-rating-options-unmapped")
         if (!options.supports(event.rating)) return Transition.reject(state, event, "unsupported-anki-rating")
@@ -1109,6 +1305,27 @@ object StudyReducer {
             priority = SpeechPriority.NORMAL,
             queuePolicy = QueuePolicy.REPLACE
         )
+
+    /**
+     * GATE 13 — the phases whose turn the reviewer-action menu may act on. Every phase here has an
+     * open review turn that is not resolved: post-presentation phases (answer/rating/evaluation,
+     * hint/explanation speech, reveal) plus the proven-not-applied rating state, where the turn
+     * legitimately still exists. Anything else (no turn, paused, recovering, finishing, resolved)
+     * is refused before the policy is even consulted.
+     */
+    private val REVIEWER_ACTION_PHASES: Set<SessionPhase> = setOf(
+        SessionPhase.SpeakingQuestion,
+        SessionPhase.WaitingForAnswer,
+        SessionPhase.PendingAnswerReview,
+        SessionPhase.SubmittingAnswer,
+        SessionPhase.WaitingForEvaluation,
+        SessionPhase.SpeakingFeedback,
+        SessionPhase.WaitingForRating,
+        SessionPhase.ShowingAnswer,
+        SessionPhase.SpeakingHint,
+        SessionPhase.SpeakingExplanation,
+        SessionPhase.RatingCommitFailed
+    )
 
     private val ANKI_REVEAL_VOICE_PHRASES = setOf(
         "show answer", "show the answer", "give answer", "what is the answer",

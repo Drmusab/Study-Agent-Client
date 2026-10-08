@@ -42,7 +42,13 @@ data class AnkiStudyInteraction(
     val activeEvaluationRequestId: String? = null,
     val audioSequencePhase: AnswerAudioSequencePhase = AnswerAudioSequencePhase.IDLE,
     val renderFallbackReason: String? = null,
-    val showRawReferenceAnswer: Boolean = false
+    val showRawReferenceAnswer: Boolean = false,
+    /**
+     * GATE 13 — the current turn's reviewer-action projection (flag/bury/suspend). Separate from
+     * [commit] by contract: [commit] is the one *rating* transaction, this is an ephemeral action
+     * state with no ledger behind it (STEP 42, INV-13-16).
+     */
+    val reviewerAction: ReviewerActionUiState = ReviewerActionUiState.Idle
 ) {
     /** Canonical final user answer transcript for comparison (STEP 3). */
     val userAnswerText: String? get() = transcript
@@ -52,6 +58,13 @@ data class AnkiStudyInteraction(
     val selectedRating: Rating? get() = commit?.selectedRating
     /** Non-null only after the durable transaction is COMMITTED. */
     val committedRating: Rating? get() = commit?.committedRating
+
+    /** GATE 13 — the action being applied right now, if any (duplicate suppression). */
+    val reviewerActionInFlight: ReviewerActionKind? get() = reviewerAction.inFlightKind
+    /** GATE 13 — the action whose outcome is unknown, if any (fail-closed gate). */
+    val reviewerActionUnresolved: ReviewerActionKind? get() = reviewerAction.unresolvedKind
+    /** Whether the current turn already spent its review (a committed rating closed it). */
+    val ratingResolved: Boolean get() = commit?.status == ReviewCommitStatus.COMMITTED
 
     /** Projects this interaction into the pure GATE 12 [AnswerReviewModel]. */
     fun toAnswerReviewModel(
@@ -112,7 +125,15 @@ data class AnkiStudyRequest(
     val evaluateAnswers: Boolean = false,
     val speakFeedback: Boolean = true,
     val speakAnswer: Boolean = false,
-    val defaultCompareMode: AnswerCompareMode = AnswerCompareMode.ORIGINAL
+    val defaultCompareMode: AnswerCompareMode = AnswerCompareMode.ORIGINAL,
+    /**
+     * GATE 13 — the reviewer-action capability set **frozen at session start**, exactly like the
+     * commit semantics frozen from the negotiated agent capabilities (GATE 11 §XI.5). A later
+     * backend or preference change cannot re-shape a decision about this session's turns
+     * (INV-13-15); the default offers nothing, so a caller that has not consulted the backend's
+     * capabilities cannot accidentally enable a mutation it never audited.
+     */
+    val reviewerActions: ReviewerActionCapabilities = ReviewerActionCapabilities.NONE
 ) {
     init { require(studySessionId.isNotBlank()) }
 }
@@ -250,6 +271,58 @@ sealed interface AnkiStudyEvent : StudyEvent {
     /** User intent: the next-card *read* failed after a COMMITTED rating; ask the scheduler again. */
     data class RetryNextCard(val epoch: Long) : AnkiStudyEvent
 
+    // ---- GATE 13 reviewer action events (flag / bury / suspend) ----
+
+    /**
+     * User intent (menu tap, voice command, remote control) to run one reviewer action on the
+     * current turn. Correlation fields are optional because the caller is the *user*: the reducer
+     * resolves them against the authoritative turn and rejects anything stale, so a late tap can
+     * never act on a card that is no longer presented.
+     */
+    data class ReviewerActionRequested(
+        val action: ReviewerAction,
+        val epoch: Long? = null,
+        val turnId: ReviewTurnId? = null,
+        val cardId: String? = null
+    ) : AnkiStudyEvent
+
+    /**
+     * The backend's own state now shows the action took effect (STEP 17/18/19). Correlation is
+     * strict: epoch, turn and card must all still be current, otherwise the result is stale (the
+     * executor has no ledger to remember it in — a reviewer action is not a transaction).
+     */
+    data class ReviewerActionApplied(
+        val epoch: Long,
+        val turnId: ReviewTurnId,
+        val cardRef: AnkiCardRef,
+        val action: ReviewerAction,
+        val updatedCard: AnkiCardRef? = null,
+        val cardState: ReviewerCardState? = null,
+        val detail: String? = null
+    ) : AnkiStudyEvent
+
+    /** The backend proved the action was not applied; the turn continues unchanged (STEP 39). */
+    data class ReviewerActionRejected(
+        val epoch: Long,
+        val turnId: ReviewTurnId,
+        val cardRef: AnkiCardRef,
+        val action: ReviewerAction,
+        val reason: AnkiError
+    ) : AnkiStudyEvent
+
+    /**
+     * The action may or may not have been applied (STEP 31). Nothing progresses until the session
+     * is restarted by explicit user action; the mutation is never replayed (INV-13-13).
+     */
+    data class ReviewerActionAmbiguous(
+        val epoch: Long,
+        val turnId: ReviewTurnId,
+        val cardRef: AnkiCardRef,
+        val action: ReviewerAction,
+        val reason: AnkiError? = null,
+        val detail: String? = null
+    ) : AnkiStudyEvent
+
     // ---- GATE 12 answer evaluation & review events ----
 
     data class AnswerEvaluationCompleted(
@@ -312,7 +385,12 @@ sealed interface AnkiStudyEvent : StudyEvent {
  * Anki effects. Read effects (Begin/Next/Hydrate) run in one cancellable read job. The GATE 11
  * write-side effects run in their own job that session end, stop or UI recreation never cancels:
  * an in-flight commit finishes, is persisted, and its late result is correlated (and rejected as
- * stale if the turn is gone). There is still no skip, bury or suspend operation.
+ * stale if the turn is gone).
+ *
+ * GATE 13 adds [PerformReviewerAction] to the *same* write lane: it is a mutation, so it must never
+ * be cancelled by a read refresh, and it must be ordered behind any rating mutation already
+ * emitted — while the reducer's policy keeps it from being emitted at all while a rating is
+ * unresolved.
  */
 sealed interface AnkiStudyEffect : StudyEffect {
     data class Begin(val epoch: Long, val request: AnkiStudyRequest, val startedAtMs: Long) : AnkiStudyEffect
@@ -327,6 +405,18 @@ sealed interface AnkiStudyEffect : StudyEffect {
 
     /** The single rating mutation path. [retry] = explicit retry of RETRY_ALLOWED. */
     data class CommitRating(val epoch: Long, val request: CommitRatingRequest, val retry: Boolean = false) : AnkiStudyEffect
+
+    /**
+     * GATE 13 STEP 21 — the single reviewer-action path. Exactly one backend mutation per effect;
+     * the executor never retries, and a result that cannot be attributed comes back as
+     * [AnkiStudyEvent.ReviewerActionAmbiguous] rather than being re-sent.
+     */
+    data class PerformReviewerAction(
+        val epoch: Long,
+        val turnId: ReviewTurnId,
+        val cardRef: AnkiCardRef,
+        val action: ReviewerAction
+    ) : AnkiStudyEffect
 
     /** Read-only reconciliation of an AMBIGUOUS commit. */
     data class ReconcileCommit(val epoch: Long, val commitId: ReviewCommitId) : AnkiStudyEffect

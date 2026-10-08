@@ -127,7 +127,14 @@ object AnkiDroidCompatibilityPolicy {
      * - [AnkiCapabilities.media] — media names are kept as references, nothing is resolved or
      *   read (GATE 09);
      * - [AnkiCapabilities.flags] — the pinned card contract exposes no flags column at all
-     *   (v2.24.1, verified), so nothing here can read or write a flag (GATE 11, if ever).
+     *   (v2.24.1, verified), so nothing here can read or write a flag (GATE 11/13);
+     *
+     * GATE 13: [AnkiCapabilities.bury] and [AnkiCapabilities.suspendCards] become true — the
+     * pinned public `schedule` update accepts `buried`/`suspended` and the provider dispatches them
+     * to the scheduler, which this build now implements through the single shared writer. The
+     * backend drops both flags again when no reviewer-action gateway is wired, exactly as it does
+     * for `review`. There is deliberately **no** `unsuspend`/`unbury` capability: the public
+     * contract has no write path for them, and a capability that cannot be honoured is a lie.
      *
      * Marking any of those true to make a screen look complete would be exactly the capability
      * lie GATE 01 §16 forbids.
@@ -145,7 +152,13 @@ object AnkiDroidCompatibilityPolicy {
             deckListing = true,
             scheduledReview = true,
             reviewIntervals = true,
-            renderedCards = true
+            renderedCards = true,
+            // GATE 13 — reviewer actions are implemented through the audited public `update`
+            // columns (`buried` / `suspended`); flags stay off because the contract has no flag
+            // column at all. Maturity stays IMPLEMENTED, not VERIFIED: no real-device mutation
+            // run has happened for these actions yet.
+            bury = true,
+            suspendCards = true
         )
     }
 }

@@ -31,6 +31,11 @@ enum class SessionProblem {
     ANKI_COMMIT_PERSISTENCE_FAILURE,
     /** Unreadable or contradictory ledger; mutation is refused before dispatch. */
     ANKI_COMMIT_INTEGRITY,
+    /**
+     * GATE 13 — a reviewer action (bury/suspend/flag) may have been applied but its outcome is
+     * unknown, so the turn cannot progress and the action is never replayed (INV-13-13).
+     */
+    ANKI_REVIEWER_ACTION_UNCONFIRMED,
     UNKNOWN
 }
 
@@ -65,5 +70,6 @@ fun SessionProblem.severity(): SessionProblemSeverity = when (this) {
     SessionProblem.ANKI_RATING_UNCONFIRMED,
     SessionProblem.ANKI_COMMIT_PERSISTENCE_FAILURE,
     SessionProblem.ANKI_COMMIT_INTEGRITY -> SessionProblemSeverity.RECOVERABLE
+    SessionProblem.ANKI_REVIEWER_ACTION_UNCONFIRMED -> SessionProblemSeverity.RECOVERABLE
     SessionProblem.UNKNOWN -> SessionProblemSeverity.RECOVERABLE
 }

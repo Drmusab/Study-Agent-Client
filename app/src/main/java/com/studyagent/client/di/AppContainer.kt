@@ -6,6 +6,8 @@ import com.studyagent.client.core.anki.AnkiBackendSelector
 import com.studyagent.client.core.anki.ReviewCommitLedger
 import com.studyagent.client.data.anki.DataStoreReviewCommitStore
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidRatingGateway
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidReviewerActionGateway
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidWritePermit
 import com.studyagent.client.core.audio.AndroidAudioRouteManager
 import com.studyagent.client.core.audio.AudioRouteManager
 import com.studyagent.client.core.audio.DefaultStudyAudioModeResolver
@@ -227,6 +229,12 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         AnkiDroidMediaResolver()
     }
 
+    /**
+     * GATE 13 — one physical-write permit shared by every AnkiDroid mutation gateway, so an answer
+     * can never overlap a bury/suspend (or vice versa). One instance per process, by construction.
+     */
+    private val ankiDroidWritePermit: AnkiDroidWritePermit by lazy { AnkiDroidWritePermit() }
+
     override val ankiDroidBackend: AnkiBackend by lazy {
         AnkiDroidBackend(
             gateway = ankiDroidGateway,
@@ -238,7 +246,15 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             // provider call is never abandoned mid-flight by a cancelled screen or session.
             ratingGateway = DefaultAnkiDroidRatingGateway(
                 providerClient = ankiDroidProviderClient,
-                scope = ankiDroidScope
+                scope = ankiDroidScope,
+                writePermit = ankiDroidWritePermit
+            ),
+            // GATE 13 — reviewer actions (bury/suspend at the pinned contract). Shares the permit
+            // above, so the two mutation families are serialized by construction.
+            reviewerActionGateway = DefaultAnkiDroidReviewerActionGateway(
+                providerClient = ankiDroidProviderClient,
+                scope = ankiDroidScope,
+                writePermit = ankiDroidWritePermit
             )
         )
     }

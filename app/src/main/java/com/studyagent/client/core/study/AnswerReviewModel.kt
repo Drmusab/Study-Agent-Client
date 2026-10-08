@@ -260,7 +260,17 @@ data class AnswerReviewModel(
     val committedRating: AnkiRating? = null,
     val commitUiState: RatingCommitUiState = RatingCommitUiState.AwaitingRating,
     val ratingControlsEnabled: Boolean = false,
-    val audioSequencePhase: AnswerAudioSequencePhase = AnswerAudioSequencePhase.IDLE
+    val audioSequencePhase: AnswerAudioSequencePhase = AnswerAudioSequencePhase.IDLE,
+    // ---- GATE 13 reviewer actions (flag / bury / suspend) ----
+    /** The current turn's reviewer-action projection; [ReviewerActionUiState.Idle] when none. */
+    val reviewerActionState: ReviewerActionUiState = ReviewerActionUiState.Idle,
+    /**
+     * The action kinds this session's frozen capability set allows (STEP 22/INV-13-17). The menu
+     * renders exactly this list — never a disabled control standing in for an unsupported action.
+     */
+    val availableReviewerActionKinds: List<ReviewerActionKind> = emptyList(),
+    /** True while the turn presented here is the one an action may act on. */
+    val reviewerActionsEnabled: Boolean = false
 ) {
     /** True only after explicit or post-answer reveal. */
     val isRevealed: Boolean
@@ -354,10 +364,18 @@ data class AnswerReviewModel(
             val ratingAllowedPhase = phase == SessionPhase.WaitingForRating ||
                 phase == SessionPhase.SpeakingFeedback ||
                 phase == SessionPhase.ShowingAnswer
+            // GATE 13 §40 — an in-flight or unresolved reviewer action blocks rating: the card may
+            // be mid-mutation or may already have left the queue. A rejected action changes nothing
+            // here (the projection is back to Failed, which does not block).
+            val ratingBlockedByAction = ReviewerActionPolicy.ratingBlockReason(
+                actionInFlight = local.reviewerActionInFlight,
+                actionOutcomeUnresolved = local.reviewerActionUnresolved
+            ) != null
             val ratingEnabled = revealed &&
                 ratingAllowedPhase &&
                 local.commit == null &&
-                turn.ratingOptions is AnkiRatingOptions.Known
+                turn.ratingOptions is AnkiRatingOptions.Known &&
+                !ratingBlockedByAction
 
             return AnswerReviewModel(
                 turnId = turn.turnId,
@@ -389,7 +407,10 @@ data class AnswerReviewModel(
                 committedRating = local.committedRating,
                 commitUiState = commitUiState,
                 ratingControlsEnabled = ratingEnabled,
-                audioSequencePhase = local.audioSequencePhase
+                audioSequencePhase = local.audioSequencePhase,
+                reviewerActionState = local.reviewerAction,
+                availableReviewerActionKinds = local.request.reviewerActions.availableKinds,
+                reviewerActionsEnabled = true
             )
         }
     }
