@@ -1,6 +1,7 @@
 package com.studyagent.client.data.anki.ankidroid
 
 import com.studyagent.client.core.anki.AnkiCapabilities
+import com.studyagent.client.core.anki.NoteConflictGuarantee
 
 /**
  * GATE 04 — compatibility policy: minimum usable provider spec, capability mapping,
@@ -169,7 +170,15 @@ object AnkiDroidCompatibilityPolicy {
             // column at all. Maturity stays IMPLEMENTED, not VERIFIED: no real-device mutation
             // run has happened for these actions yet.
             bury = true,
-            suspendCards = true
+            suspendCards = true,
+            // GATE 17 — note field, tag and card-deck edits are implemented through the audited public
+            // `notes/<id>` (flds + tags) and `notes/<id>/cards/<ord>` (deck_id) updates. The backend
+            // drops these again unless the note gateway and the note-mutation writer are wired.
+            // Maturity stays IMPLEMENTED: no real-device mutation run has happened.
+            editNoteFields = true,
+            editNoteTags = true,
+            changeCardDeck = true,
+            noteEditConflictGuarantee = NoteConflictGuarantee.BEST_EFFORT_PRE_SAVE_REREAD
         )
     }
 }

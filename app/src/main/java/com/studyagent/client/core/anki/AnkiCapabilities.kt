@@ -137,10 +137,44 @@ data class AnkiCapabilities(
      * the backend can *mutate* flags through the reviewer-action contract; browsing may read and
      * filter flags without exposing any mutation path.
      */
-    val cardBrowser: AnkiCardBrowserCapabilities = AnkiCardBrowserCapabilities.NONE
+    val cardBrowser: AnkiCardBrowserCapabilities = AnkiCardBrowserCapabilities.NONE,
+    /**
+     * GATE 17 — can replace the field values of one existing note through the backend's public
+     * write path. Each dimension is claimed separately: a backend that can edit tags but not
+     * fields must say so, and the editor disables the controls it cannot honour. The coarse
+     * [editNotes] flag stays `false` in GATE 17; it is not a substitute for these.
+     */
+    val editNoteFields: Boolean = false,
+    /** GATE 17 — can replace the full tag set of one existing note (see [editNoteFields]). */
+    val editNoteTags: Boolean = false,
+    /** GATE 17 — can move one card to another existing, non-filtered deck by stable deck id. */
+    val changeCardDeck: Boolean = false,
+    /**
+     * GATE 17 — can authoritatively reconcile an ambiguous note mutation (read-only evidence that
+     * a previously submitted write did or did not apply). `false` means an ambiguous outcome is
+     * shown for user verification and never auto-resolved.
+     */
+    val authoritativeMutationReconciliation: Boolean = false,
+    /** GATE 17 — how strongly the backend protects a note edit against concurrent changes. */
+    val noteEditConflictGuarantee: NoteConflictGuarantee = NoteConflictGuarantee.NONE
 ) {
     companion object {
         /** Safe default for a backend whose probe has not completed. */
         val NONE = AnkiCapabilities()
     }
+}
+
+/**
+ * GATE 17 — the concurrency protection a backend can honestly claim for a note edit.
+ *
+ * - [NONE]: no protection; the editor must say so.
+ * - [BEST_EFFORT_PRE_SAVE_REREAD]: the adapter re-reads the note immediately before its write and
+ *   refuses on drift. A change between that read and the write is NOT excluded.
+ * - [ATOMIC_COMPARE_AND_SET]: the write itself is conditional on the base state. No backend in
+ *   GATE 17 claims this.
+ */
+enum class NoteConflictGuarantee {
+    NONE,
+    BEST_EFFORT_PRE_SAVE_REREAD,
+    ATOMIC_COMPARE_AND_SET
 }

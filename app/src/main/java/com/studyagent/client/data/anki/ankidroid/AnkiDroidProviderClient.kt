@@ -81,6 +81,9 @@ sealed interface ProviderValue {
     val column: String
     data class LongValue(override val column: String, val value: Long) : ProviderValue
     data class IntValue(override val column: String, val value: Int) : ProviderValue
+
+    /** GATE 17 — text columns (`notes/<id>` `flds` and `tags`). Values are never logged. */
+    data class StringValue(override val column: String, val value: String) : ProviderValue
 }
 
 /**
@@ -333,6 +336,7 @@ internal class AndroidAnkiDroidProviderClient(
                     when (value) {
                         is ProviderValue.LongValue -> put(value.column, value.value)
                         is ProviderValue.IntValue -> put(value.column, value.value)
+                        is ProviderValue.StringValue -> put(value.column, value.value)
                     }
                 }
             }
