@@ -3,6 +3,7 @@ package com.studyagent.client.ui.navigation
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.LibraryBooks
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
@@ -45,7 +46,7 @@ fun isImmersiveStudy(currentRoute: String?, studyState: StudyState): Boolean =
     }
 
 /**
- * Root scaffold with the primary navigation: Dashboard / Study / Study Control.
+ * Root scaffold with the primary navigation: Dashboard / Library / Study / Study Control.
  * Connection, Settings and Diagnostics remain secondary, reached from the Dashboard
  * header. The bar hides during immersive study turns so voice study is never crowded.
  */
@@ -61,6 +62,7 @@ fun StudyAgentRoot(container: AppContainer) {
     val destinations = remember {
         listOf(
             PrimaryDestination(Screen.Home.route, "Dashboard", Icons.Default.Dashboard),
+            PrimaryDestination(Screen.Library.route, "Library", Icons.Default.LibraryBooks),
             PrimaryDestination(Screen.Study.route, "Study", Icons.Default.School),
             PrimaryDestination(Screen.Control.route, "Control", Icons.Default.Tune)
         )

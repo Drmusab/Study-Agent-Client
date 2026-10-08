@@ -7,6 +7,8 @@ import kotlinx.coroutines.launch
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.studyagent.client.di.AppContainer
@@ -18,6 +20,10 @@ import com.studyagent.client.ui.screens.diagnostics.DiagnosticsScreen
 import com.studyagent.client.ui.screens.diagnostics.DiagnosticsViewModel
 import com.studyagent.client.ui.screens.home.HomeScreen
 import com.studyagent.client.ui.screens.home.HomeViewModel
+import com.studyagent.client.ui.screens.library.DeckDetailsScreen
+import com.studyagent.client.ui.screens.library.DeckDetailsViewModel
+import com.studyagent.client.ui.screens.library.LibraryScreen
+import com.studyagent.client.ui.screens.library.LibraryViewModel
 import com.studyagent.client.ui.screens.settings.SettingsScreen
 import com.studyagent.client.ui.screens.settings.SettingsViewModel
 import com.studyagent.client.ui.screens.study.StudyScreen
@@ -54,6 +60,46 @@ fun AppNavHost(
                 onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
                 onNavigateToDiagnostics = { navController.navigate(Screen.Diagnostics.route) },
                 onNavigateToControl = { navController.navigate(Screen.Control.route) }
+            )
+        }
+
+        composable(Screen.Library.route) {
+            val libraryViewModel: LibraryViewModel = viewModel {
+                LibraryViewModel(
+                    backend = container.ankiDroidBackend,
+                    libraryRepository = container.ankiLibraryRepository
+                )
+            }
+            LibraryScreen(
+                viewModel = libraryViewModel,
+                onOpenDeck = { deckId ->
+                    navController.navigate(Screen.DeckDetails.createRoute(deckId))
+                }
+            )
+        }
+
+        composable(
+            route = Screen.DeckDetails.route,
+            arguments = listOf(navArgument(Screen.DeckDetails.ARG_DECK_ID) { type = NavType.StringType })
+        ) { backStackEntry ->
+            val deckId = Screen.DeckDetails.decodeDeckId(
+                backStackEntry.arguments?.getString(Screen.DeckDetails.ARG_DECK_ID)
+            ) ?: "invalid-deck-id"
+            val detailsViewModel: DeckDetailsViewModel = viewModel(key = "deck-details:$deckId") {
+                DeckDetailsViewModel(
+                    deckId = deckId,
+                    backend = container.ankiDroidBackend,
+                    libraryRepository = container.ankiLibraryRepository,
+                    studyStarter = container.ankiLocalStudyStarter,
+                    studyState = container.studySessionRepository.studyState
+                )
+            }
+            DeckDetailsScreen(
+                viewModel = detailsViewModel,
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToStudy = {
+                    navController.navigate(Screen.Study.route) { launchSingleTop = true }
+                }
             )
         }
 

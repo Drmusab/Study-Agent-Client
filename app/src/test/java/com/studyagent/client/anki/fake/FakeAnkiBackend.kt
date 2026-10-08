@@ -30,7 +30,7 @@ class FakeAnkiBackend(
     initialCapabilities: AnkiCapabilities = REVIEW_CAPABILITIES,
     initialAvailability: AnkiAvailability = AnkiAvailability.Ready(initialCapabilities),
     private val latencyMs: Long = 0,
-    private val decksError: AnkiError? = null,
+    var decksError: AnkiError? = null,
     private val beginError: AnkiError? = null,
     nextErrors: List<AnkiError> = emptyList(),
     commitSteps: List<CommitStep> = emptyList(),
@@ -73,6 +73,8 @@ class FakeAnkiBackend(
     var selectedDeckRef: AnkiDeckRef? = decks.firstOrNull()?.ref
     var selectedDeckError: AnkiError? = null
     var getDecksCalls: Int = 0
+        private set
+    var getSelectedDeckCalls: Int = 0
         private set
     // Defensively detach caller-owned collections so fixture mutation cannot rewrite an active turn.
     private val cardData = cards.map { card ->
@@ -254,6 +256,7 @@ class FakeAnkiBackend(
     override suspend fun getSelectedDeck(): AnkiResult<AnkiDeckRef?> {
         delay(latencyMs)
         return mutex.withLock {
+            getSelectedDeckCalls += 1
             usabilityError()?.let { return@withLock AnkiResult.Failure(it) }
             if (!capabilities.value.deckListing) return@withLock AnkiResult.Failure(unsupported("deck_listing"))
             selectedDeckError?.let { return@withLock AnkiResult.Failure(it) }

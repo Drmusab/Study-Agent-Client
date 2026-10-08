@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import java.util.UUID
 
@@ -60,11 +61,18 @@ class AnkiLocalStudyStarter(
         val preference: AnkiBackendMode = LOCAL_PREFERENCE,
         /** `null` = the deck the backend itself has selected, when it exposes one. */
         val deckName: String? = null,
+        /** Stable ID from Library navigation. Preferred over a mutable/display-only name. */
+        val deckId: String? = null,
         val speakQuestion: Boolean = true,
         val evaluateAnswers: Boolean = false,
         val speakFeedback: Boolean = true,
         val speakAnswer: Boolean = false
-    )
+    ) {
+        init {
+            require(deckName == null || deckId == null) { "Choose a deck by stable ID or legacy name, not both" }
+            require(deckId == null || deckId.isNotBlank())
+        }
+    }
 
     sealed interface Result {
 
@@ -87,13 +95,22 @@ class AnkiLocalStudyStarter(
     }
 
     /**
-     * True while a local review could start right now (one ready backend under [AnkiBackendMode.AUTO]).
+     * True while the required local AnkiDroid backend is resolved and ready for review.
      *
      * It is a *pre*-flight signal for the UI's primary action, not a promise: the same resolution runs
      * again inside [start], so a backend that went away between the tap and the freeze is refused
      * honestly instead of half-starting a session.
      */
-    val localStudyReady: StateFlow<Boolean> = localStudyReadyFlow()
+    val localStudyBackendId: StateFlow<AnkiBackendId?> = localStudyBackendIdFlow()
+
+    /** Pre-flight convenience for existing dashboard projections. */
+    val localStudyReady: StateFlow<Boolean> = localStudyBackendId
+        .map { it != null }
+        .stateIn(
+            scope = scope,
+            started = SharingStarted.Eagerly,
+            initialValue = localStudyBackendId.value != null
+        )
 
     /**
      * Start a local Anki review, or refuse.
@@ -121,7 +138,7 @@ class AnkiLocalStudyStarter(
             return Result.Refused(REASON_BACKEND_NOT_READY, null)
         }
 
-        val deck = resolveDeck(backend, options.deckName)
+        val deck = resolveDeck(backend, options.deckName, options.deckId)
             ?: return Result.Refused(REASON_DECK_NOT_FOUND, null)
 
         // STEP 32.2 — the freeze. Session capabilities come from the backend's own audited contract at
@@ -150,8 +167,12 @@ class AnkiLocalStudyStarter(
     }
 
     /** `null` = the user's deck name is not in this backend's collection (or it said nothing). */
-    private suspend fun resolveDeck(backend: AnkiBackend, deckName: String?): AnkiDeckRef? {
-        if (deckName == null) {
+    private suspend fun resolveDeck(
+        backend: AnkiBackend,
+        deckName: String?,
+        deckId: String?
+    ): AnkiDeckRef? {
+        if (deckName == null && deckId == null) {
             // "The deck AnkiDroid has selected", when the contract exposes that notion; otherwise the
             // backend's own current deck is not ours to guess, and the caller must name one.
             return when (val selected = backend.getSelectedDeck()) {
@@ -160,24 +181,30 @@ class AnkiLocalStudyStarter(
             }
         }
         return when (val decks = backend.getDecks()) {
-            is AnkiResult.Success -> decks.value.firstOrNull { it.name == deckName }?.ref
+            is AnkiResult.Success -> decks.value.firstOrNull { deck ->
+                if (deckId != null) {
+                    deck.ref.backendId == backend.id && deck.ref.deckId == deckId
+                } else {
+                    deck.ref.backendId == backend.id && deck.name == deckName
+                }
+            }?.ref
             is AnkiResult.Failure -> null
         }
     }
 
-    private fun localStudyReadyFlow(): StateFlow<Boolean> {
+    private fun localStudyBackendIdFlow(): StateFlow<AnkiBackendId?> {
         val availability = registry.ids.mapNotNull { registry.find(it)?.availability }
-        if (availability.isEmpty()) return MutableStateFlow(false)
-        return combine(availability) { resolveReady() }
+        if (availability.isEmpty()) return MutableStateFlow<AnkiBackendId?>(null)
+        return combine(availability) { resolveReadyBackendId() }
             .stateIn(
                 scope = scope,
                 started = SharingStarted.Eagerly,
-                initialValue = resolveReady()
+                initialValue = resolveReadyBackendId()
             )
     }
 
-    private fun resolveReady(): Boolean =
-        selector.resolve(LOCAL_PREFERENCE) is AnkiBackendSelector.Resolution.Resolved
+    private fun resolveReadyBackendId(): AnkiBackendId? =
+        (selector.resolve(LOCAL_PREFERENCE) as? AnkiBackendSelector.Resolution.Resolved)?.backendId
 
     companion object {
         /** "Study on this phone": the device's own Anki collection, never a remote agent. */
