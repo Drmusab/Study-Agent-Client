@@ -1,7 +1,7 @@
 package com.studyagent.client.ui.theme
 
 import android.content.Context
-import android.os.Build
+import android.provider.Settings
 import androidx.compose.animation.core.AnimationSpec
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -31,11 +31,11 @@ object AppMotion {
 }
 
 /**
- * True when the user has requested reduced motion in system accessibility settings.
+ * True when the user has requested reduced motion in system settings.
  *
- * [android.view.accessibility.AccessibilityManager.isReduceMotionEnabled] requires API 30;
- * below that there is no platform signal, so we conservatively return false (the app's
- * continuous animation is already minimal and gated on real voice activity).
+ * Read from the platform animator duration scale (see [computeReduceMotion]); any read failure
+ * conservatively returns false, because the app's continuous animation is already minimal and
+ * gated on real voice activity.
  */
 @Composable
 @Stable
@@ -44,13 +44,16 @@ fun useReducedMotion(): Boolean {
     return remember(context) { computeReduceMotion(context) }
 }
 
-internal fun computeReduceMotion(context: Context): Boolean {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-    return try {
-        val am = context.getSystemService(Context.ACCESSIBILITY_SERVICE)
-            as? android.view.accessibility.AccessibilityManager
-        am?.isReduceMotionEnabled ?: false
-    } catch (_: Throwable) {
-        false
-    }
+internal fun computeReduceMotion(context: Context): Boolean = try {
+    // `AccessibilityManager` exposes no public reduce-motion accessor at any API level, so the
+    // platform's own signal is used: the global animator duration scale is 0 exactly when the
+    // user asked the system to reduce motion. This is the same setting androidx reads for its
+    // motion defaults. Absent/unreadable means "no signal" -> animations stay enabled (false).
+    Settings.Global.getFloat(
+        context.contentResolver,
+        Settings.Global.ANIMATOR_DURATION_SCALE,
+        1f
+    ) == 0f
+} catch (_: Throwable) {
+    false
 }

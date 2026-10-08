@@ -279,7 +279,9 @@ class AnkiRendererIsolationTest {
             "databaseEnabled = false",
             "allowFileAccess = false",
             "allowContentAccess = false",
-            "blockNetworkImageLoads = true",
+            // The platform API is `WebSettings.setBlockNetworkImage` (there is no `...ImageLoads`
+            // setter); the pin is what matters, so the token tracks the real member name.
+            "blockNetworkImage = true",
             "mediaPlaybackRequiresUserGesture = true",
             "defaultTextEncodingName",
             "useWideViewPort = false",

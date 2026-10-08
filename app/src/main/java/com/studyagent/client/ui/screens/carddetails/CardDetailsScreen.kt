@@ -39,7 +39,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.studyagent.client.core.anki.AnkiCardSide
+import com.studyagent.client.core.render.AnkiCardSide
 import com.studyagent.client.core.anki.ReviewTurnId
 import com.studyagent.client.core.render.AnkiCardRenderConfig
 import com.studyagent.client.core.render.AnkiRenderSurfaceKind

@@ -11,7 +11,7 @@ import com.studyagent.client.data.anki.AnkiLibraryRepository
 import com.studyagent.client.ui.screens.library.LibraryUiState
 import com.studyagent.client.ui.screens.library.LibraryViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.test.ExperimentalCoroutinesApi
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest

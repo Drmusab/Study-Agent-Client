@@ -6,7 +6,7 @@ import com.studyagent.client.core.anki.*
 import com.studyagent.client.ui.screens.carddetails.CardDetailsUiState
 import com.studyagent.client.ui.screens.carddetails.CardDetailsViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.test.ExperimentalCoroutinesApi
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest

@@ -43,6 +43,8 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
 import com.studyagent.client.core.anki.AnkiMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardGateway
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteGateway
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidNoteGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardBrowserGateway
 import com.studyagent.client.data.anki.ankidroid.UnsupportedAnkiDroidCardBrowserGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidDeckGateway
@@ -143,6 +145,8 @@ interface AppContainer {
 
     /** GATE 07 — card-content endpoint. Read-only: it never renders, resolves media or edits. */
     val ankiDroidCardGateway: AnkiDroidCardGateway
+    /** GATE 16 — note-content endpoint. Read-only: it never writes a note, its fields or its tags. */
+    val ankiDroidNoteGateway: AnkiDroidNoteGateway
     /** GATE 15 — explicit bounded-browser boundary; unsupported until a public list API is audited. */
     val ankiDroidCardBrowserGateway: AnkiDroidCardBrowserGateway
     val ankiDroidBackend: AnkiBackend
@@ -239,6 +243,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
 
     override val ankiDroidCardGateway: AnkiDroidCardGateway by lazy {
         DefaultAnkiDroidCardGateway(providerClient = ankiDroidProviderClient)
+    }
+
+    override val ankiDroidNoteGateway: AnkiDroidNoteGateway by lazy {
+        DefaultAnkiDroidNoteGateway(providerClient = ankiDroidProviderClient)
     }
 
     override val ankiDroidCardBrowserGateway: AnkiDroidCardBrowserGateway by lazy {
@@ -607,11 +615,6 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
                 "unknown"
             },
             protocolVersion = capabilities.protocolVersion,
-            serverVersion = capabilities.serverVersion
-        )
-    }
-}
-rotocolVersion,
             serverVersion = capabilities.serverVersion
         )
     }

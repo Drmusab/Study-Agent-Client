@@ -30,24 +30,43 @@ import com.studyagent.client.ui.screens.cardbrowser.CardBrowserEvent
 import com.studyagent.client.ui.screens.cardbrowser.CardBrowserUiState
 import com.studyagent.client.ui.screens.cardbrowser.CardBrowserViewModel
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
  * ViewModel-level GATE 15 tests.
  *
- * The harness has no `kotlinx-coroutines-test`, so these tests drive the ViewModel from
- * `runBlocking` with the unconfined test dispatcher, and await *state predicates* instead of
+ * These tests drive the ViewModel from `runBlocking` and await *state predicates* instead of
  * advancing a virtual clock: the ViewModel's only real suspension points are the debounce delay
  * and the backend call, both of which the assertions wait for explicitly.
+ *
+ * `viewModelScope` is `Dispatchers.Main.immediate`-backed, so the class installs an unconfined
+ * Main dispatcher for its lifetime (the same thing [com.studyagent.client.ui.LibraryViewModelTest]
+ * and [com.studyagent.client.ui.DeckDetailsViewModelTest] do per test). Without it, constructing
+ * the ViewModel fails before any assertion runs.
  */
 class CardBrowserViewModelTest {
+    @Before
+    fun setUp() {
+        Dispatchers.setMain(Dispatchers.Unconfined)
+    }
+
+    @After
+    fun tearDown() {
+        Dispatchers.resetMain()
+    }
+
     private val id = AnkiBackendId.Fake("browser-vm")
     private val deckA = AnkiDeckRef(id, "deck-a", "collection")
     private val deckB = AnkiDeckRef(id, "deck-b", "collection")

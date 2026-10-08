@@ -40,7 +40,7 @@ package com.studyagent.client.ui.components.anki
  * allowFileAccess/allowContentAccess false — card HTML must not read local files or providers (STEP 09)
  * allowUniversalAccessFromFileURLs   left at the platform default (false) and asserted false by the
  * allowFileAccessFromFileURLs        isolation test: never relaxed "to make a card work" (STEP 133)
- * blockNetworkImageLoads             true — GATE 08 has no media resolver so a remote image cannot work
+ * blockNetworkImage                  true — GATE 08 has no media resolver so a remote image cannot work
  *                                    anyway, and a card must not silently beacon to a third party
  *                                    (STEP 59/§130, INV-RENDER-32)
  * mixedContentMode                   untouched: the platform default (NEVER_ALLOW) is the strict one
@@ -158,7 +158,7 @@ private fun configureAnkiCardWebView(webView: WebView) {
         databaseEnabled = false
         allowFileAccess = false
         allowContentAccess = false
-        blockNetworkImageLoads = true
+        blockNetworkImage = true
         cacheMode = WebSettings.LOAD_DEFAULT
         defaultTextEncodingName = AnkiCardDocument.ENCODING
         mediaPlaybackRequiresUserGesture = true
