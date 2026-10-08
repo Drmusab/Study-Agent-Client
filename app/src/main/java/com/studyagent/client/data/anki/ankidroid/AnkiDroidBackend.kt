@@ -16,6 +16,12 @@ import com.studyagent.client.core.anki.AnkiRenderedCard
 import com.studyagent.client.core.anki.AnkiResult
 import com.studyagent.client.core.anki.AnkiReviewTurn
 import com.studyagent.client.core.anki.AnkiReviewTurnContent
+import com.studyagent.client.core.anki.NoteConflictGuarantee
+import com.studyagent.client.core.anki.edit.BackendNoteMutationRequest
+import com.studyagent.client.core.anki.edit.NoteDeckChangeScope
+import com.studyagent.client.core.anki.edit.NoteMutationBackendResult
+import com.studyagent.client.core.anki.edit.NoteMutationSemantics
+import com.studyagent.client.core.anki.edit.NoteMutationStep
 import com.studyagent.client.core.anki.AnkiScheduledCard
 import com.studyagent.client.core.anki.unavailabilityError
 import com.studyagent.client.core.anki.BeginReviewRequest
@@ -112,7 +118,13 @@ class AnkiDroidBackend(
      * older composition) = card details are refused truthfully and `AnkiCapabilities.cardDetails`
      * is not advertised. It is read-only by construction: no mutation family exists on it.
      */
-    private val noteGateway: AnkiDroidNoteGateway? = null
+    private val noteGateway: AnkiDroidNoteGateway? = null,
+    /**
+     * GATE 17 — the note-content and card-deck writer. Absent = note edits are refused truthfully and
+     * `editNoteFields` / `editNoteTags` / `changeCardDeck` are not advertised. It shares the same
+     * physical-write permit as rating and reviewer actions.
+     */
+    private val noteMutationGateway: AnkiDroidNoteMutationGateway? = null
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
@@ -177,8 +189,70 @@ class AnkiDroidBackend(
         suspendCards = capabilities.suspendCards && reviewerActionCommitter != null,
         flags = false,
         // GATE 16 — deep card details need the note gateway; without it the claim would be a lie.
-        cardDetails = capabilities.cardDetails && noteGateway != null
+        cardDetails = capabilities.cardDetails && noteGateway != null,
+        // GATE 17 — every edit needs the note gateway (it reads the base) AND the writer.
+        editNoteFields = capabilities.editNoteFields && noteGateway != null && noteMutationGateway != null,
+        editNoteTags = capabilities.editNoteTags && noteGateway != null && noteMutationGateway != null,
+        changeCardDeck = capabilities.changeCardDeck && noteGateway != null && noteMutationGateway != null,
+        // The conflict guarantee describes the edit path only; without that path it is not claimed.
+        noteEditConflictGuarantee = if (noteMutationGateway != null && noteGateway != null) {
+            capabilities.noteEditConflictGuarantee
+        } else {
+            NoteConflictGuarantee.NONE
+        },
+        // Coarse flag stays false: fields, tags and deck are each claimed separately (GATE 17 §18).
+        editNotes = false,
+        // No receipt or lookup-by-id exists at the pin, so nothing is claimed as authoritative.
+        authoritativeMutationReconciliation = false
     )
+
+    /**
+     * GATE 17 — the evidence the pinned provider gives for a note write. Nothing is claimed when the
+     * writer is not wired, so an unwired backend never advertises a semantics it cannot honour.
+     */
+    override val noteMutationSemantics: NoteMutationSemantics
+        get() = if (noteMutationGateway != null) NoteMutationSemantics.ANKIDROID_V2_24_1 else NoteMutationSemantics.UNVERIFIED
+
+    /**
+     * GATE 17 — one backend write step. Every refusal before dispatch is a proven non-application; a
+     * step that reached the provider is classified by [AnkiDroidNoteMutationMapper.classify] and never
+     * retried here. Only [NoteMutationCoordinator] calls this, after the boundary is durably recorded.
+     */
+    override suspend fun applyNoteMutation(request: BackendNoteMutationRequest): NoteMutationBackendResult {
+        val writer = noteMutationGateway
+            ?: return NoteMutationBackendResult.ConfirmedNotApplied(
+                AnkiError.UnsupportedAction(action = "note_mutation")
+            )
+        if (request.cardRef.backendId != id || request.noteRef.backendId != id) {
+            return NoteMutationBackendResult.ConfirmedNotApplied(AnkiError.InvalidRequest("card_ref_foreign_backend"))
+        }
+        // No silent capability ignoring: a step the backend does not advertise is refused, not written.
+        val caps = capabilities.value
+        val allowed = when (val step = request.step) {
+            is NoteMutationStep.UpdateNoteContent ->
+                (step.fieldValues == null || caps.editNoteFields) && (step.tags == null || caps.editNoteTags)
+            is NoteMutationStep.ChangeDeck -> caps.changeCardDeck
+        }
+        if (!allowed) {
+            return NoteMutationBackendResult.ConfirmedNotApplied(AnkiError.UnsupportedAction(action = "note_mutation"))
+        }
+        val write = when (val mapping = AnkiDroidNoteMutationMapper.map(request)) {
+            is AnkiDroidNoteWriteMapping.Refused -> return NoteMutationBackendResult.ConfirmedNotApplied(mapping.error)
+            is AnkiDroidNoteWriteMapping.Ready -> mapping.write
+        }
+        val authority = currentAuthority()
+            ?: return NoteMutationBackendResult.ConfirmedNotApplied(AnkiError.QueryFailure("authority-unknown"))
+        val dispatch = writer.submit(authority, write)
+        return AnkiDroidNoteMutationMapper.classify(dispatch, write.expectedRows)
+    }
+
+    /**
+     * GATE 17 — the cards of every presented but unresolved Study turn, for the note-edit safety policy.
+     * Read under the review mutex, so an in-flight `nextCard` that installs a turn is observed.
+     */
+    suspend fun unresolvedStudyTurnCards(): List<AnkiCardRef> = reviewMutex.withLock {
+        reviewRecords.values.mapNotNull { it.activeTurn?.content?.ref }
+    }
 
     /** Content-free physical reviewer-action update count (diagnostics/test evidence only). */
     val reviewerActionInvocationCount: Long

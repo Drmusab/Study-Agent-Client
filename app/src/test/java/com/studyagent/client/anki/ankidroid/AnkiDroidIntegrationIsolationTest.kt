@@ -188,9 +188,9 @@ class AnkiDroidIntegrationIsolationTest {
     /**
      * GATE 11 (+ GATE 13) — the write allowlist. The platform `update` call exists in exactly one
      * place (the provider client), the provider columns are named only by the pinned contract, and
-     * only the two mutation gateways issue writes: the rating gateway (GATE 11) and the
-     * reviewer-action gateway (GATE 13). Both share one physical-write permit by construction, and
-     * a *new* writer anywhere else still fails this test.
+     * only the three mutation gateways issue writes: the rating gateway (GATE 11), the
+     * reviewer-action gateway (GATE 13) and the note-mutation gateway (GATE 17). All share one
+     * physical-write permit by construction, and a *new* writer anywhere else still fails this test.
      */
     @Test
     fun `the mutation write tokens appear only in their owning files`() {
@@ -200,9 +200,12 @@ class AnkiDroidIntegrationIsolationTest {
             "\"time_taken\"" to setOf("AnkiDroidApiContract.kt"),
             "\"buried\"" to setOf("AnkiDroidApiContract.kt"),
             "\"suspended\"" to setOf("AnkiDroidApiContract.kt"),
+            // GATE 17 adds the note-content / card-deck writer. It is the third sanctioned writer and
+            // shares the same physical-write permit; see AnkiDroidNoteMutationGateway for its contract.
             "safeUpdate(" to setOf(
                 "AnkiDroidProviderClient.kt", "AndroidAnkiDroidProbe.kt",
-                "AnkiDroidRatingGateway.kt", "AnkiDroidReviewerActionGateway.kt"
+                "AnkiDroidRatingGateway.kt", "AnkiDroidReviewerActionGateway.kt",
+                "AnkiDroidNoteMutationGateway.kt"
             ),
             "submitAnswer(" to setOf("AnkiDroidRatingGateway.kt", "AnkiDroidRatingCommitter.kt"),
             "easeFor(" to setOf("AnkiDroidCommitEvidence.kt", "AnkiDroidRatingGateway.kt")

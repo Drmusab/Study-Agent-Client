@@ -1,5 +1,10 @@
 package com.studyagent.client.core.anki
 
+import com.studyagent.client.core.anki.edit.BackendNoteMutationRequest
+import com.studyagent.client.core.anki.edit.NoteMutationBackendResult
+import com.studyagent.client.core.anki.edit.NoteMutationReconciliationRequest
+import com.studyagent.client.core.anki.edit.NoteMutationReconciliationResult
+import com.studyagent.client.core.anki.edit.NoteMutationSemantics
 import com.studyagent.client.core.models.Rating
 import kotlinx.coroutines.flow.StateFlow
 
@@ -318,6 +323,32 @@ interface AnkiBackend {
      * was released.
      */
     suspend fun endReview(session: AnkiReviewSession): Boolean = false
+
+    /**
+     * GATE 17 — the concurrency and ordering claims this backend makes for note edits. Effect
+     * semantics, never UI capability; see [NoteMutationSemantics]. Unverified adapters claim nothing.
+     */
+    val noteMutationSemantics: NoteMutationSemantics get() = NoteMutationSemantics.UNVERIFIED
+
+    /**
+     * GATE 17 — ONE backend write step of a note mutation (fields+tags, or a card deck move). Only
+     * [NoteMutationCoordinator] may call this, and only after the boundary is durably recorded.
+     *
+     * The adapter must classify honestly: [NoteMutationBackendResult.ConfirmedNotApplied] only when
+     * it can prove nothing was applied, [NoteMutationBackendResult.Conflict] only when it refused
+     * because the note no longer matches, and [NoteMutationBackendResult.OutcomeUnknown] otherwise.
+     * The default refuses without any effect.
+     */
+    suspend fun applyNoteMutation(request: BackendNoteMutationRequest): NoteMutationBackendResult =
+        NoteMutationBackendResult.ConfirmedNotApplied(AnkiError.UnsupportedAction(action = "note_mutation"))
+
+    /**
+     * GATE 17 — read-only evidence check for an AMBIGUOUS note mutation. Must never write. The
+     * default is [NoteMutationReconciliationResult.Unresolved], which keeps the record AMBIGUOUS.
+     */
+    suspend fun reconcileNoteMutation(
+        request: NoteMutationReconciliationRequest
+    ): NoteMutationReconciliationResult = NoteMutationReconciliationResult.Unresolved()
 }
 
 /** Scheduled review only. Null deck means backend-defined collection-wide review. */

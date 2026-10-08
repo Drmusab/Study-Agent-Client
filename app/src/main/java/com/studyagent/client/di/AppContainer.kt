@@ -44,6 +44,14 @@ import com.studyagent.client.core.anki.AnkiMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteGateway
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteMutationGateway
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidNoteMutationGateway
+import com.studyagent.client.data.anki.DataStoreNoteMutationStore
+import com.studyagent.client.core.anki.edit.DefaultNoteMutationCoordinator
+import com.studyagent.client.core.anki.edit.DefaultNoteMutationLedger
+import com.studyagent.client.core.anki.edit.NoteMutationCoordinator
+import com.studyagent.client.core.anki.edit.NoteMutationLedger
+import com.studyagent.client.core.anki.edit.StudyActivityNoteEditSafetyPolicy
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidNoteGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardBrowserGateway
 import com.studyagent.client.data.anki.ankidroid.UnsupportedAnkiDroidCardBrowserGateway
@@ -263,6 +271,18 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
      */
     private val ankiDroidWritePermit: AnkiDroidWritePermit by lazy { AnkiDroidWritePermit() }
 
+    /**
+     * GATE 17 — the note-content and card-deck writer. It is the only component that issues a note
+     * write; the coordinator reaches it through [AnkiBackend.applyNoteMutation] only.
+     */
+    private val ankiDroidNoteMutationGateway: AnkiDroidNoteMutationGateway by lazy {
+        DefaultAnkiDroidNoteMutationGateway(
+            providerClient = ankiDroidProviderClient,
+            scope = ankiDroidScope,
+            writePermit = ankiDroidWritePermit
+        )
+    }
+
     override val ankiDroidBackend: AnkiBackend by lazy {
         AnkiDroidBackend(
             gateway = ankiDroidGateway,
@@ -271,6 +291,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             reviewGateway = ankiDroidReviewGateway,
             cardGateway = ankiDroidCardGateway,
             noteGateway = ankiDroidNoteGateway,
+            // GATE 17 — note field, tag and card-deck writer. Shares the one physical-write permit.
+            noteMutationGateway = ankiDroidNoteMutationGateway,
             // GATE 11 — the single AnkiDroid writer. Its scope outlives callers so an issued
             // provider call is never abandoned mid-flight by a cancelled screen or session.
             ratingGateway = DefaultAnkiDroidRatingGateway(
@@ -309,6 +331,37 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         com.studyagent.client.core.anki.DurableReviewerActionLedger(
             store = DataStoreReviewerActionStore.create(context, ankiDroidScope),
             clock = System::currentTimeMillis
+        )
+    }
+
+    /**
+     * GATE 17 — the durable note-mutation ledger. Its own file and its own record type: it never shares
+     * storage or statuses with the rating or reviewer-action ledgers. Its first load converts a
+     * SUBMITTING record left by a dead process into AMBIGUOUS, and PREPARED/RETRY_ALLOWED into CONFLICT.
+     */
+    val noteMutationLedger: NoteMutationLedger by lazy {
+        DefaultNoteMutationLedger(
+            store = DataStoreNoteMutationStore.create(context, ankiDroidScope),
+            nowEpochMs = System::currentTimeMillis
+        )
+    }
+
+    /**
+     * GATE 17 — the only writer of note edits. Study overlap is checked against the same two ledgers
+     * the review path writes, plus the presented-but-unresolved turn.
+     */
+    val noteMutationCoordinator: NoteMutationCoordinator by lazy {
+        DefaultNoteMutationCoordinator(
+            backend = ankiDroidBackend,
+            ledger = noteMutationLedger,
+            safety = StudyActivityNoteEditSafetyPolicy(
+                reviewCommits = reviewCommitLedger,
+                reviewerActions = reviewerActionLedger,
+                unresolvedTurnCards = {
+                    (ankiDroidBackend as? AnkiDroidBackend)?.unresolvedStudyTurnCards() ?: emptyList()
+                }
+            ),
+            nowEpochMs = System::currentTimeMillis
         )
     }
 
