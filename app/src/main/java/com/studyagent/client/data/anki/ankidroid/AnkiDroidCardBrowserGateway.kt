@@ -23,6 +23,6 @@ class UnsupportedAnkiDroidCardBrowserGateway internal constructor(
     override suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> =
         when (val mapping = queryMapper(query)) {
             is AnkiDroidCardQueryMapping.Unsupported ->
-                AnkiResult.Failure(AnkiError.UnsupportedAction(mapping.feature))
+                AnkiResult.Failure(AnkiError.UnsupportedQueryFeature(feature = mapping.feature))
         }
 }

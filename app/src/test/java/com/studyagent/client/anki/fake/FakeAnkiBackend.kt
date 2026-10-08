@@ -266,11 +266,13 @@ class FakeAnkiBackend(
     }
 
     /**
-     * GATE 15 fake transport: the backend, not the browser UI, evaluates text and filters across
-     * the fixture collection, then returns one bounded page. No scheduler operation is invoked.
+     * GATE 15 fake transport: the *backend* evaluates the whole normative query contract — scope,
+     * text, filters, sort and bounded paging — across the fixture collection before returning one
+     * page. Nothing here touches the scheduler, and no client-side page-local filtering or sorting
+     * exists anywhere in this path (INV-15-Q15/Q16).
      */
     override suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> {
-        val normalized = query.copy(text = normalizeAnkiCardSearchText(query.text))
+        val normalized = query.normalized()
         return if (ignoreBrowseCancellation) {
             withContext(NonCancellable) { performBrowse(normalized) }
         } else {
@@ -288,58 +290,154 @@ class FakeAnkiBackend(
         browseGate?.await()
         return mutex.withLock {
             usabilityError()?.let { return@withLock AnkiResult.Failure(it) }
-            query.unsupportedFeature(capabilities.value.cardBrowser)?.let { feature ->
-                return@withLock AnkiResult.Failure(AnkiError.UnsupportedAction(feature))
+
+            // §63 validation order: structurally valid query, valid scope identity, supported
+            // features, valid cursor — then the read.
+            query.structuralError()?.let { return@withLock AnkiResult.Failure(it) }
+            val collectionKey = deckData.firstOrNull()?.ref?.collectionKey
+
+            // §6 — a missing deck is a typed NotFound, never an empty page.
+            val scopeDeckIds: Set<String>? = when (val scope = query.scope) {
+                AnkiCardScope.AllCards -> null
+                is AnkiCardScope.Deck -> {
+                    val known = deckData.firstOrNull { it.ref.deckId == scope.deckId }
+                        ?: return@withLock AnkiResult.Failure(
+                            AnkiError.DeckNotFound(AnkiDeckRef(id, scope.deckId, collectionKey))
+                        )
+                    if (scope.includeChildren) descendantDeckIds(known.ref.deckId) else setOf(known.ref.deckId)
+                }
             }
+
+            val capabilities = mutableCapabilities.value.cardBrowser
+            query.unsupportedFeature(capabilities)?.let { feature ->
+                return@withLock AnkiResult.Failure(AnkiError.UnsupportedQueryFeature(feature))
+            }
+
+            val pager = AnkiOffsetCursorAdapter(query.consistencyKey(id, collectionKey))
+            val offset = when (val resolution = query.page.cursor?.let(pager::offsetFor)) {
+                null -> 0
+                is AnkiOffsetCursorAdapter.Resolution.Valid -> resolution.offset
+                AnkiOffsetCursorAdapter.Resolution.Malformed ->
+                    return@withLock AnkiResult.Failure(AnkiError.InvalidCursor("malformed_cursor"))
+                AnkiOffsetCursorAdapter.Resolution.ForeignQuery ->
+                    return@withLock AnkiResult.Failure(AnkiError.InvalidCursor("cursor_query_mismatch"))
+            }
+
             browseError?.let { return@withLock AnkiResult.Failure(it) }
 
-            val normalizedText = normalizeAnkiCardSearchText(query.text)
-            val matching = cardData.asSequence()
-                .filter { card -> query.deckId == null || card.deckRef?.deckId == query.deckId }
-                .filter { card ->
-                    normalizedText == null ||
-                        card.questionText?.contains(normalizedText, ignoreCase = true) == true ||
-                        card.answerText?.contains(normalizedText, ignoreCase = true) == true
-                }
-                .filter { card -> query.filters.flags.isEmpty() || card.flag in query.filters.flags }
-                .filter { card -> query.filters.tags.all { it in card.metadata.tags } }
-                .filter { card ->
-                    query.filters.cardTypes.isEmpty() || card.browserType() in query.filters.cardTypes
-                }
-                .filter { card -> query.filters.suspended == null || card.isSuspended() == query.filters.suspended }
-                .filter { card -> query.filters.buried == null || card.isBuried() == query.filters.buried }
-                .toList()
+            val normalizedText = query.normalizedText
+            val matching = cardData.filter { card -> matchesQuery(card, query, normalizedText, scopeDeckIds) }
+            val ordered = orderBy(query.sort, matching)
+            if (offset > ordered.size) {
+                return@withLock AnkiResult.Failure(AnkiError.InvalidCursor("cursor_offset_out_of_range"))
+            }
 
-            val sorted = when (query.sort) {
-                AnkiCardSort.Default -> matching
-                AnkiCardSort.Reps -> matching.sortedWith(
-                    compareBy<AnkiRenderedCard> { it.scheduling?.reps ?: Int.MAX_VALUE }
-                        .thenBy { it.ref.stableKey }
-                )
-                AnkiCardSort.Lapses -> matching.sortedWith(
-                    compareBy<AnkiRenderedCard> { it.scheduling?.lapses ?: Int.MAX_VALUE }
-                        .thenBy { it.ref.stableKey }
-                )
-                else -> return@withLock AnkiResult.Failure(
-                    AnkiError.UnsupportedAction("card_sort_unsupported")
-                )
+            val pageItems = ordered.drop(offset).take(query.page.limit).map(::toListItem)
+            for (item in pageItems) {
+                item.pageIdentityError(id)?.let { detail ->
+                    return@withLock AnkiResult.Failure(AnkiError.DataIntegrityFailure(detail))
+                }
+                if (scopeDeckIds != null && item.deckId !in scopeDeckIds) {
+                    return@withLock AnkiResult.Failure(AnkiError.DataIntegrityFailure("card_row_out_of_scope"))
+                }
             }
-            val offset = parseFakeCursor(query.page.cursor)
-                ?: return@withLock AnkiResult.Failure(AnkiError.InvalidRequest("card_cursor_invalid"))
-            if (offset > sorted.size) {
-                return@withLock AnkiResult.Failure(AnkiError.InvalidRequest("card_cursor_out_of_range"))
-            }
-            val pageItems = sorted.drop(offset).take(query.page.limit).map(::toListItem)
             val nextOffset = offset + pageItems.size
-            val nextCursor = if (nextOffset < sorted.size) "fake-cursor:$nextOffset" else null
-            AnkiResult.Success(AnkiCardPage(pageItems, nextCursor, totalCount = sorted.size))
+            val nextCursor = if (nextOffset < ordered.size) pager.cursorFor(nextOffset) else null
+            // §36 — an exact total only when the capability is actually advertised.
+            val totalCount = ordered.size.takeIf { capabilities.supportsTotalCount }
+            AnkiResult.Success(
+                AnkiCardPage.of(
+                    items = pageItems,
+                    nextCursor = nextCursor,
+                    totalCount = totalCount,
+                    // §34/§40 — this backend cannot prove snapshot isolation, so it does not claim it.
+                    snapshotToken = null
+                )
+            )
         }
     }
 
-    private fun parseFakeCursor(cursor: String?): Int? = when {
-        cursor == null -> 0
-        !cursor.startsWith("fake-cursor:") -> null
-        else -> cursor.removePrefix("fake-cursor:").toIntOrNull()?.takeIf { it >= 0 }
+    /** §19 filter combination: categories AND together, flags/types OR, tags all-present. */
+    private fun matchesQuery(
+        card: AnkiRenderedCard,
+        query: AnkiCardQuery,
+        normalizedText: String?,
+        scopeDeckIds: Set<String>?
+    ): Boolean {
+        if (scopeDeckIds != null && card.deckRef?.deckId !in scopeDeckIds) return false
+        if (normalizedText != null) {
+            val haystacks = listOfNotNull(card.questionText, card.answerText, card.pureAnswerText)
+            if (haystacks.none { it.contains(normalizedText, ignoreCase = true) }) return false
+        }
+        val filters = query.filters
+        if (filters.flags.isNotEmpty() && card.flag !in filters.flags) return false
+        if (filters.tags.isNotEmpty() && filters.tags.any { it !in card.metadata.tags }) return false
+        if (filters.cardTypes.isNotEmpty() && card.browserType() !in filters.cardTypes) return false
+        when (filters.suspension) {
+            SuspensionFilter.Any -> Unit
+            SuspensionFilter.SuspendedOnly -> if (card.isSuspended() != true) return false
+            SuspensionFilter.NotSuspended -> if (card.isSuspended() != false) return false
+        }
+        when (filters.burial) {
+            BurialFilter.Any -> Unit
+            BurialFilter.BuriedOnly -> if (card.isBuried() != true) return false
+            BurialFilter.NotBuried -> if (card.isBuried() != false) return false
+        }
+        return true
+    }
+
+    /**
+     * Authoritative hierarchy walk over the fixture deck tree (never deck-name prefix matching,
+     * §66). A deck with no children resolves to itself.
+     */
+    private fun descendantDeckIds(deckId: String): Set<String> {
+        val children = deckData.groupBy { it.parentRef?.deckId }
+        val result = LinkedHashSet<String>()
+        val pending = ArrayDeque<String>()
+        pending += deckId
+        while (pending.isNotEmpty()) {
+            val current = pending.removeFirst()
+            if (!result.add(current)) continue
+            children[current]?.forEach { child -> pending += child.ref.deckId }
+        }
+        return result
+    }
+
+    /** Every supported sort is deterministic: requested key first, stable card identity last (§26). */
+    private fun orderBy(sort: AnkiCardSort, cards: List<AnkiRenderedCard>): List<AnkiRenderedCard> = when (sort) {
+        AnkiCardSort.Default -> cards
+        is AnkiCardSort.Due -> cards.sortedWith(
+            keyComparator(sort.direction) { it.scheduling?.dueEpochSeconds }
+        )
+        is AnkiCardSort.Created -> cards.sortedWith(
+            keyComparator(sort.direction) { it.metadata.noteCreatedEpochSeconds }
+        )
+        is AnkiCardSort.Modified -> cards.sortedWith(
+            keyComparator(sort.direction) { it.metadata.noteModifiedEpochSeconds }
+        )
+        is AnkiCardSort.Reps -> cards.sortedWith(
+            keyComparator(sort.direction) { it.scheduling?.reps?.toLong() }
+        )
+        is AnkiCardSort.Lapses -> cards.sortedWith(
+            keyComparator(sort.direction) { it.scheduling?.lapses?.toLong() }
+        )
+    }
+
+    private fun <T : Comparable<T>> keyComparator(
+        direction: SortDirection,
+        key: (AnkiRenderedCard) -> T?
+    ): Comparator<AnkiRenderedCard> = Comparator { first, second ->
+        val left = key(first)
+        val right = key(second)
+        val primary = when {
+            left == null && right == null -> 0
+            // A missing backend-reported sort key is never invented; it sorts after real values.
+            left == null -> 1
+            right == null -> -1
+            direction == SortDirection.ASCENDING -> left.compareTo(right)
+            else -> right.compareTo(left)
+        }
+        if (primary != 0) primary else first.ref.stableKey.compareTo(second.ref.stableKey)
     }
 
     private fun AnkiRenderedCard.browserType(): AnkiCardType? = when (metadata.queueState) {
@@ -864,18 +962,32 @@ class FakeAnkiBackend(
     }
 
     companion object {
+        /**
+         * GATE 15 §62 — the complete structured browser capability set. Every advertised field is
+         * implemented by [FakeAnkiBackend.browseCards]; nothing is advertised that the fake cannot
+         * honour, because a capability that lies is worse than a missing one.
+         */
         val CARD_BROWSER_CAPABILITIES = AnkiCardBrowserCapabilities(
-            browse = true,
-            deckScope = true,
-            textSearch = true,
-            flagFilter = true,
-            tagFilter = true,
-            cardTypeFilter = true,
-            suspendedFilter = true,
-            buriedFilter = true,
-            sorts = setOf(AnkiCardSort.Reps, AnkiCardSort.Lapses),
-            totalCount = true,
-            answerPreview = true
+            canBrowseAllCards = true,
+            canBrowseDeck = true,
+            canIncludeChildDecks = true,
+            canSearchText = true,
+            supportedFilters = AnkiCardFilterCapability.entries.toSet(),
+            supportedSorts = AnkiCardSortCapability.entries.toSet(),
+            supportsTotalCount = true,
+            maxPageSize = AnkiPageRequest.MAX_LIMIT
+        )
+
+        /**
+         * GATE 15 §20/§76 — the deliberately limited capability set used by the negative contract
+         * tests: no text search, tag filtering only, reps sorting only, no exact total. A backend
+         * with these capabilities must *reject* the rest, never drop it silently.
+         */
+        val LIMITED_CARD_BROWSER_CAPABILITIES = CARD_BROWSER_CAPABILITIES.copy(
+            canSearchText = false,
+            supportedFilters = setOf(AnkiCardFilterCapability.TAGS),
+            supportedSorts = setOf(AnkiCardSortCapability.REPS),
+            supportsTotalCount = false
         )
 
         val REVIEW_CAPABILITIES = AnkiCapabilities(

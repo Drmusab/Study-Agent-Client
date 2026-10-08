@@ -6,6 +6,24 @@ package com.studyagent.client.core.anki
  * Backends translate their native failures (Cursor exceptions, HTTP bodies,
  * SQLite errors, protocol error frames) into these types inside the gateway.
  * Nothing above the gateway parses backend-native error text (INV-ANKI-06).
+ *
+ * GATE 15 §49 fixes the card-browser mapping explicitly:
+ *
+ * | Contract category | Domain type |
+ * |---|---|
+ * | `BackendUnavailable` | [AnkiError.BackendUnavailable] (plus [AnkiError.ProviderUnavailable] for the missing local provider) |
+ * | `PermissionRequired` | [AnkiError.PermissionRequired] |
+ * | `CollectionUnavailable` | [AnkiError.CollectionUnavailable] |
+ * | `NotFound` | [AnkiError.DeckNotFound] / [AnkiError.CardNotFound] (backend was asked; the identity is genuinely gone) |
+ * | `UnsupportedQueryFeature` | [AnkiError.UnsupportedQueryFeature] |
+ * | `InvalidQuery` | [AnkiError.InvalidQuery] |
+ * | `InvalidCursor` | [AnkiError.InvalidCursor] |
+ * | `TransientFailure` | [AnkiError.TransientFailure] (and the pre-existing [AnkiError.QueryFailure] token form) |
+ * | `DataIntegrityFailure` | [AnkiError.DataIntegrityFailure] / [AnkiError.MalformedResponse] |
+ * | `Unknown` | [AnkiError.Unknown] |
+ *
+ * A missing deck is never an empty page (INV-15-Q13), `totalCount = null` is never zero
+ * (INV-15-Q14), and coroutine cancellation is never mapped to any of these (INV-15-Q19).
  */
 sealed interface AnkiError {
     val message: String
@@ -94,6 +112,63 @@ sealed interface AnkiError {
     data class UnsupportedAction(
         val action: String,
         override val message: String = "This Anki backend does not support the requested action."
+    ) : AnkiError
+
+    /**
+     * GATE 15 §20/§51 — the query is *valid*, but the selected backend cannot implement the
+     * requested semantic. [feature] is a small stable token (for example `card_filter_buried`,
+     * `card_sort_lapses`, `card_browser`) identifying exactly which component was refused.
+     *
+     * A backend must never satisfy this situation by silently dropping the component, nor by
+     * implementing it over an already loaded page (INV-15-Q03/Q15/Q16).
+     */
+    data class UnsupportedQueryFeature(
+        val feature: String,
+        val detail: String? = null,
+        override val message: String = "This Anki backend cannot honour one part of the requested search."
+    ) : AnkiError
+
+    /**
+     * GATE 15 §50 — the request is *structurally* invalid, so it is rejected before any backend
+     * read: a page limit outside the contract bounds, a blank deck identity, a blank tag, a blank
+     * cursor. Distinct from [UnsupportedQueryFeature] ("the query is fine; this backend cannot do
+     * that part") and from [InvalidRequest] (a non-browser request that violates the domain
+     * contract). [detail] is a small stable token, never provider text.
+     */
+    data class InvalidQuery(
+        val detail: String,
+        override val message: String = "The requested search is not valid."
+    ) : AnkiError
+
+    /**
+     * GATE 15 §33/§52 — the paging cursor is malformed, belongs to another backend/collection, or
+     * belongs to a different query than the one being executed. A backend must never silently
+     * restart from page one, because that would duplicate or skip rows without telling anyone.
+     */
+    data class InvalidCursor(
+        val detail: String? = null,
+        override val message: String = "The page you asked for no longer matches this search."
+    ) : AnkiError
+
+    /**
+     * GATE 15 §44/§49 — a row cannot supply the identity the domain requires (`AnkiCardRef`,
+     * note identity, deck identity) or the page/row shape is unusable. The page fails instead of
+     * inventing identity or publishing an unaddressable row. [detail] is a stable token such as
+     * `card_row_missing_note_identity`, never card content.
+     */
+    data class DataIntegrityFailure(
+        val detail: String? = null,
+        override val message: String = "The Anki backend returned a card row without usable identity."
+    ) : AnkiError
+
+    /**
+     * GATE 15 §49 — a read failed for a reason that is expected to be temporary (timeout, dropped
+     * connection, provider busy) and may be retried. Browsing is read-only, so a retry cannot
+     * mutate the scheduler (§53); the retry may legitimately observe different data (§40).
+     */
+    data class TransientFailure(
+        val detail: String? = null,
+        override val message: String = "The Anki backend could not complete the read right now."
     ) : AnkiError
 
     /**

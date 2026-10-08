@@ -186,7 +186,7 @@ fun DeckDetailsScreen(
                         }
                         item(key = "identity") { DeckIdentityCard(current) }
                         item(key = "summary") { DeckSummaryCard(current) }
-                        if (current.capabilities.cardBrowser.browse && current.capabilities.cardBrowser.deckScope) {
+                        if (current.capabilities.cardBrowser.canBrowseDeck) {
                             item(key = "browse-cards") {
                                 SecondaryButton(
                                     text = "Browse cards",

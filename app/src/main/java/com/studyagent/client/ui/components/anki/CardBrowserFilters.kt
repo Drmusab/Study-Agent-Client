@@ -21,15 +21,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextDirection
-import androidx.compose.ui.unit.dp
 import com.studyagent.client.core.anki.AnkiCardBrowserCapabilities
+import com.studyagent.client.core.anki.AnkiCardFilterCapability
 import com.studyagent.client.core.anki.AnkiCardFilters
-import com.studyagent.client.core.anki.AnkiCardType
-import com.studyagent.client.core.anki.AnkiFlag
+import com.studyagent.client.ui.screens.cardbrowser.FilterChipModel
+import com.studyagent.client.ui.screens.cardbrowser.filterChipGroups
+import com.studyagent.client.ui.screens.cardbrowser.toggleChip
+import com.studyagent.client.ui.screens.cardbrowser.withTag
 import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.AppSpacing
 
-/** Reusable, read-only filters. A filter is rendered only when the active backend advertises it. */
+/**
+ * Reusable, read-only filters. Only families the active backend advertises are rendered, and every
+ * activation path goes through the pure `toggleChip`/`withTag` helpers, so the UI can never drop a
+ * filter silently or invent one the backend does not support.
+ */
 @Composable
 fun CardBrowserFilters(
     capabilities: AnkiCardBrowserCapabilities,
@@ -37,9 +43,9 @@ fun CardBrowserFilters(
     onFiltersChanged: (AnkiCardFilters) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val hasAnyFilter = capabilities.flagFilter || capabilities.tagFilter ||
-        capabilities.cardTypeFilter || capabilities.suspendedFilter || capabilities.buriedFilter
-    if (!hasAnyFilter) return
+    val groups = filterChipGroups(capabilities, filters)
+    val showsExactTagEntry = AnkiCardFilterCapability.TAGS in capabilities.supportedFilters
+    if (groups.isEmpty() && !showsExactTagEntry) return
 
     Column(
         modifier = modifier.fillMaxWidth(),
@@ -47,110 +53,28 @@ fun CardBrowserFilters(
     ) {
         Text("Filters", style = MaterialTheme.typography.labelLarge, color = AppColors.contentSecondary)
 
-        if (capabilities.flagFilter) {
-            FilterGroupLabel("Flag")
+        if (showsExactTagEntry) {
+            ExactTagEntry(
+                onAddTag = { tag -> onFiltersChanged(filters.withTag(tag)) }
+            )
+        }
+
+        groups.forEach { group ->
+            if (group.chips.isEmpty()) return@forEach
+            Text(group.label, style = MaterialTheme.typography.labelMedium, color = AppColors.contentMuted)
             Row(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
             ) {
-                AnkiFlag.entries.forEach { flag ->
-                    val selected = flag in filters.flags
-                    FilterChip(
-                        selected = selected,
-                        onClick = {
-                            val next = filters.flags.toMutableSet().apply {
-                                if (selected) remove(flag) else add(flag)
-                            }
-                            onFiltersChanged(filters.copy(flags = next))
-                        },
-                        label = { Text(flag.browserLabel()) },
-                        modifier = Modifier.semantics {
-                            contentDescription = "${flag.browserLabel()} flag filter ${if (selected) "selected" else "not selected"}"
-                        }
+                group.chips.forEach { chip ->
+                    FilterChipView(
+                        chip = chip,
+                        onClick = { onFiltersChanged(filters.toggleChip(chip.key)) }
                     )
                 }
             }
         }
 
-        if (capabilities.cardTypeFilter) {
-            FilterGroupLabel("Card type")
-            Row(
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
-            ) {
-                AnkiCardType.entries.forEach { type ->
-                    val selected = type in filters.cardTypes
-                    FilterChip(
-                        selected = selected,
-                        onClick = {
-                            val next = filters.cardTypes.toMutableSet().apply {
-                                if (selected) remove(type) else add(type)
-                            }
-                            onFiltersChanged(filters.copy(cardTypes = next))
-                        },
-                        label = { Text(type.browserLabel()) },
-                        modifier = Modifier.semantics {
-                            contentDescription = "${type.browserLabel()} card type filter ${if (selected) "selected" else "not selected"}"
-                        }
-                    )
-                }
-            }
-        }
-
-        if (capabilities.tagFilter) {
-            var tagDraft by remember(filters.tags) { mutableStateOf("") }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
-            ) {
-                OutlinedTextField(
-                    value = tagDraft,
-                    onValueChange = { tagDraft = it },
-                    label = { Text("Exact tag") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                    textStyle = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.ContentOrLtr)
-                )
-                Button(
-                    onClick = {
-                        val tag = tagDraft.trim()
-                        if (tag.isNotEmpty()) onFiltersChanged(filters.copy(tags = filters.tags + tag))
-                        tagDraft = ""
-                    },
-                    enabled = tagDraft.isNotBlank()
-                ) { Text("Add") }
-            }
-            if (filters.tags.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
-                ) {
-                    filters.tags.sorted().forEach { tag ->
-                        FilterChip(
-                            selected = true,
-                            onClick = { onFiltersChanged(filters.copy(tags = filters.tags - tag)) },
-                            label = { Text(tag, maxLines = 1) },
-                            modifier = Modifier.semantics { contentDescription = "Remove tag filter $tag" }
-                        )
-                    }
-                }
-            }
-        }
-
-        if (capabilities.suspendedFilter) {
-            TriStateFilterChip(
-                label = "Suspended",
-                value = filters.suspended,
-                onClick = { onFiltersChanged(filters.copy(suspended = nextTriState(filters.suspended))) }
-            )
-        }
-        if (capabilities.buriedFilter) {
-            TriStateFilterChip(
-                label = "Buried",
-                value = filters.buried,
-                onClick = { onFiltersChanged(filters.copy(buried = nextTriState(filters.buried))) }
-            )
-        }
         if (!filters.isEmpty) {
             TextButton(
                 onClick = { onFiltersChanged(AnkiCardFilters()) },
@@ -161,47 +85,39 @@ fun CardBrowserFilters(
 }
 
 @Composable
-private fun FilterGroupLabel(text: String) {
-    Text(text, style = MaterialTheme.typography.labelMedium, color = AppColors.contentMuted)
-}
-
-@Composable
-private fun TriStateFilterChip(label: String, value: Boolean?, onClick: () -> Unit) {
-    val valueLabel = when (value) {
-        null -> "Any"
-        true -> "Only"
-        false -> "Exclude"
-    }
+private fun FilterChipView(chip: FilterChipModel, onClick: () -> Unit) {
     FilterChip(
-        selected = value != null,
+        selected = chip.selected,
         onClick = onClick,
-        label = { Text("$label: $valueLabel") },
-        modifier = Modifier.semantics { contentDescription = "$label filter, $valueLabel. Activate to cycle." }
+        label = { Text(chip.label, maxLines = 1) },
+        modifier = Modifier.semantics {
+            contentDescription =
+                "${chip.contentDescription} ${if (chip.selected) "selected" else "not selected"}"
+        }
     )
 }
 
-private fun nextTriState(value: Boolean?): Boolean? = when (value) {
-    null -> true
-    true -> false
-    false -> null
-}
-
-private fun AnkiFlag.browserLabel(): String = when (this) {
-    AnkiFlag.NONE -> "No flag"
-    AnkiFlag.RED -> "Red"
-    AnkiFlag.ORANGE -> "Orange"
-    AnkiFlag.GREEN -> "Green"
-    AnkiFlag.BLUE -> "Blue"
-    AnkiFlag.PINK -> "Pink"
-    AnkiFlag.TURQUOISE -> "Turquoise"
-    AnkiFlag.PURPLE -> "Purple"
-    AnkiFlag.UNKNOWN -> "Unknown flag"
-}
-
-private fun AnkiCardType.browserLabel(): String = when (this) {
-    AnkiCardType.NEW -> "New"
-    AnkiCardType.LEARNING -> "Learning"
-    AnkiCardType.REVIEW -> "Review"
-    AnkiCardType.RELEARNING -> "Relearning"
-    AnkiCardType.UNKNOWN -> "Unknown type"
+@Composable
+private fun ExactTagEntry(onAddTag: (String) -> Unit) {
+    var tagDraft by remember { mutableStateOf("") }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)
+    ) {
+        OutlinedTextField(
+            value = tagDraft,
+            onValueChange = { tagDraft = it },
+            label = { Text("Exact tag") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+            textStyle = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.ContentOrLtr)
+        )
+        Button(
+            onClick = {
+                onAddTag(tagDraft)
+                tagDraft = ""
+            },
+            enabled = tagDraft.isNotBlank()
+        ) { Text("Add") }
+    }
 }

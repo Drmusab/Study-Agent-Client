@@ -69,17 +69,30 @@ interface AnkiBackend {
     }
 
     /**
-     * GATE 15 — bounded, read-only card browsing. The backend receives normalized plain-text
-     * search semantics, neutral filters/sort keys, a bounded limit and an opaque domain cursor.
-     * It must reject query components it cannot honor, search across its collection rather than
-     * only the loaded page, and return lightweight plain-text projections (never full HTML).
+     * GATE 15 — the single, read-only card-browser entry point (§1):
+     * `browseCards(AnkiCardQuery): AnkiCardPage`. There is deliberately no `searchCards`,
+     * `filterCards`, `sortCards`, `browseDeckCards` or `getCardsPage`: the query object carries
+     * scope, text, filters, sort and bounded paging so every backend honours one set of semantics.
      *
-     * The default is intentionally unsupported: adding this contract must not make existing
-     * adapters look browser-capable. Implementations advertise the exact supported features in
-     * [AnkiCapabilities.cardBrowser] and return exact query totals only when authoritative.
+     * The backend must, in this order (§63): check availability and the collection, apply
+     * [AnkiCardQuery.normalized], reject a structurally invalid query with [AnkiError.InvalidQuery],
+     * reject an unsupported requested feature with [AnkiError.UnsupportedQueryFeature], reject a
+     * cursor that does not belong to this exact query with [AnkiError.InvalidCursor], execute one
+     * collection-wide read, map identities (failing with [AnkiError.DataIntegrityFailure] rather
+     * than inventing one) and return one bounded [AnkiCardPage].
+     *
+     * Forbidden everywhere in this call: rating, burying, suspending, flagging, note edits, deck
+     * changes, sync, marking viewed or advancing the scheduler (§70), and any local
+     * "load a page then filter/sort it in the client" fallback (§64/§65). The call is a read: it
+     * may be retried safely (§53) and must cooperate with coroutine cancellation, which is never
+     * surfaced as a query error (§54/INV-15-Q19).
+     *
+     * The default is deliberately unsupported, so adding the contract never makes an existing
+     * adapter look browser-capable. Implementations advertise exactly what they support in
+     * [AnkiCapabilities.cardBrowser] and reject anything else explicitly.
      */
     suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> =
-        AnkiResult.Failure(AnkiError.UnsupportedAction("card_browser"))
+        AnkiResult.Failure(AnkiError.UnsupportedQueryFeature(feature = "card_browser"))
 
     /**
      * Open a scheduled-review session bound immutably to this backend, one collection and one

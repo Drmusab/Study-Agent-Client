@@ -15,11 +15,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import com.studyagent.client.core.anki.AnkiCardBrowserCapabilities
 import com.studyagent.client.core.anki.AnkiCardSort
-import com.studyagent.client.ui.screens.cardbrowser.SortOptionModel
 import com.studyagent.client.ui.screens.cardbrowser.displayLabel
+import com.studyagent.client.ui.screens.cardbrowser.sortOptions
 import com.studyagent.client.ui.theme.AppColors
 
-/** Sort affordance exposes only backend-authoritative sort keys plus its native default order. */
+/**
+ * Sort affordance. It offers the backend's own default order plus every advertised sort key in both
+ * explicit directions (§22) — never a sort key the backend would have to fake, and never a
+ * client-side re-sort of an already loaded page.
+ */
 @Composable
 fun CardBrowserSortMenu(
     capabilities: AnkiCardBrowserCapabilities,
@@ -27,16 +31,7 @@ fun CardBrowserSortMenu(
     onSortSelected: (AnkiCardSort) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val options = buildList {
-        add(SortOptionModel(AnkiCardSort.Default, AnkiCardSort.Default.displayLabel()))
-        listOf(
-            AnkiCardSort.Due,
-            AnkiCardSort.Created,
-            AnkiCardSort.Modified,
-            AnkiCardSort.Reps,
-            AnkiCardSort.Lapses
-        ).filter(capabilities.sorts::contains).forEach { add(SortOptionModel(it, it.displayLabel())) }
-    }
+    val options = sortOptions(capabilities)
     var expanded by remember { mutableStateOf(false) }
     Box(modifier = modifier) {
         TextButton(

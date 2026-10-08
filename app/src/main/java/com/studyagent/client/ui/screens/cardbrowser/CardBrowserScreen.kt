@@ -114,7 +114,7 @@ fun CardBrowserScreen(
             ) {
                 SearchField(
                     value = state.query.searchText,
-                    enabled = state.capabilities.textSearch,
+                    enabled = state.capabilities.canSearchText,
                     onValueChange = viewModel::setSearchText,
                     onClear = { viewModel.setSearchText("") }
                 )
@@ -328,6 +328,14 @@ private fun AnkiError.browserMessage(): String = when (this) {
     is AnkiError.ProviderUnavailable -> "The Anki integration provider is not reachable. Open Anki and retry."
     is AnkiError.CollectionUnavailable -> "The Anki collection is not available right now."
     is AnkiError.BackendUnavailable -> "The selected Anki backend is not available right now."
+    is AnkiError.DeckNotFound -> "This deck no longer exists in the Anki collection."
+    is AnkiError.UnsupportedQueryFeature ->
+        "This Anki backend cannot honour one part of this search. Remove that filter or sort to continue."
+    is AnkiError.InvalidQuery -> "This search is not valid for the selected Anki backend."
+    is AnkiError.InvalidCursor -> "The next page no longer matches this search. Refresh to start again."
+    is AnkiError.TransientFailure -> "Anki could not answer this card query right now. Please retry."
+    is AnkiError.DataIntegrityFailure ->
+        "The backend returned card data the app could not interpret safely."
     is AnkiError.UnsupportedAction -> "This backend does not support the requested browse feature."
     is AnkiError.QueryFailure -> "Anki could not answer this card query. Please retry."
     is AnkiError.MalformedResponse -> "The backend returned card data the app could not interpret."

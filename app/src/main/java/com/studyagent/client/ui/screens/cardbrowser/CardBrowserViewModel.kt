@@ -5,12 +5,17 @@ import androidx.lifecycle.viewModelScope
 import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiCapabilities
+import com.studyagent.client.core.anki.AnkiCardFilters
 import com.studyagent.client.core.anki.AnkiCardPage
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiCardScope
+import com.studyagent.client.core.anki.AnkiCardSort
 import com.studyagent.client.core.anki.AnkiError
-import com.studyagent.client.core.anki.AnkiResult
+import com.studyagent.client.core.anki.AnkiPageCursor
 import com.studyagent.client.core.anki.AnkiPageRequest
-import com.studyagent.client.core.anki.unsupportedFeature
+import com.studyagent.client.core.anki.AnkiResult
+import com.studyagent.client.core.anki.pageIdentityError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -18,8 +23,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -31,34 +36,47 @@ sealed interface CardBrowserEvent {
 }
 
 /**
- * Owns one backend-bound browser query. Search is debounced; every query change invalidates its
- * cursor and cancels prior work. A one-at-a-time request mutex also prevents a backend that ignores
- * cancellation from receiving overlapping page requests. Generation + backend + query + cursor
- * checks remain the final authority before a response can update state.
+ * Owns one backend-bound browser query (§73).
+ *
+ * What it may do: build the neutral query from user selections, submit it, store returned items and
+ * the returned cursor, request the next page, and discard stale results.
+ *
+ * What it must never do: reinterpret backend query semantics, apply an unsupported global filter
+ * locally, re-sort an already loaded page, construct or parse a cursor, or treat cancellation as a
+ * user-visible error. Every query change (scope, search, filters, sort, refresh, backend switch,
+ * collection change) invalidates the cursor and starts at page one.
  */
 class CardBrowserViewModel(
     initialBackend: AnkiBackend,
     deckId: String? = null,
     private val pageSize: Int = AnkiPageRequest.DEFAULT_LIMIT,
-    private val searchDebounceMs: Long = SEARCH_DEBOUNCE_MS
+    private val searchDebounceMs: Long = SEARCH_DEBOUNCE_MS,
+    /** §46 — answer preview is a *UI policy*, so it is not part of the backend query contract. */
+    private val answerPreviewEnabled: Boolean = ANSWER_PREVIEW_POLICY
 ) : ViewModel() {
     private data class BackendSnapshot(
         val availability: AnkiAvailability,
-        val capabilities: com.studyagent.client.core.anki.AnkiCapabilities
+        val capabilities: AnkiCapabilities
     )
 
     private data class RequestToken(
         val backendId: AnkiBackendId,
         val generation: Long,
         val query: CardBrowserQueryUi,
-        val cursor: String?
+        val cursor: AnkiPageCursor?
     )
 
     private var backend: AnkiBackend = initialBackend
     private var backendSnapshot = BackendSnapshot(backend.availability.value, backend.capabilities.value)
-    private var query = CardBrowserQueryUi(deckId = deckId)
+    private var query = deckId?.let { CardBrowserQueryUi.forDeck(it) } ?: CardBrowserQueryUi()
     private var generation = 0L
-    private var nextCursor: String? = null
+    private var nextCursor: AnkiPageCursor? = null
+
+    /**
+     * §56 — the collection identity the loaded rows came from. A page that reports a different
+     * collection is not appended; paging restarts instead of mixing two collections together.
+     */
+    private var loadedCollectionKey: String? = null
     private var backendObservation: Job? = null
     private var firstPageJob: Job? = null
     private var appendPageJob: Job? = null
@@ -74,7 +92,7 @@ class CardBrowserViewModel(
     init {
         require(deckId == null || deckId.isNotBlank())
         require(pageSize in AnkiPageRequest.MIN_LIMIT..AnkiPageRequest.MAX_LIMIT)
-        require(searchDebounceMs in MIN_SEARCH_DEBOUNCE_MS..MAX_SEARCH_DEBOUNCE_MS)
+        require(searchDebounceMs >= 0)
         observeBackend(backend)
         restartQuery(debounceMs = 0L)
     }
@@ -86,30 +104,36 @@ class CardBrowserViewModel(
         restartQuery(debounceMs = searchDebounceMs)
     }
 
-    /** Filter changes keep text/sort and always restart from the first page. */
-    fun setFilters(filters: com.studyagent.client.core.anki.AnkiCardFilters) {
-        if (query.filters == filters) return
-        query = query.copy(filters = filters.copy(
-            flags = filters.flags.toSet(),
-            tags = filters.tags.toSet(),
-            cardTypes = filters.cardTypes.toSet()
-        ))
+    /**
+     * Scope changes are new query identities (§57): AllCards ⇄ Deck, and `includeChildren`
+     * true ⇄ false. The UI only offers a scope the active backend advertises (§21).
+     */
+    fun setScope(scope: AnkiCardScope) {
+        if (query.scope == scope) return
+        query = query.copy(scope = scope)
         restartQuery(debounceMs = 0L)
     }
 
-    /** Sort changes keep search/filters and always restart from the first page. */
-    fun setSort(sort: com.studyagent.client.core.anki.AnkiCardSort) {
+    /** Filter changes keep text/sort and always restart from the first page (§59). */
+    fun setFilters(filters: AnkiCardFilters) {
+        if (query.filters == filters) return
+        query = query.copy(filters = filters.canonical())
+        restartQuery(debounceMs = 0L)
+    }
+
+    /** Sort changes keep search/filters and always restart from the first page (§60). */
+    fun setSort(sort: AnkiCardSort) {
         if (query.sort == sort) return
         query = query.copy(sort = sort)
         restartQuery(debounceMs = 0L)
     }
 
-    /** Read retry preserves search, filters, sort, deck scope and the current backend. */
+    /** Read retry preserves scope, search, filters and sort, and starts a new first page. */
     fun refresh() = restartQuery(debounceMs = 0L)
 
     /**
      * Load the next bounded page once. Stable card identity suppresses overlap/duplicate rows;
-     * identical-looking questions with distinct AnkiCardRefs are retained.
+     * identical-looking questions with distinct AnkiCardRefs are retained (§39).
      */
     fun loadMore() {
         val current = _uiState.value as? CardBrowserUiState.Ready ?: return
@@ -124,6 +148,7 @@ class CardBrowserViewModel(
             when (result) {
                 is AnkiResult.Failure -> {
                     val state = _uiState.value as? CardBrowserUiState.Ready ?: return@launch
+                    // §54/INV-15-Q19: cancellation is not a failure, so it never lands here.
                     _uiState.value = state.copy(isLoadingMore = false, appendError = result.error)
                 }
                 is AnkiResult.Success -> publishNextPage(result.value, token, current)
@@ -132,8 +157,8 @@ class CardBrowserViewModel(
     }
 
     /**
-     * Explicit backend rebinding for the future browser backend selector. It does not touch or
-     * replace any StudySession lock; this ViewModel owns browse reads only.
+     * §55 — a page or cursor from backend A is meaningless for backend B. Switching invalidates the
+     * rows, the cursor, the totals and any in-flight request, then starts a first-page query.
      */
     fun switchBackend(next: AnkiBackend) {
         if (next === backend) return
@@ -142,7 +167,7 @@ class CardBrowserViewModel(
         backend = next
         backendSnapshot = BackendSnapshot(next.availability.value, next.capabilities.value)
         generation += 1
-        nextCursor = null
+        invalidatePaging()
         observeBackend(next)
         restartQuery(debounceMs = 0L)
     }
@@ -168,9 +193,9 @@ class CardBrowserViewModel(
 
     private fun restartQuery(debounceMs: Long) {
         generation += 1
-        nextCursor = null
+        invalidatePaging()
         cancelRequests()
-        when (val unavailable = unavailableFeature()) {
+        when (val unavailable = unavailableReason()) {
             null -> {
                 _uiState.value = CardBrowserUiState.Loading(query, backendSnapshot.capabilities.cardBrowser)
                 val token = RequestToken(backend.id, generation, query, cursor = null)
@@ -204,20 +229,33 @@ class CardBrowserViewModel(
                     capabilities = backendSnapshot.capabilities.cardBrowser,
                     unsupportedFeature = unavailable.feature
                 )
+            is UnavailableReason.Invalid ->
+                _uiState.value = CardBrowserUiState.Error(
+                    query, backend.id, unavailable.error, backendSnapshot.capabilities.cardBrowser
+                )
         }
     }
 
     private sealed interface UnavailableReason {
         data class NotReady(val availability: AnkiAvailability) : UnavailableReason
         data class Unsupported(val feature: String) : UnavailableReason
+        data class Invalid(val error: AnkiError) : UnavailableReason
     }
 
-    private fun unavailableFeature(): UnavailableReason? {
+    /**
+     * §63 preflight with the backend's own advertised capabilities. This is UI convenience only —
+     * the backend still validates every request; the gate exists so a user never taps a control the
+     * backend would refuse.
+     */
+    private fun unavailableReason(): UnavailableReason? {
         val availability = backendSnapshot.availability
         if (availability !is AnkiAvailability.Ready) return UnavailableReason.NotReady(availability)
         val domainQuery = CardBrowserQueryMapper.toDomain(query, pageSize)
-        val unsupported = domainQuery.unsupportedFeature(backendSnapshot.capabilities.cardBrowser)
-        return unsupported?.let(UnavailableReason::Unsupported)
+        return when (val error = domainQuery.preflightError(backendSnapshot.capabilities.cardBrowser)) {
+            null -> null
+            is AnkiError.UnsupportedQueryFeature -> UnavailableReason.Unsupported(error.feature)
+            else -> UnavailableReason.Invalid(error)
+        }
     }
 
     private suspend fun execute(
@@ -227,10 +265,15 @@ class CardBrowserViewModel(
         return try {
             requestMutex.withLock {
                 if (!isCurrent(token, targetBackend)) return@withLock null
-                val request = CardBrowserQueryMapper.toDomain(query = token.query, pageSize = pageSize, cursor = token.cursor)
+                val request = CardBrowserQueryMapper.toDomain(
+                    query = token.query,
+                    pageSize = pageSize,
+                    cursor = token.cursor
+                )
                 targetBackend.browseCards(request)
-            } ?: return AnkiResult.Failure(AnkiError.InvalidRequest("stale_card_browser_request"))
+            } ?: return AnkiResult.Failure(AnkiError.InvalidQuery(detail = "stale_card_browser_request"))
         } catch (cancellation: CancellationException) {
+            // §54 — obsolete queries are cancelled silently; cancellation is never a query error.
             throw cancellation
         } catch (failure: Throwable) {
             AnkiResult.Failure(AnkiError.Unknown(cause = failure::class.java.simpleName))
@@ -240,13 +283,14 @@ class CardBrowserViewModel(
     private fun publishFirstPage(page: AnkiCardPage, token: RequestToken) {
         if (page.items.size > pageSize) {
             _uiState.value = CardBrowserUiState.Error(
-                query, backend.id, AnkiError.MalformedResponse("card_page_over_limit"),
+                query, backend.id, AnkiError.DataIntegrityFailure("card_page_over_limit"),
                 backendSnapshot.capabilities.cardBrowser
             )
             return
         }
         val rows = rowsFor(page, token) ?: return
-        val total = page.totalCount.takeIf { backendSnapshot.capabilities.cardBrowser.totalCount }
+        loadedCollectionKey = page.items.firstOrNull()?.cardRef?.collectionKey
+        val total = page.totalCount.takeIf { backendSnapshot.capabilities.cardBrowser.supportsTotalCount }
         if (rows.isEmpty()) {
             _uiState.value = CardBrowserUiState.Empty(
                 query = query,
@@ -281,12 +325,20 @@ class CardBrowserViewModel(
             val current = _uiState.value as? CardBrowserUiState.Ready ?: return
             _uiState.value = current.copy(
                 isLoadingMore = false,
-                appendError = AnkiError.MalformedResponse("card_page_over_limit")
+                appendError = AnkiError.DataIntegrityFailure("card_page_over_limit")
             )
             return
         }
+        // §56 — the collection identity moved between pages: the old paging sequence is invalid.
+        val pageCollectionKey = page.items.firstOrNull()?.cardRef?.collectionKey
+        if (pageCollectionKey != null && loadedCollectionKey != null &&
+            pageCollectionKey != loadedCollectionKey
+        ) {
+            restartQuery(debounceMs = 0L)
+            return
+        }
         val rows = rowsFor(page, token) ?: return
-        val byRef = LinkedHashMap<com.studyagent.client.core.anki.AnkiCardRef, CardBrowserRow>()
+        val byRef = LinkedHashMap<AnkiCardRef, CardBrowserRow>()
         previous.rows.forEach { byRef[it.cardRef] = it }
         rows.forEach { byRef.putIfAbsent(it.cardRef, it) }
         val next = page.nextCursor?.takeUnless { it == token.cursor }
@@ -297,34 +349,36 @@ class CardBrowserViewModel(
             capabilities = backendSnapshot.capabilities.cardBrowser,
             hasMore = next != null && page.items.isNotEmpty(),
             isLoadingMore = false,
-            totalCount = page.totalCount.takeIf { backendSnapshot.capabilities.cardBrowser.totalCount }
+            totalCount = page.totalCount.takeIf { backendSnapshot.capabilities.cardBrowser.supportsTotalCount }
                 ?: previous.totalCount
         )
     }
 
+    /**
+     * Defensive row validation (§39/§43/§44): a page that contains a foreign backend reference, a
+     * row without usable identity or a row outside the requested deck scope fails as a data
+     * integrity error instead of being published with invented identity.
+     */
     private fun rowsFor(page: AnkiCardPage, token: RequestToken): List<CardBrowserRow>? {
         val seen = LinkedHashSet<AnkiCardRef>()
         val rows = ArrayList<CardBrowserRow>(page.items.size)
+        // Only an exact-deck scope can be checked here; a child-inclusive scope is verified by the
+        // backend, which owns the authoritative deck hierarchy (§5/§66). The identity rules
+        // themselves are shared with the backend (single source of truth, §44).
+        val requiredDeckId = (token.query.scope as? AnkiCardScope.Deck)
+            ?.takeIf { !it.includeChildren }
+            ?.deckId
         for (item in page.items) {
-            if (item.cardRef.backendId != token.backendId) {
+            val detail = item.pageIdentityError(token.backendId, requiredDeckId)
+            if (detail != null) {
                 _uiState.value = CardBrowserUiState.Error(
-                    query, backend.id, AnkiError.MalformedResponse("foreign_card_ref"),
-                    backendSnapshot.capabilities.cardBrowser
-                )
-                return null
-            }
-            if (token.query.deckId != null && item.deckRef?.deckId != token.query.deckId) {
-                _uiState.value = CardBrowserUiState.Error(
-                    query, backend.id, AnkiError.MalformedResponse("card_deck_scope_mismatch"),
+                    query, backend.id, AnkiError.DataIntegrityFailure(detail),
                     backendSnapshot.capabilities.cardBrowser
                 )
                 return null
             }
             if (seen.add(item.cardRef)) {
-                rows += CardBrowserRow.from(
-                    item = item,
-                    answerPreviewAllowed = backendSnapshot.capabilities.cardBrowser.answerPreview
-                )
+                rows += CardBrowserRow.from(item = item, answerPreviewAllowed = answerPreviewEnabled)
             }
         }
         return rows
@@ -336,6 +390,12 @@ class CardBrowserViewModel(
             targetBackend.availability.value == backendSnapshot.availability &&
             targetBackend.capabilities.value == backendSnapshot.capabilities
 
+    /** §55/§56/§58-§60 — every invalidation drops the cursor and the collection binding with it. */
+    private fun invalidatePaging() {
+        nextCursor = null
+        loadedCollectionKey = null
+    }
+
     private fun cancelRequests() {
         firstPageJob?.cancel()
         appendPageJob?.cancel()
@@ -345,7 +405,11 @@ class CardBrowserViewModel(
 
     companion object {
         const val SEARCH_DEBOUNCE_MS: Long = 300L
-        private const val MIN_SEARCH_DEBOUNCE_MS: Long = 250L
-        private const val MAX_SEARCH_DEBOUNCE_MS: Long = 400L
+
+        /**
+         * §46 — whether rows show an answer preview is a display policy, not a backend capability:
+         * the backend does not need a second query contract for it.
+         */
+        const val ANSWER_PREVIEW_POLICY: Boolean = true
     }
 }
