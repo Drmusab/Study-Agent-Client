@@ -163,6 +163,48 @@ class StudySessionMachineRepository(
         )
     }
 
+    /**
+     * GATE 13 §17 — the app's one entry point for a reviewer action (flag/bury/suspend).
+     *
+     * Correlation and policy stay below: the event carries the user's intent, the reducer resolves it
+     * against the authoritative turn, and the coordinator performs the durable transaction. This
+     * method therefore has no branch that could mutate a card by itself (AUDIT 3).
+     */
+    override suspend fun requestReviewerAction(action: com.studyagent.client.core.anki.ReviewerAction) {
+        val state = machine.machineState.value
+        val turn = state.anki?.turn ?: return
+        machine.dispatch(
+            AnkiStudyEvent.ReviewerActionRequested(
+                action = action,
+                epoch = state.epoch,
+                turnId = turn.turnId,
+                cardId = state.currentCardId
+            )
+        )
+    }
+
+    /**
+     * GATE 13 §13 — retry the action the ledger proved *not* applied. The action id comes from the
+     * machine's own projection, so this can never retarget the retry at a different action or card
+     * (INV-13-11), and the reducer rejects it unless the durable status still permits a retry.
+     */
+    override suspend fun retryReviewerAction() {
+        val state = machine.machineState.value
+        val action = state.anki?.reviewerAction ?: return
+        machine.dispatch(AnkiStudyEvent.RetryReviewerAction(state.epoch, action.actionId))
+    }
+
+    /**
+     * GATE 13 §27 — ask for read-only reconciliation of an unresolved action. It dispatches the same
+     * identity the ledger holds; the coordinator's recovery path is read-only by contract, so this
+     * can never become a replay (INV-13-12).
+     */
+    override suspend fun recoverReviewerAction() {
+        val state = machine.machineState.value
+        val action = state.anki?.reviewerAction ?: return
+        machine.dispatch(AnkiStudyEvent.RecoverReviewerAction(state.epoch, action.actionId))
+    }
+
     override suspend fun startStudy(deckName: String?, mode: String, config: com.studyagent.client.core.models.SessionStartConfig?) {
         startOrBlock(deckName, mode, config)
     }

@@ -235,7 +235,9 @@ fun SmartStartCard(
     modifier: Modifier = Modifier
 ) {
     val action = state.primaryAction
-    val enabled = action == PrimaryAction.START || action == PrimaryAction.CONNECT
+    val enabled = action == PrimaryAction.START ||
+        action == PrimaryAction.CONNECT ||
+        action == PrimaryAction.START_LOCAL_ANKI
     val loading = action == PrimaryAction.STARTING || action == PrimaryAction.CONNECTING
     val label = when (action) {
         PrimaryAction.CONNECT -> "Connect"
@@ -244,9 +246,12 @@ fun SmartStartCard(
         PrimaryAction.STARTING -> "Starting…"
         PrimaryAction.RESUME_STUDY -> "Resume Study"
         PrimaryAction.RESUME_SESSION -> "Resume Session"
+        // GATE 13 — honest about *where* the session runs: the phone's own Anki collection.
+        PrimaryAction.START_LOCAL_ANKI -> "Study on this phone"
     }
     val subtitle = when (action) {
         PrimaryAction.START, PrimaryAction.STARTING -> state.startSummary.subtitle.ifBlank { null }
+        PrimaryAction.START_LOCAL_ANKI -> "AnkiDroid is ready — review this deck without a PC agent."
         PrimaryAction.CONNECT, PrimaryAction.CONNECTING -> "Connect to your PC Study Agent to begin."
         else -> null
     }
@@ -273,6 +278,7 @@ fun SmartStartCard(
                     when (action) {
                         PrimaryAction.CONNECT -> onConnect()
                         PrimaryAction.START -> onStart()
+                        PrimaryAction.START_LOCAL_ANKI -> onStart()
                         else -> Unit
                     }
                 },

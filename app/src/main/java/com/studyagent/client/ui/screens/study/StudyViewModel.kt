@@ -7,6 +7,7 @@ import com.studyagent.client.core.audio.AudioRouteManager
 import com.studyagent.client.core.audio.EffectiveStudyAudioRoute
 import com.studyagent.client.core.audio.StudyAudioAttention
 import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
+import com.studyagent.client.core.anki.ReviewerAction
 import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.models.StudySession
@@ -116,6 +117,27 @@ class StudyViewModel(
 
     fun onAnswerRenderFallback(reason: String) {
         viewModelScope.launch { studySessionRepository.reportAnswerRenderFallback(reason) }
+    }
+
+    /**
+     * GATE 13 — a reviewer action the user picked in the card-action menu.
+     *
+     * Intent only: the repository correlates it with the authoritative turn and the reducer's policy
+     * decides whether anything is dispatched (a blocked request changes no state), so the UI can
+     * never mutate a card (§17/AUDIT 3).
+     */
+    fun onReviewerAction(action: ReviewerAction) {
+        viewModelScope.launch { studySessionRepository.requestReviewerAction(action) }
+    }
+
+    /** §13 — retry the *same* action identity after non-application. Never a new action. */
+    fun onRetryReviewerAction() {
+        viewModelScope.launch { studySessionRepository.retryReviewerAction() }
+    }
+
+    /** §27 — ask for a read-only reconciliation of an unproven action. Never a replay. */
+    fun onRecoverReviewerAction() {
+        viewModelScope.launch { studySessionRepository.recoverReviewerAction() }
     }
 
     fun onRepeatQuestion() {

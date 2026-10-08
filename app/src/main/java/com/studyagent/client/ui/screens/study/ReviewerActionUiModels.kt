@@ -47,6 +47,20 @@ object ReviewerActionCopy {
     const val RETRY = "Try again"
     const val VERIFY = "Check in AnkiDroid"
 
+    /** Spinner semantics while a durable action is being applied. */
+    const val SAVING = "Applying a card action"
+
+    /** Marks the flag the backend currently reports (never "applied successfully"). */
+    const val FLAG_CURRENT = "current"
+
+    /** The chooser's one-line explanation, including what the backend says right now. */
+    fun flagChooserHint(currentFlag: AnkiFlag?): String = when (currentFlag) {
+        null -> "Anki did not report this card's flag. Choosing a value sets it."
+        AnkiFlag.NONE -> "This card has no flag."
+        AnkiFlag.UNKNOWN -> "This card carries a flag this app cannot name. Choosing a value replaces it."
+        else -> "This card is marked ${flagLabel(currentFlag)}."
+    }
+
     const val TAG_MENU_BUTTON = "anki_card_actions_button"
     const val TAG_MENU = "anki_card_actions_menu"
     const val TAG_FLAG_ITEM = "anki_action_flag"
@@ -61,6 +75,27 @@ object ReviewerActionCopy {
         ReviewerActionKind.SUSPEND -> TAG_SUSPEND_ITEM
     }
 
+    /** One tag per flag *value*, so a UI test can pick a colour without depending on a label. */
+    fun flagChoiceTag(flag: AnkiFlag): String = "${TAG_FLAG_ITEM}_${flag.name.lowercase()}"
+
+    /**
+     * The flags a user may actually set: the eight named values plus [AnkiFlag.NONE] (clear it).
+     *
+     * [AnkiFlag.UNKNOWN] is deliberately absent. It means "this build could not name the backend's
+     * flag" — a fact about a *read*, not something a user can write, and
+     * [ReviewerAction.SetFlag] rejects it at construction.
+     */
+    val SETTABLE_FLAGS: List<AnkiFlag> = listOf(
+        AnkiFlag.NONE,
+        AnkiFlag.RED,
+        AnkiFlag.ORANGE,
+        AnkiFlag.GREEN,
+        AnkiFlag.BLUE,
+        AnkiFlag.PINK,
+        AnkiFlag.TURQUOISE,
+        AnkiFlag.PURPLE
+    )
+
     /**
      * §22 — a flag is never identified by colour alone. The menu item says which flag it sets, and
      * the flag's own name travels in the accessibility description for every flag value.
@@ -68,8 +103,34 @@ object ReviewerActionCopy {
     fun flagLabel(flag: AnkiFlag): String = when (flag) {
         AnkiFlag.NONE -> FLAG_NONE
         AnkiFlag.UNKNOWN -> "Flag (unknown)"
-        else -> "Flag ${flag.name.lowercase().replaceFirstChar { it.uppercase() }}"
+        else -> "Flag ${flagShortName(flag)}"
     }
+
+    /**
+     * The *menu row* label for a kind.
+     *
+     * A flag row cannot name one flag value: the row opens the chooser instead, and the row's label
+     * only says where the card is now ("Flag: Blue", or plain "Flag" when the backend reports none or
+     * does not report at all).
+     */
+    fun menuItemLabel(kind: ReviewerActionKind, currentFlag: AnkiFlag? = null): String = when (kind) {
+        ReviewerActionKind.FLAG -> when (currentFlag) {
+            null, AnkiFlag.NONE -> FLAG
+            else -> "$FLAG: ${flagShortName(currentFlag)}"
+        }
+        ReviewerActionKind.BURY -> BURY
+        ReviewerActionKind.SUSPEND -> SUSPEND
+    }
+
+    /** The flag's own name, without the "Flag " prefix (chooser rows and menu labels). */
+    fun flagShortName(flag: AnkiFlag): String = when (flag) {
+        AnkiFlag.NONE -> FLAG_NONE
+        AnkiFlag.UNKNOWN -> "Unknown"
+        else -> flag.name.lowercase().replaceFirstChar { it.uppercase() }
+    }
+
+    /** The chooser heading, so a colour row is never mistaken for the whole action. */
+    const val FLAG_CHOOSER_TITLE = "Flag this card"
 
     fun actionLabel(action: ReviewerAction): String = when (action) {
         is ReviewerAction.SetFlag -> flagLabel(action.flag)
@@ -129,15 +190,37 @@ data class ReviewerActionItemUi(
     val tag: String
 )
 
+/**
+ * One selectable flag value in the menu's flag chooser.
+ *
+ * [selected] mirrors the flag the backend currently reports ([AnswerReviewModel.currentFlag]); it
+ * says *where the card is*, never that a SetFlag transaction succeeded.
+ */
+data class ReviewerActionFlagChoiceUi(
+    val flag: AnkiFlag,
+    val label: String,
+    val selected: Boolean,
+    val enabled: Boolean,
+    val tag: String
+)
+
 /** Presentation state of the action menu. */
 sealed interface ReviewerActionMenuUi {
     /** No action is available for this turn (capability set empty, or no turn). */
     data object Hidden : ReviewerActionMenuUi
 
-    /** The menu may be opened; [busy] while one action is being applied. */
+    /**
+     * The menu may be opened. [canStartNewAction] is false whenever a durable action record exists
+     * (`Saving` / `RetryAvailable` / `VerificationRequired`): while one logical action is unfinished
+     * the turn has no free mutation slot (§15/§22), so every row is disabled and the status line
+     * offers the only legal next step (retry the same identity, or reconcile it).
+     */
     data class Available(
         val items: List<ReviewerActionItemUi>,
-        val busy: Boolean
+        val busy: Boolean,
+        val canStartNewAction: Boolean,
+        val flagChoices: List<ReviewerActionFlagChoiceUi> = emptyList(),
+        val currentFlag: AnkiFlag? = null
     ) : ReviewerActionMenuUi
 
     companion object {
@@ -145,7 +228,8 @@ sealed interface ReviewerActionMenuUi {
             if (!model.reviewerActionsEnabled || model.availableReviewerActionKinds.isEmpty()) return Hidden
             val state = model.reviewerActionState
             val busy = state is ReviewerActionUiState.Saving
-            val blocked = state is ReviewerActionUiState.VerificationRequired
+            // Idle is the only projection with no durable action behind it (§7 mapping).
+            val canStartNewAction = state is ReviewerActionUiState.Idle
             val items = model.availableReviewerActionKinds.map { kind ->
                 val action = when (kind) {
                     ReviewerActionKind.FLAG -> ReviewerAction.SetFlag(AnkiFlag.NONE)
@@ -154,15 +238,36 @@ sealed interface ReviewerActionMenuUi {
                 }
                 ReviewerActionItemUi(
                     kind = kind,
-                    label = ReviewerActionCopy.actionLabel(action),
+                    label = ReviewerActionCopy.menuItemLabel(kind, model.currentFlag),
                     description = ReviewerActionCopy.actionDescription(kind),
                     // bury/suspend leave the active review flow; the user must confirm.
                     requiresConfirmation = action.invalidatesCurrentTurn,
-                    enabled = !busy && !blocked,
+                    enabled = canStartNewAction,
                     tag = ReviewerActionCopy.itemTag(kind)
                 )
             }
-            return Available(items = items, busy = busy)
+            // A flag is a value, not a single command: the menu offers every settable value, and the
+            // chooser disappears entirely when this backend cannot write flags (INV-13-16).
+            val flagChoices = if (ReviewerActionKind.FLAG in model.availableReviewerActionKinds) {
+                ReviewerActionCopy.SETTABLE_FLAGS.map { flag ->
+                    ReviewerActionFlagChoiceUi(
+                        flag = flag,
+                        label = ReviewerActionCopy.flagLabel(flag),
+                        selected = model.currentFlag == flag,
+                        enabled = canStartNewAction,
+                        tag = ReviewerActionCopy.flagChoiceTag(flag)
+                    )
+                }
+            } else {
+                emptyList()
+            }
+            return Available(
+                items = items,
+                busy = busy,
+                canStartNewAction = canStartNewAction,
+                flagChoices = flagChoices,
+                currentFlag = model.currentFlag
+            )
         }
     }
 }
@@ -171,10 +276,30 @@ sealed interface ReviewerActionMenuUi {
 fun reviewerActionStatusOf(model: AnswerReviewModel): ReviewerActionStatusUi? =
     reviewerActionStatusOf(model.reviewerActionState, model.reviewerActionRefusal)
 
+/**
+ * The only step the durable projection permits right now, if any.
+ *
+ * It is derived from the same [ReviewerActionUiState] the message is: `RetryAvailable` is the one
+ * state where the *same* action identity may be resubmitted (§13), and `VerificationRequired` is the
+ * one state where a read-only reconciliation may be asked for (§27). Everything else offers nothing —
+ * so the menu can never grow a second way to mutate the card.
+ */
+enum class ReviewerActionStatusAction {
+    /** Nothing to do but read the message. */
+    NONE,
+
+    /** `RETRY_ALLOWED` (or a restored `PREPARED`) — retry the same [com.studyagent.client.core.anki.ReviewerActionId]. */
+    RETRY,
+
+    /** `AMBIGUOUS` / restored `SUBMITTING` — ask for read-only reconciliation, never a retry. */
+    VERIFY
+}
+
 /** The one-line status under the menu: why an action is refused, retired, or unconfirmed. */
 data class ReviewerActionStatusUi(
     val message: String,
     val isWarning: Boolean,
+    val action: ReviewerActionStatusAction = ReviewerActionStatusAction.NONE,
     val tag: String = ReviewerActionCopy.TAG_STATUS
 )
 
@@ -196,12 +321,14 @@ fun reviewerActionStatusOf(
     is ReviewerActionUiState.RetryAvailable -> ReviewerActionStatusUi(
         message = "Anki did not apply ${ReviewerActionCopy.actionLabel(state.action)}. " +
             "Nothing was changed; you can try it again.",
-        isWarning = true
+        isWarning = true,
+        action = ReviewerActionStatusAction.RETRY
     )
 
     is ReviewerActionUiState.VerificationRequired -> ReviewerActionStatusUi(
         message = "Study-Agent could not confirm whether ${ReviewerActionCopy.actionLabel(state.action)} " +
             "was applied in Anki, so it will not repeat it.",
-        isWarning = true
+        isWarning = true,
+        action = ReviewerActionStatusAction.VERIFY
     )
 }

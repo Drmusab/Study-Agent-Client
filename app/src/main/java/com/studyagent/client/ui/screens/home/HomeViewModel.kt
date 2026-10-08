@@ -10,13 +10,16 @@ import com.studyagent.client.core.models.StatsRange
 import com.studyagent.client.core.models.StudyMode
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.data.repository.CapabilityStore
+import com.studyagent.client.data.repository.AnkiLocalStudyStarter
 import com.studyagent.client.data.repository.ConnectionRepository
 import com.studyagent.client.data.repository.DashboardRepository
 import com.studyagent.client.data.repository.StudyControlRepository
 import com.studyagent.client.data.repository.StudySessionRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -38,7 +41,13 @@ class HomeViewModel(
     private val dashboardRepository: DashboardRepository,
     private val studyControlRepository: StudyControlRepository,
     private val studySessionRepository: StudySessionRepository,
-    studyAudioRouteCoordinator: StudyAudioRouteCoordinator? = null
+    studyAudioRouteCoordinator: StudyAudioRouteCoordinator? = null,
+    /**
+     * GATE 13 STEP 32.2 — the app's local-Anki session-start site. Optional so a headless ViewModel
+     * (tests, or a build without the AnkiDroid backend) simply has no local start to offer; the
+     * dashboard then keeps the existing PC-agent behaviour.
+     */
+    private val ankiLocalStudyStarter: AnkiLocalStudyStarter? = null
 ) : ViewModel() {
 
     val connectionState: StateFlow<com.studyagent.client.core.models.ConnectionState> =
@@ -67,6 +76,35 @@ class HomeViewModel(
         studyControlRepository.localConfig
     ) { draft, server, local -> draft ?: server ?: local }
 
+    /**
+     * GATE 13 — whether this phone can start a review on its own Anki collection right now.
+     *
+     * The starter owns the resolution (one ready on-device backend), so the dashboard never inspects
+     * AnkiDroid health, provider specs or permissions itself.
+     */
+    private val localAnkiReadyFlow: Flow<Boolean> =
+        ankiLocalStudyStarter?.localStudyReady ?: flowOf(false)
+
+    /** The local start's outcome, for the one-shot navigation decision in the screen. */
+    private val _localStart = MutableSharedFlow<AnkiLocalStudyStarter.Result>(extraBufferCapacity = 1)
+
+    /**
+     * A local start no longer navigates from [startStudy]'s return value: the deck is validated
+     * against the live collection first, so the screen navigates only once a session really exists.
+     */
+    val localStart: SharedFlow<AnkiLocalStudyStarter.Result> = _localStart.asSharedFlow()
+
+    /**
+     * A refusal is not an error state of the dashboard: it is one honest sentence about why nothing
+     * started, shown until dismissed. Tokens are mapped to copy here so the screen renders a string.
+     */
+    private val _localStartNotice = MutableStateFlow<String?>(null)
+    val localStartNotice: StateFlow<String?> = _localStartNotice.asStateFlow()
+
+    fun dismissLocalStartNotice() {
+        _localStartNotice.value = null
+    }
+
     private val dashboardSnapshotFlow = combine(
         connectionRepository.connectionState,
         capabilityStore.capabilities,
@@ -80,8 +118,9 @@ class HomeViewModel(
         dashboardSnapshotFlow,
         effectiveConfigFlow,
         audioRouteFlow,
-        nowTicker
-    ) { bundle, config, audioRoute, now ->
+        nowTicker,
+        localAnkiReadyFlow
+    ) { bundle, config, audioRoute, now, localAnkiReady ->
         DashboardUiMapper.build(
             connectionState = bundle.connection,
             capabilities = bundle.capabilities,
@@ -90,7 +129,8 @@ class HomeViewModel(
             effectiveConfig = config,
             startRequest = studyControlRepository.currentStartRequest(),
             audioRoute = audioRoute,
-            nowMs = now
+            nowMs = now,
+            localAnkiReady = localAnkiReady
         )
     }.stateIn(
         scope = viewModelScope,
@@ -139,7 +179,13 @@ class HomeViewModel(
     fun startStudy(): Boolean {
         val state = studySessionRepository.studyState.value
         if (state is StudyState.Loading || isSessionActive(state)) return false
-        if (!connectionRepository.connectionState.value.isConnected) return false
+        if (!connectionRepository.connectionState.value.isConnected) {
+            // GATE 13 STEP 32.2 — no PC agent: the phone's own Anki collection is a first-class session
+            // source. `false` here means "nothing to navigate to yet"; the screen navigates when the
+            // start really happened ([localStart]).
+            startLocalAnkiStudy()
+            return false
+        }
         val request = studyControlRepository.currentStartRequest()
         viewModelScope.launch {
             studySessionRepository.startStudy(
@@ -149,6 +195,37 @@ class HomeViewModel(
             )
         }
         return true
+    }
+
+    /**
+     * GATE 13 STEP 32.2 — start a review against this phone's AnkiDroid collection.
+     *
+     * The starter resolves the backend, validates the deck against the live collection, freezes the
+     * session's reviewer-action capabilities and only then dispatches. A refusal dispatches nothing;
+     * the flow is emitted either way so the screen can say what happened instead of navigating into
+     * an empty session.
+     */
+    fun startLocalAnkiStudy() {
+        val starter = ankiLocalStudyStarter ?: return
+        val deckName = studyControlRepository.currentStartRequest().deck
+        viewModelScope.launch {
+            val result = starter.start(AnkiLocalStudyStarter.Options(deckName = deckName))
+            _localStartNotice.value = (result as? AnkiLocalStudyStarter.Result.Refused)?.let {
+                localStartRefusalMessage(it.reason)
+            }
+            _localStart.emit(result)
+        }
+    }
+
+    /** Plain language for a content-free refusal token (kept out of the starter, which has no UI). */
+    private fun localStartRefusalMessage(reason: String): String = when (reason) {
+        AnkiLocalStudyStarter.REASON_DECK_NOT_FOUND ->
+            "That deck is not in this phone's Anki collection. Pick a deck AnkiDroid has."
+        AnkiLocalStudyStarter.REASON_NO_READY_BACKEND, AnkiLocalStudyStarter.REASON_BACKEND_NOT_READY ->
+            "AnkiDroid is not ready to review on this phone yet. Open AnkiDroid once and check its permissions."
+        AnkiLocalStudyStarter.REASON_AMBIGUOUS_BACKEND ->
+            "More than one Anki backend could serve this session, so nothing was started."
+        else -> "The session could not be started on this phone."
     }
 
     private fun isSessionActive(state: StudyState): Boolean = when (state) {
