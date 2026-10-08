@@ -181,7 +181,94 @@ GATE 11–15 regression tests (in full suite):             pass
 Compose/navigation compilation:                         NOT VERIFIED by fallback harness
 ```
 
-The fallback harness compiles Kotlin 2.3/K2 with coroutines-test 1.10.2, not the repository's pinned Gradle toolchain. It excludes Compose and Android navigation, and uses an external, uncommitted lifecycle shim. Its 1,772 passing tests are meaningful regression evidence, not a substitute for Android Gradle/Compose/lint/APK verification. The real provider contract was source-pinned to AnkiDroid v2.24.1; the end-to-end provider behavior still needs a device run.
+The fallback harness compiles Kotlin 2.3/K2 with coroutines-test 1.10.2, not the repository's pinned Gradle toolchain. It now covers the Compose/activity layer through API-shaped stubs (`compose` step) and a committed `androidx.lifecycle` shim, both under `tools/jvm-harness/shims/`. Its 1,772 passing tests are meaningful regression evidence, not a substitute for Android Gradle/Compose/lint/APK verification. The real provider contract was source-pinned to AnkiDroid v2.24.1; the end-to-end provider behavior still needs a device run.
+
+## Compose and activity-layer verification
+
+The gate's earlier position was that the Compose layer could not be verified without Gradle. That was
+too pessimistic in one direction and too generous in the other, so it is replaced by an explicit method
+and its limits.
+
+**Method.** `tools/jvm-harness/bin/build.sh compose` runs two steps:
+
+1. the API-shaped stubs (`tools/jvm-harness/shims/{compose,activity,navigation,lifecycle,buildconfig}`
+   plus a `R` class generated from `app/src/main/res` by `gen-r.py`) are compiled. A stub that does not
+   compile aborts the step as a **harness** defect, so stub breakage can never be mistaken for a pass.
+2. the GATE 16 UI closure (`ui/screens/carddetails/CardDetailsScreen.kt`, the eight
+   `ui/components/anki/*` files it reuses, `ui/components/{StudyAgentTopBar,AppPrimitives}.kt` and
+   `ui/theme/*`) is type-checked against those stubs and `main-out`, with `-Xfriend-paths` so that
+   `internal` visibility behaves as it does under Gradle, where all of `app/src/main/java` is one
+   module. `GATE16_COMPOSE_ALL=1` widens step 2 to every main file that imports a framework symbol.
+
+`tools/check-androidx-imports.py` resolves every `import androidx.*` in the app against
+**version-pinned** androidx api dumps fetched from `api.github.com`
+(`compose/*` → `1.6.0-beta01`, `material3` → `1.2.0-beta02`, `lifecycle` → `2.8.0-beta01`,
+`navigation` → `2.8.0-beta07`); `--selftest` proves the parser rejects fabricated symbols, so a
+"0 unresolved" result means something. `androidx.compose.material.icons.*` is reported UNVERIFIED on
+purpose: there is no usable icon dump to check names against.
+
+**Limits.** There is no Compose compiler plugin in this harness, so `@Composable` calling rules,
+recomposition behaviour, snapshot/`remember` semantics and stability inference are **not** checked —
+only declaration resolution, parameter names/arity and value types. The stubs are hand-written
+approximations of the pinned API: where a stub and the app disagree, the pinned published API decides
+and the *stub* is corrected. Compose is therefore **import-verified against the pinned published API
+and type-checked against API-shaped stubs — not Gradle-verified.** `./gradlew testDebugUnitTest`,
+`lint`, `assembleDebug`, `assembleRelease` and `connectedDebugAndroidTest` remain the arbiter.
+
+### Defects build validation surfaced (all outside GATE 16 domain logic)
+
+Every row was confirmed against an authority outside this repository — AOSP sources, the pinned api
+dump, or the platform jar's own symbol table — before any app file was edited.
+
+| File | Defect | Authority | Fix |
+|---|---|---|---|
+| `di/AppContainer.kt` | five stray lines after the class's closing brace (`rotocolVersion,` …) — a hard syntax error, present in HEAD | Kotlin parser | fragment removed |
+| `di/AppContainer.kt` | `noteGateway = ankiDroidNoteGateway` referenced a container property that was never declared, so nothing constructed the GATE 16 note source gateway | the container interface itself | `ankiDroidNoteGateway` declared and wired to `DefaultAnkiDroidNoteGateway(providerClient = ankiDroidProviderClient)`, matching the sibling card/deck/review gateways |
+| `ui/screens/carddetails/CardDetailsScreen.kt` | `import com.studyagent.client.core.anki.AnkiCardSide`; the enum is declared in `core.render` and every other consumer imports it from there | declaration search | import corrected (GATE 16 file) |
+| `ui/components/anki/AnkiCardWebView.kt` | `blockNetworkImageLoads = true` — no such member; `WebSettings` declares `setBlockNetworkImage` and `setBlockNetworkLoads` | `aosp-mirror` `WebSettings.java` + jar symbol table | `blockNetworkImage = true`; the GATE 08 pin-list assertion in `AnkiRendererIsolationTest` tracks the real member name |
+| `ui/theme/Motion.kt` | `AccessibilityManager.isReduceMotionEnabled` does not exist at any API level (0 hits in AOSP `android14-release`) | `aosp-mirror` `AccessibilityManager.java` | read `Settings.Global.ANIMATOR_DURATION_SCALE == 0f`, the signal androidx itself uses, still fail-closed to `false` |
+| `ui/components/anki/DeckRow.kt` | `role = Role.Button` inside a `semantics { }` block with no `import androidx.compose.ui.semantics.role` | `ui` dump declares it as a top-level extension (`setRole(SemanticsPropertyReceiver, int)`) | import added |
+| 7 files incl. `NoteFieldsSection.kt` | `import androidx.compose.ui.semantics.mergeDescendants` — `mergeDescendants` is a `Modifier.semantics` **parameter**, never an importable symbol | `ui` dump (single occurrence, a method parameter) | imports removed, `.semantics(mergeDescendants = true)` call sites kept |
+| `ui/screens/home/HomeViewModel.kt` | `asStateFlow` / `asSharedFlow` used without their imports | coroutines carve of the pinned jar | imports added |
+| 5 test files + `CardBrowserViewModelTest` | `kotlinx.coroutines.test.ExperimentalCoroutinesApi` (does not exist in the pinned 1.8.1), `UnconfinedTestDispatcher` used as a type, and a `Dispatchers.Main` that was never installed (14 failures) | kotlinx.coroutines 1.8.1 sources | imports/types corrected; `setMain`/`resetMain` added around that class |
+
+### Not fixed: build blockers in other gates' files (owner decision)
+
+These are real compile errors for `compileDebugKotlin`, found by the same sweep, but the correct
+resolution is a design call in the owning gate's territory, so they are reported rather than patched:
+
+- `ui/screens/study/AnkiAnswerReviewSection.kt:196,220` — passes `controller = renderController` to
+  `AnkiCardRenderer`, which declares exactly one signature with no `controller` parameter.
+- `ui/screens/study/AnkiAnswerReviewSection.kt:242` — passes `nightMode = true` to `CleanAnkiCardView`
+  (`text, side, modifier, direction, degraded`); night mode is an `AnkiCardRenderConfig` field.
+- `ui/screens/study/AnkiAnswerReviewSection.kt` (8 sites) and `ui/screens/study/ReviewerActionMenu.kt:97`
+  — `AppColors.brandPrimary` (9 references in total); `AppColors` declares `actionPrimary`/`actionPrimaryStrong` and no
+  `brandPrimary` exists anywhere in `app/src`. Whether the token should be added or the call sites
+  renamed is a design-system decision.
+- `ui/screens/study/StudyScreen.kt:257-260` — uses `RatingCommitUiState` in a `when` subject without
+  importing it from `com.studyagent.client.core.study`.
+
+### Verification result, re-measured after the harness change
+
+```text
+tools/jvm-harness/bin/bootstrap-sandbox.sh (clean sandbox, repo alone)
+  main compile (non-Compose, 242 files)                 0 errors
+  compose compile (GATE 16 closure, 18 + 46 stub files) 0 errors
+  test compile (188 files)                              0 errors
+tools/jvm-harness/bin/run.sh                            160 classes / 1772 tests / 1772 passed / 0 failed
+tools/check-androidx-imports.py --fetch                 25 pinned dumps, 0 fetch failures
+tools/check-androidx-imports.py --selftest              PASS (8 positives, 2 fabricated negatives)
+tools/check-androidx-imports.py (app scan)              3197 imports (1163 androidx), 0 UNRESOLVED
+GATE16_COMPOSE_ALL=1 build.sh compose                   143 residual errors in 67 files — diagnostic only
+git diff --check                                        clean
+```
+
+The 143 residuals are dominated by APIs the stubs deliberately do not model yet (NavigationBar
+colours, `FlowRow`/`ExperimentalLayoutApi`, `ExposedDropdownMenu`, `animateFloat`,
+`togetherWith`, `TextFieldValue` details, icon names). They are **not** claimed to be app defects and
+**not** claimed to be stub gaps case by case; the four cross-gate blockers above are the subset that
+was checked against the app's own declarations and the pinned API. Widening the enforced scope is
+later harness work, not GATE 16 acceptance evidence.
 
 ## Gate decision
 

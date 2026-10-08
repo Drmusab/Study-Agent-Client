@@ -14,8 +14,9 @@ import com.studyagent.client.data.anki.AnkiLibraryRepository
 import com.studyagent.client.ui.screens.library.LibraryUiState
 import com.studyagent.client.ui.screens.library.LibraryViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -61,7 +62,9 @@ class LibraryViewModelTest {
         return Triple(track(LibraryViewModel(backend, repository)), backend, repository)
     }
 
-    private fun installMain(dispatcher: UnconfinedTestDispatcher) = Dispatchers.setMain(dispatcher)
+    // `UnconfinedTestDispatcher(..)` is a factory function, not a type: the created dispatcher is a
+// `TestDispatcher`, which is what `Dispatchers.setMain` accepts.
+private fun installMain(dispatcher: TestDispatcher) = Dispatchers.setMain(dispatcher)
 
     private fun track(viewModel: LibraryViewModel): LibraryViewModel {
         val store = ViewModelStore()
