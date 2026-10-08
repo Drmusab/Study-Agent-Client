@@ -5,6 +5,10 @@ import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiCardPage
+import com.studyagent.client.core.anki.AnkiCardQuery
+import com.studyagent.client.core.anki.normalizeAnkiCardSearchText
+import com.studyagent.client.core.anki.unsupportedFeature
 import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
@@ -101,7 +105,9 @@ class AnkiDroidBackend(
      * evidence path. Absent = reviewer actions are refused truthfully and `bury`/`suspendCards`
      * are not advertised.
      */
-    private val reviewerActionGateway: AnkiDroidReviewerActionGateway? = null
+    private val reviewerActionGateway: AnkiDroidReviewerActionGateway? = null,
+    /** GATE 15 — currently refuses because the pinned public API has no reliable card-list query. */
+    private val cardBrowserGateway: AnkiDroidCardBrowserGateway = UnsupportedAnkiDroidCardBrowserGateway()
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
@@ -304,6 +310,22 @@ class AnkiDroidBackend(
     }
 
     fun lastDeckQueryDiagnostics(): AnkiDeckQueryDiagnostics = deckGateway.lastListingDiagnostics()
+
+    /** GATE 15 — browse only when the live capability contract says every requested field is real. */
+    override suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> {
+        try {
+            usabilityError()?.let { return AnkiResult.Failure(it) }
+            val normalized = query.copy(text = normalizeAnkiCardSearchText(query.text))
+            normalized.unsupportedFeature(_integrationState.value.capabilities.cardBrowser)?.let { feature ->
+                return AnkiResult.Failure(AnkiError.UnsupportedAction(feature))
+            }
+            return cardBrowserGateway.browseCards(normalized)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Throwable) {
+            return AnkiResult.Failure(AnkiError.Unknown(cause = failure::class.java.simpleName))
+        }
+    }
 
     private fun guardDeckRead(): AnkiError? {
         val availability = _integrationState.value.availability

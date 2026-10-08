@@ -201,6 +201,51 @@ enum class AnkiCardQueueState {
     UNKNOWN
 }
 
+/** The backend-reported Anki card type; never inferred from preview text or scheduling arithmetic. */
+enum class AnkiCardType {
+    NEW,
+    LEARNING,
+    REVIEW,
+    RELEARNING,
+    UNKNOWN
+}
+
+/**
+ * Lightweight, read-only projection for Card Browser rows. Text fields are plain-text previews,
+ * never original HTML; the model intentionally has no media or rendered-card dependency.
+ */
+data class AnkiCardListItem(
+    val cardRef: AnkiCardRef,
+    val noteRef: AnkiNoteRef?,
+    val deckRef: AnkiDeckRef?,
+    val deckName: String?,
+    val questionText: String?,
+    val answerText: String?,
+    val tags: List<String> = emptyList(),
+    val flag: AnkiFlag? = null,
+    val type: AnkiCardType? = null,
+    val scheduling: AnkiSchedulingInfo? = null,
+    val suspended: Boolean? = null,
+    val buried: Boolean? = null
+) {
+    init {
+        require(noteRef == null || noteRef.backendId == cardRef.backendId)
+        require(deckRef == null || deckRef.backendId == cardRef.backendId)
+        require(noteRef == null || cardRef.noteId == null || noteRef.noteId == cardRef.noteId)
+        require(deckName == null || deckName.isNotBlank())
+        require(noteRef?.collectionKey == null || cardRef.collectionKey == null ||
+            noteRef.collectionKey == cardRef.collectionKey)
+        require(deckRef?.collectionKey == null || cardRef.collectionKey == null ||
+            deckRef.collectionKey == cardRef.collectionKey)
+        require(listOfNotNull(cardRef.collectionKey, noteRef?.collectionKey, deckRef?.collectionKey)
+            .distinct().size <= 1)
+        require(tags.none(String::isBlank))
+    }
+
+    val noteId: String? get() = noteRef?.noteId ?: cardRef.noteId
+    val deckId: String? get() = deckRef?.deckId
+}
+
 /**
  * Backend-normalized content, without AI evaluation, speech normalization or UI state.
  *

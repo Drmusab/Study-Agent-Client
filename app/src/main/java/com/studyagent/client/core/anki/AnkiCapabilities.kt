@@ -12,6 +12,43 @@ package com.studyagent.client.core.anki
  * as new flags (defaulting to `false`, which is always the safe answer for a
  * backend that cannot do something).
  */
+/**
+ * Fine-grained read-only card-browser capability truth. A backend can browse without search,
+ * expose some filters but not others, and omit exact result counts. [sorts] contains only
+ * non-default sort keys it can order authoritatively; the backend's own default order is implicit.
+ */
+data class AnkiCardBrowserCapabilities(
+    val browse: Boolean = false,
+    val deckScope: Boolean = false,
+    val textSearch: Boolean = false,
+    val flagFilter: Boolean = false,
+    val tagFilter: Boolean = false,
+    val cardTypeFilter: Boolean = false,
+    val suspendedFilter: Boolean = false,
+    val buriedFilter: Boolean = false,
+    val sorts: Set<AnkiCardSort> = emptySet(),
+    val totalCount: Boolean = false,
+    val answerPreview: Boolean = false
+) {
+    init {
+        require(!deckScope || browse) { "Deck scope requires card browsing" }
+        require(!textSearch || browse) { "Text search requires card browsing" }
+        require(!flagFilter || browse) { "Flag filtering requires card browsing" }
+        require(!tagFilter || browse) { "Tag filtering requires card browsing" }
+        require(!cardTypeFilter || browse) { "Card-type filtering requires card browsing" }
+        require(!suspendedFilter || browse) { "Suspended filtering requires card browsing" }
+        require(!buriedFilter || browse) { "Buried filtering requires card browsing" }
+        require(sorts.none { it == AnkiCardSort.Default }) { "Default order is implicit" }
+        require(sorts.isEmpty() || browse) { "Sorting requires card browsing" }
+        require(!totalCount || browse) { "A total requires card browsing" }
+        require(!answerPreview || browse) { "Answer previews require card browsing" }
+    }
+
+    companion object {
+        val NONE = AnkiCardBrowserCapabilities()
+    }
+}
+
 data class AnkiCapabilities(
     /**
      * Can serve due cards **and commit ratings** — the complete review loop (the minimum viable
@@ -45,7 +82,13 @@ data class AnkiCapabilities(
     val suspendCards: Boolean = false,
     val editNotes: Boolean = false,
     val createNotes: Boolean = false,
-    val search: Boolean = false
+    val search: Boolean = false,
+    /**
+     * Read-only card-browser features. This is deliberately separate from [flags], which means
+     * the backend can mutate flags through the reviewer-action contract; browsing may read and
+     * filter flags without exposing any mutation path.
+     */
+    val cardBrowser: AnkiCardBrowserCapabilities = AnkiCardBrowserCapabilities.NONE
 ) {
     companion object {
         /** Safe default for a backend whose probe has not completed. */

@@ -684,6 +684,8 @@ class DefaultDiagnosticsRepository(
             rows.add("Media Read API" to apiReport.mediaRead.name)
             rows.add("Media Write API" to apiReport.mediaWrite.name)
             rows.add("Search API" to apiReport.search.name)
+            rows.add("Card Browser API" to apiReport.cardBrowser.name)
+            rows.add("Card Search API" to apiReport.cardSearch.name)
         }
 
         val capabilities = integrationState?.capabilities ?: detection?.capabilities
@@ -704,7 +706,9 @@ class DefaultDiagnosticsRepository(
             rows.add("Suspend" to if (capabilities.suspendCards) "Implemented" else "Pending GATE 11")
             rows.add("Edit Notes" to if (capabilities.editNotes) "Implemented" else "Pending GATE 17")
             rows.add("Create Notes" to if (capabilities.createNotes) "Implemented" else "Pending GATE 17")
-            rows.add("Search" to if (capabilities.search) "Implemented" else "Pending GATE 14")
+            rows.add("Search" to if (capabilities.search) "Implemented" else "Pending")
+            rows.add("Card Browser" to if (capabilities.cardBrowser.browse) "Implemented" else "Unsupported / not wired")
+            rows.add("Card Search" to if (capabilities.cardBrowser.textSearch) "Implemented" else "Unsupported / not wired")
         }
 
         // Detailed capability provenance (§122)

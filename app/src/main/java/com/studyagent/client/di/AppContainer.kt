@@ -43,6 +43,8 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
 import com.studyagent.client.core.anki.AnkiMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardGateway
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardBrowserGateway
+import com.studyagent.client.data.anki.ankidroid.UnsupportedAnkiDroidCardBrowserGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidDeckGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidReviewGateway
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidCardGateway
@@ -141,6 +143,8 @@ interface AppContainer {
 
     /** GATE 07 — card-content endpoint. Read-only: it never renders, resolves media or edits. */
     val ankiDroidCardGateway: AnkiDroidCardGateway
+    /** GATE 15 — explicit bounded-browser boundary; unsupported until a public list API is audited. */
+    val ankiDroidCardBrowserGateway: AnkiDroidCardBrowserGateway
     val ankiDroidBackend: AnkiBackend
 
     /** GATE 09 — read-only public-contract resolver; never a filesystem accessor. */
@@ -237,6 +241,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         DefaultAnkiDroidCardGateway(providerClient = ankiDroidProviderClient)
     }
 
+    override val ankiDroidCardBrowserGateway: AnkiDroidCardBrowserGateway by lazy {
+        UnsupportedAnkiDroidCardBrowserGateway()
+    }
+
     override val ankiMediaResolver: AnkiMediaResolver by lazy {
         AnkiDroidMediaResolver()
     }
@@ -267,7 +275,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
                 providerClient = ankiDroidProviderClient,
                 scope = ankiDroidScope,
                 writePermit = ankiDroidWritePermit
-            )
+            ),
+            cardBrowserGateway = ankiDroidCardBrowserGateway
         )
     }
 
