@@ -56,6 +56,13 @@ class AnkiStudyEffectExecutor(
     private val unpersistedResponses = ConcurrentHashMap<ReviewCommitId, BackendCommitResult>()
 
     /**
+     * GATE 13 — reviewer actions currently being applied, keyed by `(epoch, turn, action)`.
+     * Process-local, unbounded only by the number of live actions (one per turn at most), and it
+     * exists to make duplicate input one logical mutation (INV-13-19) — never as a truth store.
+     */
+    private val actionsInFlight = ConcurrentHashMap<String, Unit>()
+
+    /**
      * GATE 11D §35 — content-free reconciliation observability (result token + latency, per
      * commit). Diagnostics only: nothing decides a transaction state from this.
      */
@@ -91,7 +98,66 @@ class AnkiStudyEffectExecutor(
                 null
             }
             is AnkiStudyEffect.EvaluateAnswer -> evaluateAnswer(effect)
+            is AnkiStudyEffect.PerformReviewerAction -> reviewerAction(effect)
             is AnkiStudyEffect.Begin, is AnkiStudyEffect.Next, is AnkiStudyEffect.Hydrate -> read(effect)
+        }
+    }
+
+    /**
+     * GATE 13 STEP 21/31/§34/§40 — performs exactly one reviewer action and reports the typed
+     * result as a study event.
+     *
+     * Guarantees held here:
+     *
+     * - **one mutation per effect**: the backend call is issued once and never retried, in this
+     *   method or by any caller;
+     * - **no ledger**: unlike `commitTransaction`, nothing durable is written — a reviewer action
+     *   has no transaction identity in the pinned contract (STEP 30), and inventing one would put
+     *   action state into the rating ledger (INV-13-02);
+     * - **duplicate suppression**: a second effect for the same `(epoch, turn, action)` while the
+     *   first is still in flight reports nothing (first-wins). The reducer already refuses a second
+     *   request while one is `Applying`, so this only closes the residual races — e.g. a touch and
+     *   a voice command for the same action dispatched from different threads;
+     * - **unknown stays unknown**: an exception thrown by the backend becomes
+     *   [AnkiStudyEvent.ReviewerActionAmbiguous], never a "not applied" that would license a retry
+     *   (INV-13-13).
+     */
+    private suspend fun reviewerAction(effect: AnkiStudyEffect.PerformReviewerAction): AnkiStudyEvent? {
+        val key = "${effect.epoch}|${effect.turnId.value}|${effect.action.key}"
+        if (actionsInFlight.putIfAbsent(key, Unit) != null) return null
+        try {
+            val backend = registry.find(effect.cardRef.backendId)
+                ?: return AnkiStudyEvent.ReviewerActionRejected(
+                    effect.epoch, effect.turnId, effect.cardRef, effect.action,
+                    AnkiError.BackendUnavailable()
+                )
+            return when (val result = backend.performReviewerAction(effect.cardRef, effect.action)) {
+                is ReviewerActionResult.Applied -> AnkiStudyEvent.ReviewerActionApplied(
+                    epoch = effect.epoch,
+                    turnId = effect.turnId,
+                    cardRef = effect.cardRef,
+                    action = effect.action,
+                    updatedCard = result.updatedCard,
+                    cardState = result.cardState,
+                    detail = result.detail
+                )
+                is ReviewerActionResult.Rejected -> AnkiStudyEvent.ReviewerActionRejected(
+                    effect.epoch, effect.turnId, effect.cardRef, effect.action, result.reason
+                )
+                is ReviewerActionResult.OutcomeUnknown -> AnkiStudyEvent.ReviewerActionAmbiguous(
+                    effect.epoch, effect.turnId, effect.cardRef, effect.action, result.reason, result.detail
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // No exception text (provider content may be sensitive) and never a replay.
+            AnkiStudyEvent.ReviewerActionAmbiguous(
+                effect.epoch, effect.turnId, effect.cardRef, effect.action,
+                AnkiError.Unknown("action_threw"), "executor_exception"
+            )
+        } finally {
+            actionsInFlight.remove(key)
         }
     }
 

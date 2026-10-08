@@ -12,7 +12,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.async
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicLong
 
@@ -91,15 +90,19 @@ class DefaultAnkiDroidRatingGateway(
     private val clock: AppClock = SystemAppClock,
     private val backendId: AnkiBackendId = AnkiBackendId.AnkiDroidLocal,
     private val answerTimeoutMs: Long = ANSWER_TIMEOUT_MS,
-    private val permitTimeoutMs: Long = PERMIT_TIMEOUT_MS
+    private val permitTimeoutMs: Long = PERMIT_TIMEOUT_MS,
+    /**
+     * GATE 13 — the physical-write permit, shared with the reviewer-action gateway when both are
+     * wired. One permit means one writer: a bury/suspend can never overlap an answer.
+     */
+    private val writePermit: AnkiDroidWritePermit = AnkiDroidWritePermit()
 ) : AnkiDroidRatingGateway {
 
-    private val writePermit = Mutex()
     private val answerCalls = AtomicLong(0L)
 
     override val physicalAnswerCalls: Long get() = answerCalls.get()
 
-    override val writeInFlight: Boolean get() = writePermit.isLocked
+    override val writeInFlight: Boolean get() = writePermit.inFlight
 
     override suspend fun readCardState(authority: String, card: AnkiCardRef): AnkiResult<AnkiDroidCardState> {
         if (card.backendId != backendId) return AnkiResult.Failure(AnkiError.InvalidRequest("card_ref_foreign_backend"))
@@ -234,14 +237,7 @@ class DefaultAnkiDroidRatingGateway(
      * The flag is set on the same stack frame the lock is taken, so a timeout that races the
      * acquisition can never leave the permit held without us knowing.
      */
-    private suspend fun acquirePermit(): Boolean {
-        var acquired = false
-        withTimeoutOrNull(permitTimeoutMs) {
-            writePermit.lock()
-            acquired = true
-        }
-        return acquired
-    }
+    private suspend fun acquirePermit(): Boolean = writePermit.acquire(permitTimeoutMs)
 
     /**
      * Issues one provider update in [scope] and waits at most [answerTimeoutMs]. Returns `null` on
@@ -260,7 +256,7 @@ class DefaultAnkiDroidRatingGateway(
                     AnkiDroidFailureClassifier.classify(throwable, AnkiDroidOperationStage.PROVIDER_UPDATE)
                 )
             } finally {
-                writePermit.unlock()
+                writePermit.release()
             }
         }
         return withTimeoutOrNull(answerTimeoutMs) { call.await() }

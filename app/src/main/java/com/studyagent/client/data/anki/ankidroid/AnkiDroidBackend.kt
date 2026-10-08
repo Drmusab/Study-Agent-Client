@@ -22,6 +22,8 @@ import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.ReconcileCommitRequest
 import com.studyagent.client.core.anki.ReconcileCommitResult
 import com.studyagent.client.core.anki.ReconciliationSupport
+import com.studyagent.client.core.anki.ReviewerAction
+import com.studyagent.client.core.anki.ReviewerActionResult
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.AnkiReviewSession
 import com.studyagent.client.core.common.AppClock
@@ -85,7 +87,15 @@ class AnkiDroidBackend(
      * GATE 11 — the only writer. Absent (tests, older composition) = rating commits are refused
      * truthfully and the `review` capability is not advertised.
      */
-    private val ratingGateway: AnkiDroidRatingGateway? = null
+    private val ratingGateway: AnkiDroidRatingGateway? = null,
+    /**
+     * GATE 13 — the reviewer-action writer (flag/bury/suspend). It shares the rating gateway's
+     * physical-write permit, so the two mutation families can never overlap; both must be wired
+     * together because the action committer confirms success from the same read-only card-state
+     * evidence path. Absent = reviewer actions are refused truthfully and `bury`/`suspendCards`
+     * are not advertised.
+     */
+    private val reviewerActionGateway: AnkiDroidReviewerActionGateway? = null
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
@@ -123,15 +133,37 @@ class AnkiDroidBackend(
         .map { it.availability }
         .stateIn(scope, SharingStarted.Eagerly, _integrationState.value.availability)
 
-    override val capabilities: StateFlow<AnkiCapabilities> = _integrationState
-        .map { withRatingSupport(it.capabilities) }
-        .stateIn(scope, SharingStarted.Eagerly, withRatingSupport(_integrationState.value.capabilities))
-
-    /** GATE 11 — the full review loop (`review`) is only claimed when a rating writer is wired. */
-    private fun withRatingSupport(capabilities: AnkiCapabilities): AnkiCapabilities =
-        if (ratingGateway == null) capabilities.copy(review = false) else capabilities
-
     private val committer: AnkiDroidRatingCommitter? = ratingGateway?.let { AnkiDroidRatingCommitter(it, clock) }
+
+    /**
+     * GATE 13 — the reviewer-action protocol. Needs both writers: the action gateway for the one
+     * provider mutation and the rating gateway for the read-only card-state evidence.
+     */
+    private val reviewerActionCommitter: AnkiDroidReviewerActionCommitter? =
+        reviewerActionGateway?.let { actions ->
+            ratingGateway?.let { reads -> AnkiDroidReviewerActionCommitter(actions, reads, clock) }
+        }
+
+    override val capabilities: StateFlow<AnkiCapabilities> = _integrationState
+        .map { withWriteSupport(it.capabilities) }
+        .stateIn(scope, SharingStarted.Eagerly, withWriteSupport(_integrationState.value.capabilities))
+
+    /**
+     * A capability is only claimed when the writer that honours it is actually wired:
+     * `review` needs the rating gateway, `bury`/`suspendCards` need the reviewer-action gateway,
+     * and `flags` is never claimed by this backend because the pinned contract has no flag column
+     * (GATE 07/13 audit). A capability that cannot be honoured is a lie (GATE 01 §16).
+     */
+    private fun withWriteSupport(capabilities: AnkiCapabilities): AnkiCapabilities = capabilities.copy(
+        review = capabilities.review && ratingGateway != null,
+        bury = capabilities.bury && reviewerActionCommitter != null,
+        suspendCards = capabilities.suspendCards && reviewerActionCommitter != null,
+        flags = false
+    )
+
+    /** Content-free physical reviewer-action update count (diagnostics/test evidence only). */
+    val reviewerActionInvocationCount: Long
+        get() = reviewerActionGateway?.physicalActionCalls ?: 0L
 
     /**
      * Content-free physical answer-update count. It is diagnostics/test evidence only; the backend
@@ -561,6 +593,43 @@ class AnkiDroidBackend(
             AppLogger.i(TAG, "ANKI_REVIEW_SESSION_ENDED ref=${session.backendSessionRef}")
         }
         removed
+    }
+
+    /**
+     * GATE 13 STEP 7/§8/§34 — the reviewer-action entry point (flag/bury/suspend).
+     *
+     * Not a rating, and not modelled as one (INV-13-01/02): this method never touches the commit
+     * pipeline, never writes a `ReviewCommitStatus` and never fabricates review history. It reaches
+     * the provider through exactly one component ([AnkiDroidReviewerActionCommitter]), which shares
+     * the rating gateway's physical-write permit so an action can never overlap an answer.
+     *
+     * The mutable state this backend owns is the *review turn* record; unlike a rating commit, a
+     * reviewer action does **not** publish a durable transaction, because the audit showed the
+     * pinned contract offers no transaction identity to correlate (STEP 30). The turn is retired
+     * only by the study layer, after the action's outcome is confirmed.
+     */
+    override suspend fun performReviewerAction(
+        cardRef: AnkiCardRef,
+        action: ReviewerAction
+    ): ReviewerActionResult {
+        if (cardRef.backendId != id) {
+            return ReviewerActionResult.Rejected(AnkiError.InvalidRequest("card_ref_foreign_backend"))
+        }
+        val performer = reviewerActionCommitter
+            ?: return ReviewerActionResult.Rejected(AnkiError.UnsupportedAction(action.key))
+        return try {
+            val authority = currentAuthority()
+                ?: return ReviewerActionResult.Rejected(AnkiError.QueryFailure("authority-unknown"))
+            performer.perform(authority, cardRef, action)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (throwable: Throwable) {
+            // The call may already have reached the provider: never report a typed failure that
+            // would license a retry (INV-13-13). This mirrors the rating path's rule that anything
+            // unclassified after dispatch is an unknown outcome.
+            AppLogger.w(TAG, "ANKI_REVIEWER_ACTION_UNEXPECTED error=${throwable::class.java.simpleName}")
+            ReviewerActionResult.OutcomeUnknown(AnkiError.Unknown("action_threw"))
+        }
     }
 
     /** Content-free diagnostics for settings and the debug harness (§82/§84). Never card text. */

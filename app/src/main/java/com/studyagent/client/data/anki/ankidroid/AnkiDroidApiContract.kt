@@ -397,6 +397,39 @@ object AnkiDroidApiContract {
     // | Queue front read | `query(schedule, [note_id, ord], "limit=1")` with **no** `deckID` reads the selected deck without re-selecting | `SCHEDULE` query branch: `select` only when `deckID` is present |
     // ------------------------------------------------------------------------------------------
 
+    // ------------------------------------------------------------------------------------------
+    // GATE 13 — reviewer-action contract (`update` on the review-info endpoint, re-verified at
+    // v2.24.1 against the pinned source, not memory)
+    //
+    // Source read for this gate: `CardContentProvider.kt` @ commit
+    // `9f579c10bb151146728220729c510acbbd8faba7` (`update()` SCHEDULE branch, `answerCard`,
+    // `buryOrSuspendCard`, `getCard`), `api/src/main/java/com/ichi2/anki/FlashCardsContract.kt`
+    // (`ReviewInfo` KDoc + constants), `libanki/.../sched/Scheduler.kt` (`buryCards`,
+    // `suspendCards`), and rslib tag `25.09.2` `rslib/src/scheduler/bury_and_suspend.rs`.
+    //
+    // | Fact | Value | Verified from |
+    // |---|---|---|
+    // | Bury column | `ReviewInfo.BURY = "buried"` (int, write-only; "Set to 1 to bury the card") | `FlashCardsContract.ReviewInfo` table |
+    // | Suspend column | `ReviewInfo.SUSPEND = "suspended"` (int, write-only; "Set to 1 to suspend the card") | same |
+    // | Mutual exclusivity | bury/suspend are "mutually exclusive with setting EASE/TIME_TAKEN" (one `update` performs exactly one operation) | same KDoc: "Don't set BURY/SUSPEND when answering a card" |
+    // | Provider dispatch | `if (bury == 1) buryOrSuspendCard(…, true) else if (suspend == 1) buryOrSuspendCard(…, false) else answerCard(…)` — bury wins if both were sent, which is why this app sends exactly one | `CardContentProvider.update` SCHEDULE branch |
+    // | Card addressing | `getCard(noteId, cardOrd, col)`; a missing ord throws `IllegalArgumentException("Card with ord … does not exist for note …")` **before** any mutation; a missing note throws from `col.getNote` | `CardContentProvider.getCard` |
+    // | Scheduler call | bury → `col.sched.buryCards(listOf(card.id))` (user/manual bury); suspend → `col.sched.suspendCards(listOf(card.id))` | `CardContentProvider.buryOrSuspendCard`, `libanki Scheduler` |
+    // | Swallowed failures | `buryOrSuspendCard` wraps the call in `catch (RuntimeException) { log + crash report }` and `updated++` still runs → returned `1` is NOT proof of mutation | `CardContentProvider.buryOrSuspendCard` + update branch |
+    // | Effective state change | bury → `card.queue = CardQueue::UserBuried` (−3); suspend → `CardQueue::Suspended` (−1); only `queue` (plus `mod`/`usn`) changes; **no** revlog row, no counters, no due/interval change | rslib `bury_or_suspend_cards_inner` |
+    // | Idempotency (bury twice / suspend twice) | second call finds `card.queue == desired_queue` → `count` stays 0, no card is written, no error | rslib `bury_or_suspend_cards_inner`: `if card.queue != desired_queue { … }` |
+    // | Suspended card + bury | explicitly skipped ("do not bury suspended cards as that would unsuspend them"): the bury is a **no-op**, not an error | same |
+    // | Operation identity | `Op::Bury` / `Op::Suspend`, distinct from `Op::AnswerCard` — no review history is fabricated | rslib `bury_or_suspend_cards` |
+    // | Unbury / unsuspend | **no public write path**: `Scheduler.unburyCards`/`unsuspendCards` exist but the provider's `update` exposes no column for them → not modelled by this app (STEP 11/14/20) | `FlashCardsContract.ReviewInfo` (no such constant) + `CardContentProvider.update` |
+    // | Flags | **no public write or read path**: `FlashCardsContract.Card`/`ReviewInfo` expose no flag column at all → `AnkiCapabilities.flags` stays false and `ReviewerAction.SetFlag` is refused before any IPC | GATE 07 card-contract table; re-verified for GATE 13 |
+    // ------------------------------------------------------------------------------------------
+
+    /** `ReviewInfo.BURY` — write-only; `1` buries the addressed card (never the note). */
+    const val REVIEW_BURY_COLUMN: String = "buried"
+
+    /** `ReviewInfo.SUSPEND` — write-only; `1` suspends the addressed card (never the note). */
+    const val REVIEW_SUSPEND_COLUMN: String = "suspended"
+
     /** `ReviewInfo.EASE` — the write-only rating column of the schedule endpoint. */
     const val REVIEW_ANSWER_EASE_COLUMN: String = "answer_ease"
 
