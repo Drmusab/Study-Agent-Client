@@ -47,6 +47,9 @@ class AnkiDroidCardMapperTest {
         "interval" to 21,
         "type" to 2,
         "queue" to 2,
+        "due" to 0L,
+        "original_due" to 0L,
+        "sm2_factor" to 2500,
         "fsrs_stability" to 12.5,
         "fsrs_difficulty" to 4.75,
         "fsrs_desired_retention" to 0.9,
@@ -77,6 +80,7 @@ class AnkiDroidCardMapperTest {
         // Optional metadata all landed.
         assertEquals("Card 1", card.metadata.templateName)
         assertEquals(AnkiCardQueueState.REVIEW, card.metadata.queueState)
+        assertEquals(com.studyagent.client.core.anki.AnkiCardType.REVIEW, card.metadata.cardType)
         assertEquals("1", card.deckRef?.deckId)
         // `0` is "not in a filtered deck" — never a fake home deck (STEP 30).
         assertNull(card.metadata.originalDeckRef)
@@ -87,6 +91,9 @@ class AnkiDroidCardMapperTest {
         assertEquals(12, card.scheduling?.reps)
         assertEquals(2, card.scheduling?.lapses)
         assertEquals(21, card.scheduling?.intervalDays)
+        assertEquals(0L, card.scheduling?.rawDue)
+        assertEquals(0L, card.scheduling?.rawOriginalDue)
+        assertEquals(2500.0, card.scheduling?.easeFactor)
         assertEquals(1_700_000_123L, card.scheduling?.lastReviewEpochSeconds)
         assertEquals(12.5, card.scheduling?.fsrs?.stability)
         assertEquals(0.9, card.scheduling?.fsrs?.desiredRetention)
@@ -193,7 +200,16 @@ class AnkiDroidCardMapperTest {
         // Neither state source: UNKNOWN with the token, never fabricated (STEP 33).
         val none = valid(mapOf("note_id" to 7L, "ord" to 0, "question" to "q"))
         assertEquals(AnkiCardQueueState.UNKNOWN, none.metadata.queueState)
+        assertNull(none.metadata.cardType)
         assertTrue(AnkiDroidCardMapper.DEG_QUEUE_STATE_UNMAPPED in none.degradations)
+
+        // The backend's card type and queue state are separate facts: a review card can be suspended.
+        val suspendedReview = valid(mapOf(
+            "note_id" to 7L, "ord" to 0, "question" to "q", "type" to 2, "queue" to -1
+        ))
+        assertEquals(com.studyagent.client.core.anki.AnkiCardType.REVIEW, suspendedReview.metadata.cardType)
+        assertEquals(AnkiCardQueueState.SUSPENDED, suspendedReview.metadata.queueState)
+        assertEquals(com.studyagent.client.core.anki.AnkiCardType.UNKNOWN, badType.metadata.cardType)
     }
 
     @Test fun `optional metadata degrades individually and never takes the card down`() {

@@ -130,9 +130,10 @@ data class AnkiFsrsInfo(
  * - *Presentation labels* ([intervalLabel], [dueStateLabel], [nextReviewTimes]) come from the
  *   scheduler surface (GATE 06's review-info endpoint / future PC agent). The card-content
  *   provider never writes them.
- * - *Stored card facts* ([reps], [lapses], [intervalDays], [lastReviewEpochSeconds], [fsrs])
- *   come from the card-content surface (GATE 07's card row). The review-info endpoint never
- *   writes them.
+ * - *Stored card facts* ([reps], [lapses], [intervalDays], [lastReviewEpochSeconds], [rawDue],
+ *   [rawOriginalDue], [easeFactor], [fsrs]) come from the card-content surface (GATE 07's card
+ *   row; GATE 16 explicitly projects the three additional public columns). The review-info
+ *   endpoint never writes them.
  *
  * Precedence (documented per STEP 56): for "what will the buttons say" the *turn's* scheduled
  * scheduling info (GATE 06, selection time) is authoritative; for "what has this card stored"
@@ -163,7 +164,33 @@ data class AnkiSchedulingInfo(
      * that owns that mapping normalizes it here). `null` = the backend did not report one, never a
      * synthesized value: `AnkiCardSort.Due` is only advertised by a backend that can order by it.
      */
-    val dueEpochSeconds: Long? = null
+    val dueEpochSeconds: Long? = null,
+
+    /**
+     * GATE 16 — the backend's *stored* due value, verbatim. Raw scheduler state whose meaning is
+     * queue-dependent (Anki `cards.due`: new = study position, learning/relearning = a Unix
+     * timestamp in seconds, review = the collection's scheduler day number — explicitly NOT a
+     * calendar date — and filtered deck = position inside the deck). It is displayed against the
+     * backend's own semantics only; converting a review day number into a date would require
+     * collection creation/day-cutoff metadata this layer does not have, so it is never done
+     * (INV-16-09). `null` = the backend did not report one.
+     */
+    val rawDue: Long? = null,
+
+    /**
+     * GATE 16 — the backend's *stored* original due value, verbatim (`original_due`: the due value
+     * from before a card entered a filtered deck, `0`/absent otherwise). Same honesty rule as
+     * [rawDue]: never converted, never invented.
+     */
+    val rawOriginalDue: Long? = null,
+
+    /**
+     * GATE 16 — the backend's *stored* SM-2 ease factor, verbatim (Anki encodes it as an integer
+     * scaled by 10: `2500` means 250%). Informational only: FSRS-scheduled cards carry no
+     * meaningful value here and this layer never derives an ease transition from it
+     * (INV-16-09). `null` = the backend did not report one.
+     */
+    val easeFactor: Double? = null
 )
 
 /**
@@ -184,6 +211,14 @@ data class AnkiCardMetadata(
     val templateName: String? = null,
     val queueState: AnkiCardQueueState? = null,
     val originalDeckRef: AnkiDeckRef? = null,
+    /**
+     * GATE 16 — the backend-reported card *type* (the stored `type` column family), mapped
+     * separately from [queueState]: type says what the card is (new/learning/review/relearning),
+     * queue says where it currently sits (including suspended/buried/preview). The two are never
+     * treated as interchangeable (GATE 16 §15), and neither is ever inferred from due values.
+     * `null` = the backend did not report one.
+     */
+    val cardType: AnkiCardType? = null,
     /**
      * GATE 15 — note creation time as Unix epoch seconds, when the backend reports it. `null` means
      * the backend did not say, so a backend that cannot report it must not advertise

@@ -256,7 +256,7 @@ object AnkiDroidApiContract {
     // | **No flags column** | `FlashCardsContract.Card` at v2.24.1 exposes NO flag field (`addCardToCursor` fills no flags cell; the contract object's constants end at `last_review_time_secs`) — GATE 07 maps no flag and `AnkiRenderedCard.flag` stays null on this backend | full read of `FlashCardsContract.kt` + `addCardToCursor` |
     // | No media column, no tags column, no deck-name column | media names live on the review-info endpoint (`media_files`, GATE 06); tags live on the note surface (a separate query — deliberately not made, STEP 39/§40); deck names live on the deck surface (GATE 05) | contract column tables |
     // | Rendering authority | `question`/`answer`/`question_simple`/`answer_simple`/`answer_pure` are all produced by AnkiDroid's own template renderer (`TemplateManager` + rust backend), including cloze and `{{FrontSide}}` expansion. Study-Agent never expands `{{…}}` itself (INV-ANKI-CARD-08/09) | `addCardToCursor` calls `renderOutput`/`pureAnswer` |
-    // | Not consumed (present but unused) | `due`, `original_due`, `sm2_factor`, `left`, `original_position`, `custom_data`, `fsrs_decay` — raw scheduler internals GATE 07 does not need (STEP 19); deliberately left out of the projection | STEP 14 |
+    // | GATE 07 initially left these out | `due`, `original_due`, `sm2_factor`, `left`, `original_position`, `custom_data`, `fsrs_decay` — raw scheduler internals GATE 07 did not need (STEP 19); GATE 16 adds only `due`, `original_due`, `sm2_factor` for read-only details, while `left`, `original_position`, `custom_data`, `fsrs_decay` remain excluded | GATE 16 re-audit |
     // | Read-only guarantee | the card query branches contain no writes; `update` on the card URIs only moves decks — GATE 07 never calls it, and a source scan enforces it | `CardContentProvider.update` + `AnkiDroidIntegrationIsolationTest` |
     // ------------------------------------------------------------------------------------------
 
@@ -330,11 +330,26 @@ object AnkiDroidApiContract {
     const val CARD_LAST_REVIEW_TIME_COLUMN: String = "last_review_time_secs"
 
     /**
-     * The only columns GATE 07 asks the card endpoint for (STEP 14): identity, the five content
-     * representations, current/home deck, and the optional metadata this gate maps. Raw
-     * scheduler internals (`due`, `sm2_factor`, `left`, …) and `custom_data` are deliberately
-     * excluded (STEP 19). An unknown name would make the endpoint throw, so this list is also
-     * the contract pin.
+     * GATE 16 — `Card.RAW_ORIGINAL_DUE` (`original_due`): the stored original due value (the due
+     * from before a filtered deck move; `0` otherwise). Raw scheduler state, same honesty rule as
+     * [CARD_DUE_COLUMN]: displayed against the backend's own semantics, never converted.
+     */
+    const val CARD_ORIGINAL_DUE_COLUMN: String = "original_due"
+
+    /**
+     * GATE 16 — `Card.RAW_SM2_FACTOR` (`sm2_factor`): the stored SM-2 ease factor as an integer
+     * scaled by 10 (`2500` = 250%). Informational only; FSRS cards carry no meaningful value.
+     */
+    const val CARD_SM2_FACTOR_COLUMN: String = "sm2_factor"
+
+    /**
+     * The columns the card endpoint is asked for (STEP 14; GATE 16 extends it): identity, the five
+     * content representations, current/home deck, the optional metadata this app maps, and — new
+     * in GATE 16 — the stored scheduling facts `due`, `original_due` and `sm2_factor` that the
+     * read-only Card Details surface displays (still never consumed as scheduler *logic*).
+     * Remaining raw scheduler internals (`left`, `original_position`, `custom_data`, `fsrs_decay`)
+     * stay excluded: nothing displays them (STEP 19). An unknown name would make the endpoint
+     * throw, so this list is also the contract pin.
      */
     val CARD_PROJECTION: Array<String> = arrayOf(
         CARD_ID_COLUMN,
@@ -353,6 +368,9 @@ object AnkiDroidApiContract {
         CARD_INTERVAL_COLUMN,
         CARD_TYPE_COLUMN,
         CARD_QUEUE_COLUMN,
+        CARD_DUE_COLUMN,
+        CARD_ORIGINAL_DUE_COLUMN,
+        CARD_SM2_FACTOR_COLUMN,
         CARD_FSRS_STABILITY_COLUMN,
         CARD_FSRS_DIFFICULTY_COLUMN,
         CARD_FSRS_DESIRED_RETENTION_COLUMN,
@@ -364,6 +382,100 @@ object AnkiDroidApiContract {
     const val CARD_TYPE_LEARNING: Int = 1
     const val CARD_TYPE_REVIEW: Int = 2
     const val CARD_TYPE_RELEARNING: Int = 3
+
+    // ------------------------------------------------------------------------------------------
+    // GATE 16 — note / note-type / deck-by-id contract (Card Details deep read, verified at
+    // v2.24.1 against the pinned `FlashCardsContract.kt` and `CardContentProvider.kt` sources,
+    // commit `9f579c10bb151146728220729c510acbbd8faba7` — not memory).
+    //
+    // | Fact | Value | Verified from |
+    // |---|---|---|
+    // | Note-by-id URI | `content://<authority>/notes/<noteId>` | `UriMatcher` `NOTES_ID`; query branch runs `SELECT <projection> FROM notes WHERE id=?` — one exact row, never a scan |
+    // | Missing note | empty cursor (SQL `WHERE id=?` matches nothing) — no exception | `NOTES_ID` branch (`col.db.query(sql, noteId)`) |
+    // | Accepted note columns | exactly `Note.DEFAULT_PROJECTION` names: `_id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data`; anything else throws `IllegalArgumentException("Unknown column …")` | `sanitizeNoteProjection` |
+    // | `_id` | note id (`id as _id` in SQL) | same |
+    // | `mid` | note type ("model") id — used for the exact `models/<id>` follow-up | `Note.MID` |
+    // | `tags` | space-separated note tags (`""` = none) | `Note.TAGS` KDoc |
+    // | `flds` | field values joined by `0x1f` (`Consts.FIELD_SEPARATOR`) — backend field order is authoritative | `Note.FLDS` KDoc + `Utils.joinFields` |
+    // | `mod` | note last-modification time (Unix seconds). Note `flags`/`data` are NOTE metadata — **never** card flags | `Note.MOD`/`FLAGS`/`DATA` KDocs |
+    // | No note creation-time column exists | `noteCreatedEpochSeconds` stays null on this backend | full `Note` column table |
+    // | Note-type-by-id URI | `content://<authority>/models/<noteTypeId>` | `UriMatcher` `NOTE_TYPES_ID`; query branch builds one `MatrixCursor` row via `addNoteTypeToCursor` |
+    // | `name` | note type display name | `Model.NAME` + `addNoteTypeToCursor` |
+    // | `field_names` | field names joined by `0x1f`, in template order (same order as `flds`) | `addNoteTypeToCursor` (`Utils.joinFields`) |
+    // | `type` | `0` normal note type, `1` cloze | `Model.TYPE` KDoc + `addNoteTypeToCursor` (`noteType.type.code`) |
+    // | `num_cards` | number of card templates in the note type | `addNoteTypeToCursor` (`templates.length()`) |
+    // | Unknown model column | `UnsupportedOperationException("Queue \"<col>\" is unknown")` | `addNoteTypeToCursor` |
+    // | Deck-by-id URI | `content://<authority>/decks/<deckId>` | `UriMatcher` `DECKS_ID`; query branch answers 0..1 rows — a missing deck is an empty cursor, never fabricated |
+    // | Media column on card/note | **none** — media names live only on the review-info surface (`media_files`) | card/note column tables |
+    // | Flags column on card | **none** — `AnkiCardDetails.flag` stays null on this backend | card column table (re-verified) |
+    // ------------------------------------------------------------------------------------------
+
+    /** URI path of a single note (`notes/<id>`). */
+    const val NOTE_ITEM_PATH: String = "notes"
+
+    /** `Note._ID` — note identity. A note is never a card (INV-16-03). */
+    const val NOTE_ID_COLUMN: String = "_id"
+
+    /** `Note.MID` — the note type ("model") id this note was created from. */
+    const val NOTE_MID_COLUMN: String = "mid"
+
+    /** `Note.MOD` — note last-modification time, Unix seconds. */
+    const val NOTE_MOD_COLUMN: String = "mod"
+
+    /** `Note.TAGS` — space-separated tags. `""` means the note has no tags (not "unknown"). */
+    const val NOTE_TAGS_COLUMN: String = "tags"
+
+    /** `Note.FLDS` — field values joined by [FIELD_SEPARATOR], backend field order. */
+    const val NOTE_FIELDS_COLUMN: String = "flds"
+
+    /**
+     * Anki's field separator inside `flds`/`field_names` (`Consts.FIELD_SEPARATOR`, `0x1f`).
+     * Splitting on it preserves empty fields and their order — never re-sorted, never re-keyed.
+     */
+    const val FIELD_SEPARATOR: String = "\u001F"
+
+    /** Space separator inside the note `tags` cell (`""` = no tags). */
+    const val TAGS_SEPARATOR: String = " "
+
+    /** The only note columns GATE 16 asks for: identity, note type, tags, fields, mod time. */
+    val NOTE_PROJECTION: Array<String> = arrayOf(
+        NOTE_ID_COLUMN,
+        NOTE_MID_COLUMN,
+        NOTE_MOD_COLUMN,
+        NOTE_TAGS_COLUMN,
+        NOTE_FIELDS_COLUMN
+    )
+
+    /** URI path of the note-type ("model") collection. */
+    const val MODELS_PATH: String = "models"
+
+    /** `Model._ID` — note type identity. */
+    const val MODEL_ID_COLUMN: String = "_id"
+
+    /** `Model.NAME` — note type display name (never identity). */
+    const val MODEL_NAME_COLUMN: String = "name"
+
+    /** `Model.FIELD_NAMES` — field names joined by [FIELD_SEPARATOR], template order. */
+    const val MODEL_FIELD_NAMES_COLUMN: String = "field_names"
+
+    /** `Model.TYPE` — `0` normal, `1` cloze (documented codes only). */
+    const val MODEL_TYPE_COLUMN: String = "type"
+
+    /** `Model.NUM_CARDS` — number of card templates in the note type. */
+    const val MODEL_NUM_CARDS_COLUMN: String = "num_cards"
+
+    /** Documented `Model.TYPE` codes. Anything else is unknown, never guessed. */
+    const val MODEL_TYPE_NORMAL: Int = 0
+    const val MODEL_TYPE_CLOZE: Int = 1
+
+    /** The only note-type columns GATE 16 asks for. */
+    val MODEL_PROJECTION: Array<String> = arrayOf(
+        MODEL_ID_COLUMN,
+        MODEL_NAME_COLUMN,
+        MODEL_FIELD_NAMES_COLUMN,
+        MODEL_TYPE_COLUMN,
+        MODEL_NUM_CARDS_COLUMN
+    )
 
     // ------------------------------------------------------------------------------------------
     // GATE 11 — rating commit contract (`update` on the review-info endpoint, verified at v2.24.1)

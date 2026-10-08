@@ -4,6 +4,7 @@ import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCardMetadata
 import com.studyagent.client.core.anki.AnkiCardQueueState
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiCardType
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiFsrsInfo
 import com.studyagent.client.core.anki.AnkiNoteRef
@@ -142,11 +143,16 @@ internal object AnkiDroidCardMapper {
             AnkiDeckRef(backendId = backendId, deckId = it, collectionKey = request.collectionKey)
         }
 
+        val queueCode = parseBoundedInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_QUEUE_COLUMN)))
+        val typeCode = parseBoundedInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_TYPE_COLUMN)))
         val queueState = mapQueueState(
-            queueCode = parseBoundedInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_QUEUE_COLUMN))),
-            typeCode = parseBoundedInt(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_TYPE_COLUMN))),
+            queueCode = queueCode,
+            typeCode = typeCode,
             degradations = degradations
         )
+        // GATE 16 — card *type* is its own fact, mapped from the documented `type` codes and kept
+        // apart from the fused queue state (§15). Unknown codes degrade to UNKNOWN with a token.
+        val cardType = mapCardType(typeCode, degradations)
 
         val scheduling = schedulingFor(row, degradations)
 
@@ -164,7 +170,8 @@ internal object AnkiDroidCardMapper {
             metadata = AnkiCardMetadata(
                 templateName = templateName,
                 queueState = queueState,
-                originalDeckRef = originalDeckRef
+                originalDeckRef = originalDeckRef,
+                cardType = cardType
             ),
             noteRef = noteId?.let { AnkiNoteRef(backendId = backendId, noteId = it, collectionKey = request.collectionKey) },
             deckRef = deckRef,
@@ -219,9 +226,37 @@ internal object AnkiDroidCardMapper {
     }
 
     /**
+     * GATE 16 — stored card type (STEP 33's sibling fact): the documented `type` codes only
+     * (`Card.TYPE` KDoc: 0 new, 1 learning, 2 review, 3 relearning — "other values should be
+     * treated as unknown"). Never inferred from due values (GATE 16 §14) and never derived from
+     * the queue code: `mapQueueState` answers *where the card sits*, this answers *what it is*.
+     */
+    internal fun mapCardType(
+        typeCode: Int?,
+        degradations: MutableList<String>
+    ): AnkiCardType? {
+        if (typeCode == null) return null
+        return when (typeCode) {
+            AnkiDroidApiContract.CARD_TYPE_NEW -> AnkiCardType.NEW
+            AnkiDroidApiContract.CARD_TYPE_LEARNING -> AnkiCardType.LEARNING
+            AnkiDroidApiContract.CARD_TYPE_REVIEW -> AnkiCardType.REVIEW
+            AnkiDroidApiContract.CARD_TYPE_RELEARNING -> AnkiCardType.RELEARNING
+            else -> {
+                degradations.add(DEG_QUEUE_STATE_UNMAPPED)
+                AnkiCardType.UNKNOWN
+            }
+        }
+    }
+
+    /**
      * Stored scheduling facts (STEP 34) — informational only (INV-ANKI-CARD-18/19). Built when
      * at least one field is present; `null` means the provider said nothing. Never combined with
      * the GATE 06 label surface inside one instance (INV-ANKI-CARD-24).
+     *
+     * GATE 16 adds the stored `due` / `original_due` / `sm2_factor` cells verbatim ([rawDue],
+     * [rawOriginalDue], [easeFactor]): raw scheduler state whose *meaning* is queue-dependent is
+     * displayed against the backend's semantics and never converted into a date or a prediction
+     * (INV-16-09). The SM-2 factor is kept in the backend's ×10 encoding, exactly as stored.
      */
     private fun schedulingFor(
         row: AnkiDroidProviderRow,
@@ -238,6 +273,9 @@ internal object AnkiDroidCardMapper {
         val stability = parseDouble(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_FSRS_STABILITY_COLUMN)))
         val difficulty = parseDouble(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_FSRS_DIFFICULTY_COLUMN)))
         val retention = parseDouble(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_FSRS_DESIRED_RETENTION_COLUMN)))
+        val rawDue = parseStoredLong(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_DUE_COLUMN)))
+        val rawOriginalDue = parseStoredLong(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_ORIGINAL_DUE_COLUMN)))
+        val easeFactor = parseDouble(AnkiDroidMapper.getOptionalString(row, optional(row, AnkiDroidApiContract.CARD_SM2_FACTOR_COLUMN)))
 
         val fsrs = if (stability != null || difficulty != null || retention != null) {
             AnkiFsrsInfo(stability = stability, difficulty = difficulty, desiredRetention = retention)
@@ -246,7 +284,7 @@ internal object AnkiDroidCardMapper {
         }
 
         if (reps == null && lapses == null && intervalDays == null && lastReviewEpochSeconds == null &&
-            fsrs == null
+            fsrs == null && rawDue == null && rawOriginalDue == null && easeFactor == null
         ) {
             return null
         }
@@ -255,7 +293,10 @@ internal object AnkiDroidCardMapper {
             reps = reps,
             lapses = lapses,
             intervalDays = intervalDays,
-            lastReviewEpochSeconds = lastReviewEpochSeconds
+            lastReviewEpochSeconds = lastReviewEpochSeconds,
+            rawDue = rawDue,
+            rawOriginalDue = rawOriginalDue,
+            easeFactor = easeFactor
         )
     }
 
@@ -293,6 +334,18 @@ internal object AnkiDroidCardMapper {
     private fun parseEpochSeconds(text: String?): Long? {
         val value = text?.trim()?.toLongOrNull() ?: return null
         return if (value >= 0L) value else null
+    }
+
+    /**
+     * GATE 16 — a *stored* scheduler long (raw `due`/`original_due`): kept verbatim, including
+     * `0` and negatives, because these are raw state values, not counts or timestamps. Unparsable
+     * garbage is `null` (unknown), never `0` (INV-16-10).
+     */
+    internal fun parseStoredLong(text: String?): Long? {
+        val trimmed = text?.trim() ?: return null
+        if (trimmed.isEmpty()) return null
+        return trimmed.toLongOrNull()
+            ?: trimmed.toDoubleOrNull()?.takeIf { it % 1.0 == 0.0 && it.isFinite() }?.toLong()
     }
 
     private fun parseDouble(text: String?): Double? {

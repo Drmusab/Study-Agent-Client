@@ -15,7 +15,7 @@ if [ "$what" = shims ]; then
 fi
 if [ "$what" = main ] || [ "$what" = all ]; then
   cd "$R/main/java"
-  SRC="$(find com -name '*.kt' | grep -v "/ui/\|/service/\|MainActivity\|StudyAgentApp\|/di/") $(pure $(find com/studyagent/client/ui -name '*.kt')) $(pure $(find "$R/debug/java" -name '*.kt'))"
+  SRC="$(find com -name '*.kt' | grep -v "/ui/\|/service/\|MainActivity\|StudyAgentApp\|/di/") $(pure $(find com/studyagent/client/ui -name '*.kt')) $(pure $(find "$R/debug/java" -name '*.kt')) ${HARNESS_EXTRA_MAIN_SRC:-}"
   LCP="$(ls "$H"/libs/*.jar | tr '\n' ':')$H/shims-out"
   rm -rf "$H/main-out"
   "$HARNESS_DIR/bin/kc" "$H/main-out" "$LCP" -opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi $SRC "$HARNESS_DIR/shims/buildconfig/BuildConfig.kt" 2>&1 | grep -E "error:" > "$H/main-errors.txt"

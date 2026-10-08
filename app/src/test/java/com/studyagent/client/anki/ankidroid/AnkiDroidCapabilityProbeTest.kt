@@ -35,6 +35,8 @@ class AnkiDroidCapabilityProbeTest {
         assertTrue(result.implemented.review)
         // GATE 07 — rendered-card hydration is implemented (identity-verified, JVM-tested).
         assertTrue(result.implemented.renderedCards)
+        // GATE 16 — exact read-only card details use the pinned card/note/note-type item reads.
+        assertTrue(result.implemented.cardDetails)
         assertFalse(result.implemented.media)
         assertFalse(result.implemented.flags)
         assertEquals(CapabilitySupport.SUPPORTED, result.apiReport.deckListing)

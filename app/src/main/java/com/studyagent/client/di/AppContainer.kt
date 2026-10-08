@@ -262,6 +262,7 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             deckGateway = ankiDroidDeckGateway,
             reviewGateway = ankiDroidReviewGateway,
             cardGateway = ankiDroidCardGateway,
+            noteGateway = ankiDroidNoteGateway,
             // GATE 11 — the single AnkiDroid writer. Its scope outlives callers so an issued
             // provider call is never abandoned mid-flight by a cancelled screen or session.
             ratingGateway = DefaultAnkiDroidRatingGateway(
@@ -606,6 +607,11 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
                 "unknown"
             },
             protocolVersion = capabilities.protocolVersion,
+            serverVersion = capabilities.serverVersion
+        )
+    }
+}
+rotocolVersion,
             serverVersion = capabilities.serverVersion
         )
     }

@@ -26,7 +26,9 @@ import com.studyagent.client.ui.screens.library.LibraryScreen
 import com.studyagent.client.ui.screens.library.LibraryViewModel
 import com.studyagent.client.ui.screens.cardbrowser.CardBrowserScreen
 import com.studyagent.client.ui.screens.cardbrowser.CardBrowserViewModel
-import com.studyagent.client.ui.screens.cardbrowser.CardDetailsPlaceholderScreen
+import com.studyagent.client.ui.screens.carddetails.CardDetailsScreen
+import com.studyagent.client.ui.screens.carddetails.CardDetailsRouteErrorScreen
+import com.studyagent.client.ui.screens.carddetails.CardDetailsViewModel
 import com.studyagent.client.ui.screens.settings.SettingsScreen
 import com.studyagent.client.ui.screens.settings.SettingsViewModel
 import com.studyagent.client.ui.screens.study.StudyScreen
@@ -140,12 +142,31 @@ fun AppNavHost(
             route = Screen.CardDetails.route,
             arguments = listOf(navArgument(Screen.CardDetails.ARG_CARD_REF) { type = NavType.StringType })
         ) { backStackEntry ->
-            CardDetailsPlaceholderScreen(
-                cardRef = Screen.CardDetails.decodeCardRef(
-                    backStackEntry.arguments?.getString(Screen.CardDetails.ARG_CARD_REF)
-                ),
-                onNavigateBack = { navController.popBackStack() }
+            val cardRef = Screen.CardDetails.decodeCardRef(
+                backStackEntry.arguments?.getString(Screen.CardDetails.ARG_CARD_REF)
             )
+            when {
+                cardRef == null -> CardDetailsRouteErrorScreen(
+                    message = "The stable card reference is invalid. Return to the browser and open the card again.",
+                    onNavigateBack = { navController.popBackStack() }
+                )
+                container.ankiBackendRegistry.find(cardRef.backendId) == null -> CardDetailsRouteErrorScreen(
+                    message = "The backend that owns this card reference is not registered. The reference was not opened against another backend.",
+                    onNavigateBack = { navController.popBackStack() }
+                )
+                else -> {
+                    val detailsBackend = checkNotNull(container.ankiBackendRegistry.find(cardRef.backendId))
+                    val detailsViewModel: CardDetailsViewModel = viewModel(
+                        key = "card-details:${cardRef.stableKey}"
+                    ) {
+                        CardDetailsViewModel(initialBackend = detailsBackend, initialCardRef = cardRef)
+                    }
+                    CardDetailsScreen(
+                        viewModel = detailsViewModel,
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                }
+            }
         }
 
         composable(Screen.Control.route) {

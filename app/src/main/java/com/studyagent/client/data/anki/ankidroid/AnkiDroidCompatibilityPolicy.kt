@@ -159,6 +159,11 @@ object AnkiDroidCompatibilityPolicy {
             scheduledReview = true,
             reviewIntervals = true,
             renderedCards = true,
+            // GATE 16 — deep read-only card details are implemented through exact public
+            // `cards/<id>`, `notes/<id>` and `models/<id>` reads (JVM-tested mapping). The
+            // backend drops this flag again when no note gateway is wired. Flag/mutation
+            // capabilities stay off — this surface is strictly read-only.
+            cardDetails = true,
             // GATE 13 — reviewer actions are implemented through the audited public `update`
             // columns (`buried` / `suspended`); flags stay off because the contract has no flag
             // column at all. Maturity stays IMPLEMENTED, not VERIFIED: no real-device mutation
