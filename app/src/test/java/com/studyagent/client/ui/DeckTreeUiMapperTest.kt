@@ -67,6 +67,7 @@ class DeckTreeUiMapperTest {
     @Test
     fun `large tree flattens with bounded memory and all stable deck identities`() {
         val source = LibraryTestFixtures.largeCollection(backend)
+            .map { deck -> DeckListItem(AnkiDeckSummary(deck, deck.counts, isSelectedByBackend = null, deck.isFiltered)) }
         val roots = DeckTreeUiMapper.build(source)
         val flattened = DeckTreeProjection.flattenVisible(roots, emptySet(), forceExpanded = true)
         val deckRows = flattened.filterIsInstance<DeckTreeItem.Deck>()

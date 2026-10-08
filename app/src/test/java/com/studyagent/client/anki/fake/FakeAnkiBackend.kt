@@ -47,7 +47,9 @@ class FakeAnkiBackend(
      */
     private val flagWrites: Boolean = false,
     private val guaranteeLevel: CommitGuaranteeLevel = mode.guarantee,
-    private val persistedEffectStore: FakeBackendCommitStore = FakeBackendCommitStore()
+    private val persistedEffectStore: FakeBackendCommitStore = FakeBackendCommitStore(),
+    /** GATE 16 — explicit deep-read fixtures; when absent, only already-known card facts project. */
+    cardDetails: List<AnkiCardDetails> = emptyList()
 ) : AnkiBackend {
     override val commitSemantics = CommitSemantics(guaranteeLevel,
         supportsIdempotentReplay = guaranteeLevel == CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED ||
@@ -93,6 +95,8 @@ class FakeAnkiBackend(
         card.copy(media = card.media.toList(), metadata = card.metadata.copy(tags = card.metadata.tags.toSet()),
             scheduling = card.scheduling?.let { it.copy(nextReviewTimes = it.nextReviewTimes.toMap()) })
     }.toMutableList()
+    /** Immutable source snapshots for GATE 16's exact read, detached from caller-owned lists. */
+    private val cardDetailsData = cardDetails.map(::snapshotDetails).toMutableList()
     private val nextFailures = ArrayDeque(nextErrors)
     private val commits = ArrayDeque(commitSteps)
     private val ledger = persistedEffectStore.records
@@ -108,11 +112,67 @@ class FakeAnkiBackend(
     private var cursor = 0
     private var active: AnkiReviewTurn? = null
 
+    // ---------------------------------------------------------------- GATE 16 exact card details
+
+    /**
+     * GATE 16 — exact, read-only details fixture lookup. No other card's data is returned, even
+     * when sibling cards share a note. If an explicit deep fixture is absent, only facts already
+     * present on this exact rendered-card fixture are projected; source fields remain unavailable
+     * (`null`) rather than being reverse-engineered from its HTML.
+     */
+    override suspend fun getCardDetails(cardRef: AnkiCardRef): AnkiResult<AnkiCardDetails> {
+        delay(latencyMs)
+        val gate: CompletableDeferred<Unit>?
+        val result = mutex.withLock {
+            cardDetailsCalls += 1
+            requestedCardDetailsRefs += cardRef
+            usabilityError()?.let { return@withLock AnkiResult.Failure(it) }
+            if (!capabilities.value.cardDetails) {
+                return@withLock AnkiResult.Failure(unsupported("card_details"))
+            }
+            if (cardRef.backendId != id) {
+                return@withLock AnkiResult.Failure(AnkiError.InvalidRequest(detail = "card_ref_foreign_backend"))
+            }
+            cardDetailsError?.let { return@withLock AnkiResult.Failure(it) }
+
+            val explicit = cardDetailsData.firstOrNull { AnkiCardHydration.identityMatches(cardRef, it.cardRef) }
+            val details = explicit ?: cardData
+                .firstOrNull { AnkiCardHydration.identityMatches(cardRef, it.ref) }
+                ?.let(::detailsFromRenderedCard)
+            if (details == null) {
+                AnkiResult.Failure(AnkiError.CardNotFound(card = cardRef))
+            } else {
+                AnkiResult.Success(snapshotDetails(details))
+            }
+        }
+        gate = cardDetailsGate
+        gate?.await()
+        return result
+    }
+
+    /** Replace a deep fixture as if an external read-only refresh sees changed collection truth. */
+    suspend fun replaceCardDetails(updated: AnkiCardDetails): Boolean = mutex.withLock {
+        require(updated.cardRef.backendId == id)
+        val index = cardDetailsData.indexOfFirst { AnkiCardHydration.identityMatches(updated.cardRef, it.cardRef) }
+        if (index < 0) return@withLock false
+        cardDetailsData[index] = snapshotDetails(updated)
+        true
+    }
+
     // ---------------------------------------------------------------- GATE 07 card hydration
 
     /** Read-only card lookups answered since construction (STEP 40/W — bounded call assertions). */
     var hydrateCalls: Int = 0
         private set
+
+    /** GATE 16 — exact details reads answered since construction. */
+    var cardDetailsCalls: Int = 0
+        private set
+    val requestedCardDetailsRefs: MutableList<AnkiCardRef> = mutableListOf()
+    /** Scripted details failure for every lookup (NotFound/unavailability are typed outcomes). */
+    @Volatile var cardDetailsError: AnkiError? = null
+    /** Suspend one details read to exercise generation/card/backend stale-response protection. */
+    @Volatile var cardDetailsGate: CompletableDeferred<Unit>? = null
 
     /** Scripted hydration failure for every lookup (STEP 43 typed outcomes). */
     var hydrateError: AnkiError? = null
@@ -125,6 +185,8 @@ class FakeAnkiBackend(
         require(nextErrors.size <= maxLedgerEntries && commitSteps.size <= maxLedgerEntries)
         require(deckData.all { it.ref.backendId == id })
         require(cardData.all { it.ref.backendId == id })
+        require(cardDetailsData.all { it.cardRef.backendId == id })
+        require(cardDetailsData.map { it.cardRef.stableKey }.distinct().size == cardDetailsData.size)
         require(deckData.map { it.ref }.distinct().size == deckData.size)
         requireSupported(initialCapabilities, flagWrites)
     }
@@ -632,9 +694,10 @@ class FakeAnkiBackend(
 
     /** Test-only fixture mutation (STEP 44): the card is gone; hydration must fail typed. */
     suspend fun deleteCard(card: AnkiCardRef): Boolean = mutex.withLock {
-        val removed = cardData.removeAll { AnkiCardHydration.identityMatches(card, it.ref) }
-        if (removed) hydrationMemo = null
-        removed
+        val removedCard = cardData.removeAll { AnkiCardHydration.identityMatches(card, it.ref) }
+        val removedDetails = cardDetailsData.removeAll { AnkiCardHydration.identityMatches(card, it.cardRef) }
+        if (removedCard) hydrationMemo = null
+        removedCard || removedDetails
     }
 
     /** Evidence = the fixture card's applied-review count, so reconciliation is checkable. */
@@ -996,6 +1059,7 @@ class FakeAnkiBackend(
             deckListing = true,
             renderedCards = true,
             reviewIntervals = true,
+            cardDetails = true,
             cardBrowser = CARD_BROWSER_CAPABILITIES
         )
 
@@ -1022,7 +1086,43 @@ class FakeAnkiBackend(
                 !value.search && !value.media) { "Fake does not implement these features" }
         }
     }
+
+    /** Project only facts this exact fake card already owns; never parse rendered HTML for fields. */
+    private fun detailsFromRenderedCard(card: AnkiRenderedCard): AnkiCardDetails = AnkiCardDetails(
+        cardRef = card.ref,
+        noteRef = card.noteRef,
+        cardOrd = card.ref.cardOrd,
+        deckRef = card.deckRef,
+        deckName = card.metadata.deckName,
+        noteTypeId = null,
+        noteTypeName = card.metadata.noteTypeName,
+        templateName = card.metadata.templateName,
+        questionHtml = card.questionHtml,
+        answerHtml = card.answerHtml,
+        questionText = card.questionText,
+        answerText = card.answerText,
+        pureAnswerText = card.pureAnswerText,
+        fields = null,
+        tags = card.metadata.tags.toList(),
+        flag = card.flag,
+        cardType = card.metadata.cardType,
+        queueState = card.metadata.queueState,
+        scheduling = card.scheduling,
+        originalDeckRef = card.metadata.originalDeckRef,
+        noteCreatedEpochSeconds = card.metadata.noteCreatedEpochSeconds,
+        noteModifiedEpochSeconds = null,
+        mediaFiles = card.media.filterIsInstance<AnkiMediaRef.BackendStream>().map { it.streamId }
+    )
 }
+
+/** Deep-copy every caller-owned collection: fixture snapshots are immutable while a request runs. */
+private fun snapshotDetails(details: AnkiCardDetails): AnkiCardDetails = details.copy(
+    fields = details.fields?.toList(),
+    tags = details.tags?.toList(),
+    mediaFiles = details.mediaFiles.toList(),
+    degradations = details.degradations.toList(),
+    scheduling = details.scheduling?.copy(nextReviewTimes = details.scheduling.nextReviewTimes.toMap())
+)
 
 /**
  * GATE 11 checkpoint 4 — the response is gone after the collection was already changed. This is a

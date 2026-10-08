@@ -145,6 +145,35 @@ interface AnkiBackend {
     suspend fun hydrateCardContent(card: AnkiCardRef): AnkiResult<AnkiRenderedCard>
 
     /**
+     * GATE 16 — the single, deep, read-only card-details entry point (CHECKPOINT 03):
+     * `getCardDetails(cardRef): AnkiCardDetails`. There is deliberately no `getNoteDetails`,
+     * `getCardFields`, `getCardScheduling` or `getCardMetadata`: one call returns one coherent
+     * [AnkiCardDetails] so the UI never assembles a card from several provider APIs and can never
+     * mix rows from two lookups.
+     *
+     * Lookup is **exact** (INV-16-11/12): the backend resolves this one card identity — never a
+     * collection-wide card listing filtered client-side, never a question/deck/position search.
+     * Supporting reads for the same card's note, note type or deck are permitted; scanning other
+     * cards is not.
+     *
+     * Outcomes: [AnkiResult.Success] with the details snapshot; [AnkiError.CardNotFound] when the
+     * card no longer exists (never a same-note sibling, never stale browser content — GATE 16 §23);
+     * [AnkiError.DataIntegrityFailure] (or the project-equivalent [AnkiError.MalformedResponse])
+     * when the card exists but its note relationship cannot be trusted (GATE 16 §24 — fields are
+     * never fabricated); [AnkiError.InvalidRequest] for a reference belonging to another backend;
+     * the ordinary availability family otherwise. A backend that cannot serve details at all
+     * answers [AnkiError.UnsupportedAction] and advertises `AnkiCapabilities.cardDetails = false`.
+     *
+     * Read-only and idempotent (INV-16-01): no rating, no edit, no flag/tag/deck change, no
+     * scheduler mutation, no session advancement (INV-16-18/19). Repeating the call re-fetches the
+     * *current* state. Optional metadata the backend cannot expose stays `null` (INV-16-10) —
+     * unknown is never zero. The reference is never reinterpreted against another backend or
+     * collection (INV-16-15).
+     */
+    suspend fun getCardDetails(cardRef: AnkiCardRef): AnkiResult<AnkiCardDetails> =
+        AnkiResult.Failure(AnkiError.UnsupportedAction(action = "card_details"))
+
+    /**
      * GATE 11 — read-only preparation of one rating transaction, called *before* the ledger marks
      * the commit SUBMITTING.
      *

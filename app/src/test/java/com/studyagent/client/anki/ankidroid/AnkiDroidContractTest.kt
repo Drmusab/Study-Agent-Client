@@ -130,7 +130,7 @@ class AnkiDroidContractTest {
             listOf(
                 "_id", "note_id", "ord", "card_name", "deck_id", "original_deck_id",
                 "question", "answer", "question_simple", "answer_simple", "answer_pure",
-                "reps", "lapses", "interval", "type", "queue",
+                "reps", "lapses", "interval", "type", "queue", "due", "original_due", "sm2_factor",
                 "fsrs_stability", "fsrs_difficulty", "fsrs_desired_retention", "last_review_time_secs"
             ),
             AnkiDroidApiContract.CARD_PROJECTION.toList()

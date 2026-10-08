@@ -5,6 +5,7 @@ import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiCardDetails
 import com.studyagent.client.core.anki.AnkiCardPage
 import com.studyagent.client.core.anki.AnkiCardQuery
 import com.studyagent.client.core.anki.AnkiDeck
@@ -105,7 +106,13 @@ class AnkiDroidBackend(
      */
     private val reviewerActionGateway: AnkiDroidReviewerActionGateway? = null,
     /** GATE 15 — currently refuses because the pinned public API has no reliable card-list query. */
-    private val cardBrowserGateway: AnkiDroidCardBrowserGateway = UnsupportedAnkiDroidCardBrowserGateway()
+    private val cardBrowserGateway: AnkiDroidCardBrowserGateway = UnsupportedAnkiDroidCardBrowserGateway(),
+    /**
+     * GATE 16 — the read-only note/note-type gateway behind `getCardDetails`. Absent (tests,
+     * older composition) = card details are refused truthfully and `AnkiCapabilities.cardDetails`
+     * is not advertised. It is read-only by construction: no mutation family exists on it.
+     */
+    private val noteGateway: AnkiDroidNoteGateway? = null
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
@@ -168,7 +175,9 @@ class AnkiDroidBackend(
         review = capabilities.review && ratingGateway != null,
         bury = capabilities.bury && reviewerActionCommitter != null,
         suspendCards = capabilities.suspendCards && reviewerActionCommitter != null,
-        flags = false
+        flags = false,
+        // GATE 16 — deep card details need the note gateway; without it the claim would be a lie.
+        cardDetails = capabilities.cardDetails && noteGateway != null
     )
 
     /** Content-free physical reviewer-action update count (diagnostics/test evidence only). */
@@ -390,6 +399,102 @@ class AnkiDroidBackend(
 
     /** Content-free card-hydration facts for settings/diagnostics (STEP 87). Never card text. */
     fun cardGatewayDiagnostics(): AnkiDroidCardQueryDiagnostics = cardGateway.lastQueryDiagnostics()
+
+    /**
+     * GATE 16 — deep, read-only details of one exact card (CHECKPOINT 09), by coordinating the
+     * existing gateways — one exact card read (the GATE 07 card gateway, identity-confirmed), one
+     * exact note + note-type read (the GATE 16 note gateway), and the bounded deck listing for the
+     * deck *display name* (the GATE 14 pattern). Never a card listing, never a local filter over
+     * the collection (INV-16-12).
+     *
+     * Ownership rules (CHECKPOINT 08): the mapper assembles, the gateways fetch, and nothing here
+     * maps rows. A card whose note has vanished is a [AnkiError.DataIntegrityFailure] — fields are
+     * never fabricated (GATE 16 §24). Optional display facts (deck name) degrade to absence.
+     * Read-only and idempotent: no mutation, no session use (INV-16-18/19), and the read bypasses
+     * the turn-scoped hydration memo so a refresh always observes current backend state
+     * (GATE 16 §28).
+     */
+    override suspend fun getCardDetails(cardRef: AnkiCardRef): AnkiResult<AnkiCardDetails> {
+        try {
+            usabilityError()?.let { return AnkiResult.Failure(it) }
+            if (!capabilities.value.cardDetails) {
+                return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "card_details"))
+            }
+            val detailsNoteGateway = noteGateway
+                ?: return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "card_details"))
+            if (cardRef.backendId != id) {
+                return AnkiResult.Failure(AnkiError.InvalidRequest(detail = "card_ref_foreign_backend"))
+            }
+            val authority = currentAuthority()
+                ?: return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+
+            // 1) Exact card lookup — the same identity-checked read hydration uses.
+            val rendered = when (val result = cardGateway.queryCard(authority, cardRef)) {
+                is AnkiResult.Failure -> return result
+                is AnkiResult.Success -> result.value
+            }
+
+            // 2) Exact note lookup for source fields/tags/note-type facts. The card row's note
+            //    identity is authoritative here (it confirmed the requested card identity above).
+            val noteId = rendered.noteRef?.noteId ?: rendered.ref.noteId
+                ?: return AnkiResult.Failure(AnkiError.DataIntegrityFailure(detail = "card_note_identity_unreadable"))
+            val note = when (
+                val result = detailsNoteGateway.queryNoteDetails(
+                    authority = authority,
+                    noteId = noteId,
+                    collectionKey = cardRef.collectionKey
+                )
+            ) {
+                is AnkiResult.Failure -> return when (result.error) {
+                    // A live card pointing at a missing note is corruption, not "no fields"
+                    // (GATE 16 §24): typed integrity failure, never an empty fabricated note.
+                    is AnkiError.NoteNotFound ->
+                        AnkiResult.Failure(AnkiError.DataIntegrityFailure(detail = "note_missing_for_card"))
+                    else -> result
+                }
+                is AnkiResult.Success -> result.value
+            }
+
+            // 3) Deck *display name* only — best effort from the same bounded listing read GATE 14
+            //    uses. Never identity, never required (INV-ANKI-DECK-01).
+            var deckNameUnavailable = false
+            val deckName: String? = rendered.deckRef?.let { deckRef ->
+                when (val listing = deckGateway.queryDecks(authority)) {
+                    is AnkiResult.Failure -> {
+                        deckNameUnavailable = true
+                        null
+                    }
+                    is AnkiResult.Success -> {
+                        val deck = listing.value.decks.firstOrNull {
+                            it.ref.backendId == deckRef.backendId &&
+                                it.ref.deckId == deckRef.deckId &&
+                                it.ref.collectionKey == deckRef.collectionKey
+                        }
+                        if (deck == null) deckNameUnavailable = true
+                        deck?.name
+                    }
+                }
+            }
+
+            return AnkiResult.Success(
+                AnkiDroidCardDetailsMapper.map(
+                    rendered = rendered,
+                    note = note,
+                    deckName = deckName,
+                    deckNameUnavailable = deckNameUnavailable
+                )
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (throwable: Throwable) {
+            AppLogger.w(TAG, "ANKI_CARD_DETAILS_FAILED error=${throwable::class.java.simpleName}")
+            return AnkiResult.Failure(AnkiError.Unknown(cause = throwable::class.java.simpleName))
+        }
+    }
+
+    /** Content-free note-query facts for settings/diagnostics (GATE 16). Never note content. */
+    fun noteGatewayDiagnostics(): AnkiDroidNoteQueryDiagnostics =
+        noteGateway?.lastQueryDiagnostics() ?: AnkiDroidNoteQueryDiagnostics.NONE
 
     /**
      * Opens a scheduled-review session bound to exactly one backend, one collection and one deck

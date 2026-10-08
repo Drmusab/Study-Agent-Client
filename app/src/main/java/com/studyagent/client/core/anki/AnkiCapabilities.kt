@@ -124,6 +124,15 @@ data class AnkiCapabilities(
     val createNotes: Boolean = false,
     val search: Boolean = false,
     /**
+     * GATE 16 — can serve [AnkiBackend.getCardDetails] (deep, read-only details of one exact card).
+     * Separate from [renderedCards] (GATE 07 content hydration) because a backend may render cards
+     * for review yet expose no note fields/tags/details surface — and a capability that lies is
+     * worse than a missing one. Per-section truth (fields, scheduling, flags, media) is carried by
+     * the details model's own nullability, so no further detail granularity is claimed here
+     * (GATE 16 CHECKPOINT 04: only where the capability system requires it).
+     */
+    val cardDetails: Boolean = false,
+    /**
      * Read-only card-browser features (§61/§62). Deliberately separate from [flags], which means
      * the backend can *mutate* flags through the reviewer-action contract; browsing may read and
      * filter flags without exposing any mutation path.
