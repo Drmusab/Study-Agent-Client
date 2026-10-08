@@ -299,6 +299,18 @@ private fun DeckSummaryCard(state: DeckDetailsUiState.Ready) {
                         color = if (due == 0) AppColors.contentMuted else AppColors.actionAccent
                     )
                 }
+                // GATE 14 — only rendered when the backend actually reports a total card count.
+                // `null` means "the backend did not say" and is never shown as zero.
+                state.summary.totalCards?.let { total ->
+                    Text(
+                        text = if (total == 0) "No cards in this deck" else "$total total cards",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = AppColors.contentSecondary,
+                        modifier = Modifier.semantics {
+                            contentDescription = "Total cards ${total}"
+                        }
+                    )
+                }
             } else {
                 Text("Due counts are not available from this backend.",
                     style = MaterialTheme.typography.bodyMedium, color = AppColors.contentSecondary)

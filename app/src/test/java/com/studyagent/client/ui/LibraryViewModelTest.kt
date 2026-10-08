@@ -14,6 +14,7 @@ import com.studyagent.client.data.anki.AnkiLibraryRepository
 import com.studyagent.client.ui.screens.library.LibraryUiState
 import com.studyagent.client.ui.screens.library.LibraryViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -238,6 +239,48 @@ class LibraryViewModelTest {
             assertTrue(state.tree.isNotEmpty())
             assertEquals(1, backend.getDecksCalls)
             assertEquals(1, backend.getSelectedDeckCalls)
+        } finally {
+            clearViewModels()
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `a snapshot from a different backend identity is never rendered`() = runTest {
+        installMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val foreignId = AnkiBackendId.Fake("foreign-backend")
+            val foreignCaps = AnkiCapabilities(deckListing = true)
+            val foreignBackend = FakeAnkiBackend(
+                id = foreignId,
+                decks = listOf(AnkiDeck(AnkiDeckRef(foreignId, "1"), "Foreign deck")),
+                initialCapabilities = foreignCaps,
+                initialAvailability = AnkiAvailability.Ready(foreignCaps)
+            )
+            val repository = AnkiLibraryRepository(foreignBackend)
+            repository.refresh() // cached snapshot is scoped to the foreign backend
+
+            val ownBackend = FakeAnkiBackend(
+                id = backendId,
+                decks = emptyList(),
+                initialCapabilities = capabilities(),
+                initialAvailability = AnkiAvailability.Ready(capabilities())
+            )
+            val viewModel = track(LibraryViewModel(ownBackend, repository))
+            val observed = mutableListOf<LibraryUiState>()
+            backgroundScope.launch { viewModel.uiState.collect { observed += it } }
+            advanceUntilIdle()
+
+            // No emitted state may ever present foreign data as this backend's library; the
+            // identity guard fails closed instead of mixing backends (INV-14-12 / audit 7).
+            assertTrue(observed.none {
+                it is LibraryUiState.Ready && it.decks.any { deck -> deck.deck.ref.backendId == foreignId }
+            })
+            val finalState = viewModel.uiState.value
+            assertTrue(finalState is LibraryUiState.Error)
+            assertTrue((finalState as LibraryUiState.Error).error is AnkiError.BackendUnavailable)
+            assertEquals(backendId, finalState.backend)
+            assertEquals(0, ownBackend.getDecksCalls) // the mismatch is caught before any read
         } finally {
             clearViewModels()
             Dispatchers.resetMain()
