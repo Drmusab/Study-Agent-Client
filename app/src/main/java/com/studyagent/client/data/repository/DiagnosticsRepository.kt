@@ -707,8 +707,14 @@ class DefaultDiagnosticsRepository(
             rows.add("Edit Notes" to if (capabilities.editNotes) "Implemented" else "Pending GATE 17")
             rows.add("Create Notes" to if (capabilities.createNotes) "Implemented" else "Pending GATE 17")
             rows.add("Search" to if (capabilities.search) "Implemented" else "Pending")
-            rows.add("Card Browser" to if (capabilities.cardBrowser.browse) "Implemented" else "Unsupported / not wired")
-            rows.add("Card Search" to if (capabilities.cardBrowser.textSearch) "Implemented" else "Unsupported / not wired")
+            rows.add(
+                "Card Browser" to
+                    if (capabilities.cardBrowser.canBrowse) "Implemented" else "Unsupported / not wired"
+            )
+            rows.add(
+                "Card Search" to
+                    if (capabilities.cardBrowser.canSearchText) "Implemented" else "Unsupported / not wired"
+            )
         }
 
         // Detailed capability provenance (§122)

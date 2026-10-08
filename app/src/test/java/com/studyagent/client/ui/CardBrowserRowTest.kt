@@ -14,7 +14,7 @@ import org.junit.Test
 
 class CardBrowserRowTest {
     @Test
-    fun `row projection strips markup clamps text and respects answer preview capability`() {
+    fun `row projection strips markup clamps text and respects the answer preview policy`() {
         val backendId = AnkiBackendId.Fake("row")
         val deck = AnkiDeckRef(backendId, "deck", "collection")
         val cardRef = AnkiCardRef(backendId, "card", "note", 0, "collection")
@@ -33,10 +33,14 @@ class CardBrowserRowTest {
         assertEquals(cardRef, hiddenAnswer.cardRef)
         assertNull(hiddenAnswer.answerPreview)
         assertEquals("العربية English", hiddenAnswer.deckName)
-        assertTrue(hiddenAnswer.questionPreview!!.startsWith("السؤال QRS & ECG"))
-        assertFalse(hiddenAnswer.questionPreview.contains("<"))
-        assertFalse(hiddenAnswer.questionPreview.contains("ignored"))
-        assertTrue(hiddenAnswer.questionPreview.length <= 220)
+
+        val question = hiddenAnswer.questionPreview ?: error("question preview must be present")
+        assertTrue(question.startsWith("السؤال QRS & ECG"))
+        assertFalse(question.contains("<"))
+        assertFalse(question.contains("ignored"))
+        assertTrue(question.length <= 220)
+
+        // §47 — at most a short display preview leaves the model, never full template content.
         assertEquals(listOf("طب", "cardiology", "ecg"), hiddenAnswer.tags)
         assertEquals("Answer text", visibleAnswer.answerPreview)
     }

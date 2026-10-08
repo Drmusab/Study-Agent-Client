@@ -273,8 +273,8 @@ data class AnkiDroidApiCapabilityReport(
         AnkiDroidCapabilityDetail("search", search, maturityFor(search, implemented.search), "provider contract"),
         AnkiDroidCapabilityDetail("noteTypes", noteTypes, maturityFor(noteTypes, implemented.renderedCards), "provider contract"),
         AnkiDroidCapabilityDetail("cardTemplates", cardTemplates, maturityFor(cardTemplates, implemented.renderedCards), "provider contract"),
-        AnkiDroidCapabilityDetail("cardBrowser", cardBrowser, maturityFor(cardBrowser, implemented.cardBrowser.browse), "no public bounded card-list URI in the pinned contract"),
-        AnkiDroidCapabilityDetail("cardSearch", cardSearch, maturityFor(cardSearch, implemented.cardBrowser.textSearch), "known-card hydration is not collection-wide search")
+        AnkiDroidCapabilityDetail("cardBrowser", cardBrowser, maturityFor(cardBrowser, implemented.cardBrowser.canBrowse), "no public bounded card-list URI in the pinned contract"),
+        AnkiDroidCapabilityDetail("cardSearch", cardSearch, maturityFor(cardSearch, implemented.cardBrowser.canSearchText), "known-card hydration is not collection-wide search")
     )
 
     private fun maturityFor(support: CapabilitySupport, implemented: Boolean): CapabilityMaturity = when {

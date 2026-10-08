@@ -1,5 +1,10 @@
 # GATE 15 — Backend-neutral Card Browser
 
+> **Superseded (pre-lock draft).** This document describes the earlier 18-invariant draft and its
+> "OPEN — NOT LOCKED" verdict. The locked contract, the current implementation map and the current
+> verification evidence live in [`GATE_15B_CARD_BROWSER.md`](GATE_15B_CARD_BROWSER.md). This file is
+> kept only as history and must not be used as the GATE 15 status source.
+
 **Repository:** Drmusab/Study-Agent-Client<br>
 **Working branch:** `arena/e52f7ebb-study-agent-client`<br>
 **Scope:** read-only, deck-scoped card browsing; GATE 16 owns full Card Details hydration.

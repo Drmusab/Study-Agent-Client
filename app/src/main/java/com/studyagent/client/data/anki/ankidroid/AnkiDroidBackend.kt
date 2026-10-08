@@ -7,8 +7,6 @@ import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiCardPage
 import com.studyagent.client.core.anki.AnkiCardQuery
-import com.studyagent.client.core.anki.normalizeAnkiCardSearchText
-import com.studyagent.client.core.anki.unsupportedFeature
 import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
@@ -311,13 +309,22 @@ class AnkiDroidBackend(
 
     fun lastDeckQueryDiagnostics(): AnkiDeckQueryDiagnostics = deckGateway.lastListingDiagnostics()
 
-    /** GATE 15 — browse only when the live capability contract says every requested field is real. */
+    /**
+     * GATE 15 — browse only when the live capability contract says every requested component is
+     * real. The pinned public provider advertises no browser capability at all, so this call is
+     * refused with a typed [AnkiError.UnsupportedQueryFeature] before any provider traffic is even
+     * considered (INV-15-Q03): a partial due queue or a known-card item lookup is not a collection
+     * browser, and the client must never filter or sort one page locally to fake one.
+     */
     override suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> {
         try {
             usabilityError()?.let { return AnkiResult.Failure(it) }
-            val normalized = query.copy(text = normalizeAnkiCardSearchText(query.text))
-            normalized.unsupportedFeature(_integrationState.value.capabilities.cardBrowser)?.let { feature ->
-                return AnkiResult.Failure(AnkiError.UnsupportedAction(feature))
+            val normalized = query.normalized()
+            // §63 order: structurally valid query, then supported features, then the read. Scope
+            // identity and cursor validity belong to the adapter that actually executes the query.
+            normalized.structuralError()?.let { return AnkiResult.Failure(it) }
+            normalized.preflightError(_integrationState.value.capabilities.cardBrowser)?.let { error ->
+                return AnkiResult.Failure(error)
             }
             return cardBrowserGateway.browseCards(normalized)
         } catch (cancellation: CancellationException) {

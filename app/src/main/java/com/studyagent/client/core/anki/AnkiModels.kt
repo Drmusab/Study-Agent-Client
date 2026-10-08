@@ -156,7 +156,14 @@ data class AnkiSchedulingInfo(
     /** Stored interval (`ivl`) in days. A number, not the display label [intervalLabel]. */
     val intervalDays: Int? = null,
     /** Stored last-review time as Unix epoch seconds, when the backend exposes one. */
-    val lastReviewEpochSeconds: Long? = null
+    val lastReviewEpochSeconds: Long? = null,
+    /**
+     * GATE 15 — the backend-reported due/scheduling value as Unix epoch seconds (Anki stores a
+     * day number for review cards and a second-resolution stamp for learning cards; the adapter
+     * that owns that mapping normalizes it here). `null` = the backend did not report one, never a
+     * synthesized value: `AnkiCardSort.Due` is only advertised by a backend that can order by it.
+     */
+    val dueEpochSeconds: Long? = null
 )
 
 /**
@@ -176,7 +183,15 @@ data class AnkiCardMetadata(
     val tags: Set<String> = emptySet(),
     val templateName: String? = null,
     val queueState: AnkiCardQueueState? = null,
-    val originalDeckRef: AnkiDeckRef? = null
+    val originalDeckRef: AnkiDeckRef? = null,
+    /**
+     * GATE 15 — note creation time as Unix epoch seconds, when the backend reports it. `null` means
+     * the backend did not say, so a backend that cannot report it must not advertise
+     * [AnkiCardSortCapability.CREATED] and must reject `AnkiCardSort.Created` (§25).
+     */
+    val noteCreatedEpochSeconds: Long? = null,
+    /** GATE 15 — note modification time, same honesty rule as [noteCreatedEpochSeconds]. */
+    val noteModifiedEpochSeconds: Long? = null
 )
 
 /**

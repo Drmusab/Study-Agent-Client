@@ -359,8 +359,13 @@ class AnkiDroidBackendTest {
 
         val result = backend.browseCards(AnkiCardQuery())
 
+        // GATE 15 §20/§51 — the pinned provider advertises no browse capability at all, so the
+        // backend refuses the request with a typed unsupported-feature error *before* the provider
+        // seam: no partial query, no empty page standing in for "cannot do it".
         assertTrue(result is AnkiResult.Failure)
-        assertEquals(AnkiError.UnsupportedAction("card_browser"), (result as AnkiResult.Failure).error)
+        val error = (result as AnkiResult.Failure).error
+        assertTrue(error is AnkiError.UnsupportedQueryFeature)
+        assertEquals("card_browser", (error as AnkiError.UnsupportedQueryFeature).feature)
         assertEquals(0, browser.calls)
     }
 }

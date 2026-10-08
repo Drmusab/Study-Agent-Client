@@ -323,6 +323,12 @@ fun AnkiError.commitCategory(): String = when (this) {
     is AnkiError.QueryFailure -> "query_failure:${causeCategory}"
     is AnkiError.MalformedResponse -> "malformed:${detail ?: "unspecified"}"
     is AnkiError.InvalidRequest -> "invalid_request:${detail ?: "unspecified"}"
+    // GATE 15 query contract (§49-§52). Stable, content-free tokens like every other category.
+    is AnkiError.UnsupportedQueryFeature -> "unsupported_query_feature:$feature"
+    is AnkiError.InvalidQuery -> "invalid_query:${detail}"
+    is AnkiError.InvalidCursor -> "invalid_cursor:${detail ?: "unspecified"}"
+    is AnkiError.DataIntegrityFailure -> "data_integrity:${detail ?: "unspecified"}"
+    is AnkiError.TransientFailure -> "transient:${detail ?: "unspecified"}"
     is AnkiError.StaleCardReference -> "stale_card:${detail ?: "unspecified"}"
     is AnkiError.UnsupportedAction -> "unsupported:$action"
     is AnkiError.Unknown -> "unknown:${cause ?: "unspecified"}"

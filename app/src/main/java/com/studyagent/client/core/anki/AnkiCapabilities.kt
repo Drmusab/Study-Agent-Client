@@ -1,6 +1,83 @@
 package com.studyagent.client.core.anki
 
 /**
+ * GATE 15 §61/§62 — structured card-browser capability truth.
+ *
+ * A coarse `CARD_FILTERS = true` flag cannot express "this backend can browse and search but
+ * cannot filter by burial", and a capability that lies is worse than a missing one. Every field
+ * below independently describes one query component, so the UI can preflight a query (§21) and a
+ * backend can reject exactly what it cannot honour (§20).
+ *
+ * `capabilities` is a *claim by the backend*, never inferred from the backend's name. The default
+ * value is "cannot browse anything", which is always the safe answer.
+ */
+data class AnkiCardBrowserCapabilities(
+    /** §4 `AnkiCardScope.AllCards` — every card the collection can expose. */
+    val canBrowseAllCards: Boolean = false,
+    /** §5 `AnkiCardScope.Deck` — one deck by stable backend deck id. */
+    val canBrowseDeck: Boolean = false,
+    /** §5/§66 `includeChildren = true` through authoritative deck hierarchy. */
+    val canIncludeChildDecks: Boolean = false,
+    /** §7 literal user text search across backend-supported searchable text fields. */
+    val canSearchText: Boolean = false,
+    /** §12 filter families this backend can evaluate authoritatively. */
+    val supportedFilters: Set<AnkiCardFilterCapability> = emptySet(),
+    /** §22 sort keys this backend can order by (never includes [AnkiCardSort.Default]). */
+    val supportedSorts: Set<AnkiCardSortCapability> = emptySet(),
+    /** §36 exact total match count is available for a query. */
+    val supportsTotalCount: Boolean = false,
+    /** §29 largest page this backend accepts; a larger request is rejected, never clamped. */
+    val maxPageSize: Int = AnkiPageRequest.MAX_LIMIT
+) {
+    init {
+        require(maxPageSize >= AnkiPageRequest.MIN_LIMIT) { "A page size below the domain minimum is not usable" }
+        require(!canIncludeChildDecks || canBrowseDeck) { "Child-deck inclusion requires deck browsing" }
+        require(
+            canBrowseAllCards || canBrowseDeck || supportedFilters.isEmpty()
+        ) { "Filter capabilities require card browsing" }
+        require(
+            canBrowseAllCards || canBrowseDeck || supportedSorts.isEmpty()
+        ) { "Sort capabilities require card browsing" }
+        require(
+            canBrowseAllCards || canBrowseDeck || (!canSearchText && !supportsTotalCount)
+        ) { "Search/total capabilities require card browsing" }
+    }
+
+    /** True when this backend can serve at least one browse scope. */
+    val canBrowse: Boolean get() = canBrowseAllCards || canBrowseDeck
+
+    /** The largest *domain-legal* page size this backend accepts. */
+    val effectiveMaxPageSize: Int get() = minOf(maxPageSize, AnkiPageRequest.MAX_LIMIT)
+
+    fun supports(filter: AnkiCardFilterCapability): Boolean = filter in supportedFilters
+
+    fun supports(sort: AnkiCardSortCapability): Boolean = sort in supportedSorts
+
+    companion object {
+        /** A backend that cannot browse at all — the safe default. */
+        val NONE = AnkiCardBrowserCapabilities()
+    }
+}
+
+/** §12 filter families a browser backend may advertise. */
+enum class AnkiCardFilterCapability {
+    FLAGS,
+    TAGS,
+    CARD_TYPES,
+    SUSPENSION,
+    BURIAL
+}
+
+/** §22 explicit sort keys a browser backend may advertise. */
+enum class AnkiCardSortCapability {
+    DUE,
+    CREATED,
+    MODIFIED,
+    REPS,
+    LAPSES
+}
+
+/**
  * GATE 01 contract — what one Anki backend can actually do (§16).
  *
  * UI and policy must consult these flags, never infer capability from the
@@ -12,43 +89,6 @@ package com.studyagent.client.core.anki
  * as new flags (defaulting to `false`, which is always the safe answer for a
  * backend that cannot do something).
  */
-/**
- * Fine-grained read-only card-browser capability truth. A backend can browse without search,
- * expose some filters but not others, and omit exact result counts. [sorts] contains only
- * non-default sort keys it can order authoritatively; the backend's own default order is implicit.
- */
-data class AnkiCardBrowserCapabilities(
-    val browse: Boolean = false,
-    val deckScope: Boolean = false,
-    val textSearch: Boolean = false,
-    val flagFilter: Boolean = false,
-    val tagFilter: Boolean = false,
-    val cardTypeFilter: Boolean = false,
-    val suspendedFilter: Boolean = false,
-    val buriedFilter: Boolean = false,
-    val sorts: Set<AnkiCardSort> = emptySet(),
-    val totalCount: Boolean = false,
-    val answerPreview: Boolean = false
-) {
-    init {
-        require(!deckScope || browse) { "Deck scope requires card browsing" }
-        require(!textSearch || browse) { "Text search requires card browsing" }
-        require(!flagFilter || browse) { "Flag filtering requires card browsing" }
-        require(!tagFilter || browse) { "Tag filtering requires card browsing" }
-        require(!cardTypeFilter || browse) { "Card-type filtering requires card browsing" }
-        require(!suspendedFilter || browse) { "Suspended filtering requires card browsing" }
-        require(!buriedFilter || browse) { "Buried filtering requires card browsing" }
-        require(sorts.none { it == AnkiCardSort.Default }) { "Default order is implicit" }
-        require(sorts.isEmpty() || browse) { "Sorting requires card browsing" }
-        require(!totalCount || browse) { "A total requires card browsing" }
-        require(!answerPreview || browse) { "Answer previews require card browsing" }
-    }
-
-    companion object {
-        val NONE = AnkiCardBrowserCapabilities()
-    }
-}
-
 data class AnkiCapabilities(
     /**
      * Can serve due cards **and commit ratings** — the complete review loop (the minimum viable
@@ -84,8 +124,8 @@ data class AnkiCapabilities(
     val createNotes: Boolean = false,
     val search: Boolean = false,
     /**
-     * Read-only card-browser features. This is deliberately separate from [flags], which means
-     * the backend can mutate flags through the reviewer-action contract; browsing may read and
+     * Read-only card-browser features (§61/§62). Deliberately separate from [flags], which means
+     * the backend can *mutate* flags through the reviewer-action contract; browsing may read and
      * filter flags without exposing any mutation path.
      */
     val cardBrowser: AnkiCardBrowserCapabilities = AnkiCardBrowserCapabilities.NONE
