@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicLong
  * - there is **no** unbury/unsuspend column and no flag column at all: those operations have no
  *   public write path at the pin and are therefore not modelled (STEP 11/14/20).
  */
-internal interface AnkiDroidReviewerActionGateway {
+interface AnkiDroidReviewerActionGateway {
 
     /** Issues exactly one provider action update, or refuses before any IPC. */
     suspend fun submitAction(authority: String, mutation: AnkiDroidActionMutation): AnkiDroidReviewerActionDispatch
@@ -56,7 +56,7 @@ internal interface AnkiDroidReviewerActionGateway {
  * One card-scoped reviewer mutation, typed. The provider column names never travel above the
  * gateway (INV-ANKI-06: nothing above the gateway parses or speaks provider-native values).
  */
-internal data class AnkiDroidActionMutation(
+data class AnkiDroidActionMutation(
     val noteId: Long,
     val cardOrd: Int,
     val kind: ReviewerActionKind
@@ -70,7 +70,7 @@ internal data class AnkiDroidActionMutation(
 }
 
 /** What one action `update` produced, before any evidence is consulted. */
-internal sealed interface AnkiDroidReviewerActionDispatch {
+sealed interface AnkiDroidReviewerActionDispatch {
     /** Refused before any IPC: provably not dispatched, provably not applied. */
     data class NotDispatched(val error: AnkiError) : AnkiDroidReviewerActionDispatch
 
@@ -84,7 +84,7 @@ internal sealed interface AnkiDroidReviewerActionDispatch {
     data class Unknown(val detail: String, val callMayStillBeRunning: Boolean) : AnkiDroidReviewerActionDispatch
 }
 
-internal class DefaultAnkiDroidReviewerActionGateway(
+class DefaultAnkiDroidReviewerActionGateway(
     private val providerClient: AnkiDroidProviderClient,
     /** Owns issued provider writes so a caller that stops waiting never cancels a live call. */
     private val scope: CoroutineScope,

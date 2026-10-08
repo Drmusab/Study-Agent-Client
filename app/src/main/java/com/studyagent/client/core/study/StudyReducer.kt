@@ -648,9 +648,12 @@ object StudyReducer {
             }
             is AnkiStudyEvent.SelectRating -> selectRating(state, local, event, now, cancelVoice)
             is AnkiStudyEvent.ReviewerActionRequested -> reviewerActionRequested(state, local, event)
-            is AnkiStudyEvent.ReviewerActionApplied -> reviewerActionApplied(state, local, event, cancelVoice)
-            is AnkiStudyEvent.ReviewerActionRejected -> reviewerActionResultFailure(state, local, event)
-            is AnkiStudyEvent.ReviewerActionAmbiguous -> reviewerActionUnresolved(state, local, event, now)
+            is AnkiStudyEvent.ReviewerActionResolved -> reviewerActionResolved(state, local, event, now)
+            is AnkiStudyEvent.RetryReviewerAction -> retryReviewerAction(state, local, event)
+            is AnkiStudyEvent.RecoverReviewerAction -> recoverReviewerAction(state, local, event)
+            is AnkiStudyEvent.ReviewerActionReconciled -> reviewerActionReconciled(state, local, event, now)
+            is AnkiStudyEvent.ReviewerActionRecoveryBlocked ->
+                reviewerActionRecoveryBlocked(state, local, event, now)
             is AnkiStudyEvent.RatingCommitPrepared -> {
                 val commit = local.commit
                 if (event.epoch != state.epoch || commit == null || commit.commitId != event.commitId) {
@@ -799,14 +802,17 @@ object StudyReducer {
      * never advances: the next card is requested only from a COMMITTED outcome.
      */
     /**
-     * GATE 13 STEP 16/21/22/24-29 — the one policy gate for a reviewer-action request.
+     * GATE 13 §15/§17/§23/§25 — the one policy gate for a reviewer-action request.
      *
-     * The reducer owns the decision (not the UI): a request is correlated with the authoritative
-     * turn, the phase must present that turn, and [ReviewerActionPolicy] decides whether the action
-     * may be dispatched at all. An allowed action becomes exactly one
-     * [AnkiStudyEffect.PerformReviewerAction] — every backend call goes through that effect, so a
-     * Compose callback or a voice command can never reach the provider directly (INV-13-05).
-     * A blocked request is a *presentation* change (the user is told why) with no effect at all.
+     * The reducer owns the decision (not the UI): the request is correlated with the authoritative
+     * turn, the phase must present that turn, and [ReviewerActionPolicy] decides from **durable
+     * state** — the rating transaction's status, this turn's active action status and the frozen
+     * capability set — whether the action may be dispatched at all.
+     *
+     * An allowed action becomes exactly one [AnkiStudyEffect.PerformReviewerAction]: every backend
+     * call goes through the coordinator's transaction, so a Compose callback or a voice command can
+     * never reach the provider directly (AUDIT 3). A blocked request changes only presentation —
+     * nothing was sent, nothing changed.
      */
     private fun reviewerActionRequested(
         state: SessionMachineState,
@@ -819,168 +825,430 @@ object StudyReducer {
             (event.turnId != null && event.turnId != turn.turnId) ||
             (event.cardId != null && event.cardId != state.currentCardId)
         ) {
-            return Transition.reject(state, event, "stale-anki-reviewer-action")
+            return rejectAction(state, event, "stale-anki-reviewer-action")
         }
         if (state.phase !in REVIEWER_ACTION_PHASES) {
-            return Transition.reject(state, event, "illegal-phase-for-anki-reviewer-action")
+            return rejectAction(state, event, "illegal-phase-for-anki-reviewer-action")
         }
+        val session = local.reviewSession ?: return rejectAction(state, event, "no-anki-review-session")
         val decision = ReviewerActionPolicy.decide(
             action = event.action,
             capabilities = local.request.reviewerActions,
+            turnPresented = true,
             commitStatus = local.commit?.status,
-            actionInFlight = local.reviewerActionInFlight,
-            actionOutcomeUnresolved = local.reviewerActionUnresolved,
+            activeActionStatus = local.reviewerAction?.status,
             turnResolved = local.ratingResolved
         )
         return when (decision) {
-            is ReviewerActionDecision.Allowed -> moved(
-                state.copy(anki = local.copy(
-                    reviewerAction = ReviewerActionUiState.Applying(event.action)
-                )),
-                listOf(AnkiStudyEffect.PerformReviewerAction(state.epoch, turn.turnId, turn.cardRef, event.action))
-            )
+            is ReviewerActionDecision.Allowed -> {
+                val request = ReviewerActionRequest(
+                    sessionId = local.request.studySessionId,
+                    turnId = turn.turnId,
+                    cardRef = turn.cardRef,
+                    collectionRef = session.context.collection,
+                    action = event.action,
+                    semantics = local.request.reviewerActions.semanticsOf(event.action.kind)
+                )
+                movedAction(
+                    state, event,
+                    state.copy(anki = local.copy(
+                        // The coordinator owns the durable PREPARED write (§17); until it reports
+                        // back, this is an optimistic projection of a *pending* intent — the same
+                        // shape GATE 11 uses for a freshly selected rating.
+                        reviewerAction = AnkiReviewerAction(
+                            request = request,
+                            status = ReviewerActionStatus.PREPARED,
+                            attempt = 1
+                        ),
+                        reviewerActionRefusal = null
+                    )),
+                    listOf(AnkiStudyEffect.PerformReviewerAction(
+                        epoch = state.epoch,
+                        sessionId = request.sessionId,
+                        turnId = request.turnId,
+                        cardRef = request.cardRef,
+                        action = request.action,
+                        collectionRef = request.collectionRef,
+                        semantics = request.semantics
+                    ))
+                )
+            }
             // Not an error state: nothing was sent, nothing changed, and the next request is
-            // re-evaluated from scratch (STEP 24-29).
-            is ReviewerActionDecision.Blocked -> moved(state.copy(anki = local.copy(
-                reviewerAction = ReviewerActionUiState.Blocked(event.action, decision.reason, decision.detail)
-            )))
+            // re-evaluated from scratch (§23).
+            is ReviewerActionDecision.Blocked -> movedAction(
+                state, event,
+                state.copy(anki = local.copy(
+                    reviewerActionRefusal = ReviewerActionRefusal(
+                        event.action, decision.reason, decision.detail)
+                ))
+            )
         }
     }
 
     /**
-     * GATE 13 STEP 17/18/19/35/36/37/38 — the one place a confirmed reviewer action is applied.
+     * GATE 13 §9/§19/§20/§22 — the persisted classification of one action attempt.
      *
-     * **Flag** keeps the turn: same [ReviewTurnId], same card, same phase, same transcript,
-     * reveal state, compare mode, evaluation and audio — only the flag projection (when the backend
-     * can report one) and the action state change. No scheduler query is emitted (STEP 36).
-     *
-     * **Bury / Suspend** invalidate the current turn only *after* this confirmed result: the turn is
-     * closed without a rating, no `ReviewCommitStatus` is created (INV-13-02/11), and a **fresh
-     * scheduler query** ([AnkiStudyEffect.Next]) is emitted — never a preselected next card
-     * (STEP 12/35, INV-13-09/10/12).
+     * `APPLIED` is the only status that may progress anything (INV-13-14): a flag returns to `Idle`
+     * with the minimal flag projection and the *same* turn (INV-13-13), while bury/suspend close the
+     * turn and ask the scheduler for a fresh card (INV-13-15). `RETRY_ALLOWED` and `AMBIGUOUS` block
+     * the turn exactly as §22's table requires.
      */
-    private fun reviewerActionApplied(
+    private fun reviewerActionResolved(
         state: SessionMachineState,
         local: AnkiStudyInteraction,
-        event: AnkiStudyEvent.ReviewerActionApplied,
-        cancelVoice: List<StudyEffect>
+        event: AnkiStudyEvent.ReviewerActionResolved,
+        now: Long
     ): Transition {
-        val turn = local.turn
-        if (turn == null || event.epoch != state.epoch ||
-            event.turnId != turn.turnId || event.cardRef != turn.cardRef
-        ) {
-            return Transition.reject(state, event, "stale-anki-action-result")
+        val action = local.reviewerAction
+        if (event.epoch != state.epoch || action == null || action.actionId != event.actionId) {
+            return rejectAction(state, event, "stale-anki-action-result")
         }
-        val applied = (local.reviewerAction as? ReviewerActionUiState.Applying)?.action
-        if (applied == null || applied != event.action) {
-            return Transition.reject(state, event, "unrequested-anki-action-result")
+        if (action.status == ReviewerActionStatus.APPLIED) {
+            return rejectAction(state, event, "duplicate-anki-action-result")
         }
-        if (!event.action.invalidatesTurn) {
-            // Minimal projection (STEP 38): the flag itself cannot be read back from the pinned
-            // contract, so the projection only applies when the backend reported one — the action
-            // carries the value it successfully set. Nothing else about the turn moves.
-            val flag = (event.action as? ReviewerAction.SetFlag)?.flag
-            val projectedTurn = flag?.let { value -> turn.withFlag(value) } ?: turn
-            return moved(state.copy(anki = local.copy(
-                turn = projectedTurn,
-                reviewerAction = ReviewerActionUiState.Idle
-            )))
+        return applyReviewerActionOutcome(state, local, event, action, event.outcome,
+            reconciliation = false, now = now)
+    }
+
+    /** GATE 13 §13 — an explicit retry of an action that is proven not applied (same identity). */
+    private fun retryReviewerAction(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: AnkiStudyEvent.RetryReviewerAction
+    ): Transition {
+        val action = local.reviewerAction
+        if (event.epoch != state.epoch || action == null || action.actionId != event.actionId) {
+            return rejectAction(state, event, "stale-anki-action-retry")
         }
-        val session = local.reviewSession
-            ?: return Transition.reject(state, event, "no-anki-review-session")
-        // The turn ends here. `commit` stays untouched on purpose: bury/suspend are not ratings,
-        // so nothing is created, promoted or recorded (INV-13-02/11).
-        return Transition(
-            state.copy(
-                phase = SessionPhase.WaitingForFirstCard,
-                cardTurn = null,
-                anki = local.copy(
-                    turn = null,
-                    transcript = null,
-                    turnPresentedAtMs = null,
-                    revealState = AnswerRevealState.HIDDEN,
-                    compareMode = local.request.defaultCompareMode,
-                    evaluation = null,
-                    evaluationStatus = AnswerEvaluationStatus.NOT_REQUESTED,
-                    evaluationFailureReason = null,
-                    activeEvaluationRequestId = null,
-                    audioSequencePhase = AnswerAudioSequencePhase.IDLE,
-                    renderFallbackReason = null,
-                    showRawReferenceAnswer = false,
-                    reviewerAction = ReviewerActionUiState.Idle,
-                    failure = null
-                ),
-                activeSpeechEffectId = null,
-                activeRecognitionEffectId = null,
-                error = null
-            ).recordTransition(event, state.phase, SessionPhase.WaitingForFirstCard),
-            // Ordering is the contract (INV-13-12): the scheduler is asked only now, after the
-            // backend confirmed the mutation — never before, never from a local guess.
-            cancelVoice + AnkiStudyEffect.Next(state.epoch, session)
+        // §13: only proven non-application may retry — RETRY_ALLOWED. A *restored* PREPARED is
+        // provably un-entered as well (§26), which is the same safety argument.
+        val retryable = action.status == ReviewerActionStatus.RETRY_ALLOWED ||
+            (local.restoredAction && action.status == ReviewerActionStatus.PREPARED)
+        if (!retryable) return rejectAction(state, event, "anki-action-retry-not-safe")
+        return movedAction(
+            state, event,
+            state.copy(anki = local.copy(
+                reviewerAction = action.copy(
+                    status = ReviewerActionStatus.PREPARED,
+                    attempt = action.attempt + 1,
+                    failureCategory = null
+                )
+            )),
+            listOf(AnkiStudyEffect.RetryReviewerAction(state.epoch, action.actionId))
+        )
+    }
+
+    /** GATE 13 §27 — user intent to run the read-only reconciliation of an unresolved action. */
+    private fun recoverReviewerAction(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: AnkiStudyEvent.RecoverReviewerAction
+    ): Transition {
+        val action = local.reviewerAction
+        if (event.epoch != state.epoch || action == null || action.actionId != event.actionId) {
+            return rejectAction(state, event, "stale-anki-action-recover")
+        }
+        val reconcilable = action.status == ReviewerActionStatus.AMBIGUOUS ||
+            action.status == ReviewerActionStatus.SUBMITTING
+        if (!reconcilable) return rejectAction(state, event, "anki-action-not-reconcilable")
+        if (action.reconciling) return rejectAction(state, event, "anki-action-reconcile-in-flight")
+        return movedAction(
+            state, event,
+            state.copy(anki = local.copy(reviewerAction = action.copy(reconciling = true))),
+            listOf(AnkiStudyEffect.RecoverReviewerAction(state.epoch, action.actionId))
         )
     }
 
     /**
-     * GATE 13 STEP 39 — proven not applied. The same turn continues with no scheduler progression;
-     * the failure is surfaced as presentation state and the user may try again (the pin's
-     * scheduler-level idempotency makes a repeated bury/suspend harmless).
+     * GATE 13 §26/§27 — the persisted outcome of a reconciliation. It may only resolve the record
+     * toward `APPLIED` or `RETRY_ALLOWED`, or leave it `AMBIGUOUS` (never an error): the same
+     * post-outcome projection rules apply as for the original answer.
      */
-    private fun reviewerActionResultFailure(
+    private fun reviewerActionReconciled(
         state: SessionMachineState,
         local: AnkiStudyInteraction,
-        event: AnkiStudyEvent.ReviewerActionRejected
+        event: AnkiStudyEvent.ReviewerActionReconciled,
+        now: Long
     ): Transition {
-        val turn = local.turn
-        if (turn == null || event.epoch != state.epoch ||
-            event.turnId != turn.turnId || event.cardRef != turn.cardRef
-        ) {
-            return Transition.reject(state, event, "stale-anki-action-result")
+        val action = local.reviewerAction
+        if (event.epoch != state.epoch || action == null || action.actionId != event.actionId) {
+            return rejectAction(state, event, "stale-anki-action-reconcile-result")
         }
-        val applied = (local.reviewerAction as? ReviewerActionUiState.Applying)?.action
-        if (applied == null || applied != event.action) {
-            return Transition.reject(state, event, "unrequested-anki-action-result")
-        }
-        return moved(state.copy(anki = local.copy(
-            reviewerAction = ReviewerActionUiState.Failed(event.action, event.reason)
-        )))
+        if (!action.reconciling) return rejectAction(state, event, "unrequested-anki-reconciliation")
+        return applyReviewerActionOutcome(state, local, event, action, event.outcome,
+            reconciliation = true, now = now)
     }
 
     /**
-     * GATE 13 STEP 31/40 — the action may have applied. The turn does **not** progress, nothing is
-     * replayed, and rating is blocked by [ReviewerActionPolicy.ratingBlockReason] until an explicit
-     * session restart resolves the state (INV-13-13). The phase deliberately stays put: claiming
-     * "buried" or "not buried" here would be a guess.
+     * GATE 13 §30 — the startup scan found an unresolved action. No `beginReview` and no scheduler
+     * query may happen: the turn is restored from durable truth (never a fresh card), and the user
+     * is offered the action's own recovery (retry when provably un-entered / not applied,
+     * reconciliation when the outcome is unknown).
      */
-    private fun reviewerActionUnresolved(
+    private fun reviewerActionRecoveryBlocked(
         state: SessionMachineState,
         local: AnkiStudyInteraction,
-        event: AnkiStudyEvent.ReviewerActionAmbiguous,
+        event: AnkiStudyEvent.ReviewerActionRecoveryBlocked,
         now: Long
     ): Transition {
-        val turn = local.turn
-        if (turn == null || event.epoch != state.epoch ||
-            event.turnId != turn.turnId || event.cardRef != turn.cardRef
-        ) {
-            return Transition.reject(state, event, "stale-anki-action-result")
+        val record = event.record
+        if (event.epoch != state.epoch || state.phase != SessionPhase.Starting ||
+            record.backendId != local.request.deck.backendId) {
+            return rejectAction(state, event, "stale-anki-action-recovery")
         }
-        val applied = (local.reviewerAction as? ReviewerActionUiState.Applying)?.action
-        if (applied == null || applied != event.action) {
-            return Transition.reject(state, event, "unrequested-anki-action-result")
-        }
-        return moved(state.copy(
-            anki = local.copy(
-                reviewerAction = ReviewerActionUiState.VerificationRequired(
-                    event.action, event.reason, event.detail
+        val request = ReviewerActionRequest(
+            sessionId = record.sessionId,
+            turnId = record.turnId,
+            cardRef = record.cardRef,
+            backendId = record.backendId,
+            collectionRef = record.collectionRef,
+            action = record.action,
+            semantics = ReviewerActionSemantics(
+                supportsIdempotentReplay = record.frozenIdempotentReplay,
+                supportsAuthoritativeReconciliation = record.frozenAuthoritativeReconciliation
+            )
+        )
+        return movedAction(
+            state, event,
+            state.copy(
+                phase = SessionPhase.ReviewerActionRecoveryRequired,
+                session = state.session ?: StudySessionSnapshot(
+                    local.request.studySessionId, "Anki review", startedAtEpochMs = now
+                ),
+                anki = local.copy(
+                    reviewerAction = AnkiReviewerAction(
+                        request = request,
+                        status = record.status,
+                        attempt = record.attemptCount,
+                        failureCategory = record.failure?.category
+                    ),
+                    restoredAction = true,
+                    failure = null
+                ),
+                error = SessionProblemHolder(
+                    SessionProblem.ANKI_REVIEWER_ACTION_UNCONFIRMED,
+                    "An earlier reviewer action may already have been applied in Anki. Study-Agent will " +
+                        "not repeat it until the review state can be verified.",
+                    true,
+                    now
                 )
-            ),
+            )
+        )
+    }
+
+    /**
+     * The one place a reviewer-action outcome becomes study state (§9/§22).
+     *
+     * ```text
+     * APPLIED        → flag: same turn, minimal flag projection, Idle
+     *                  bury/suspend: turn closed, fresh scheduler query only now (§19/§20)
+     * RETRY_ALLOWED  → RetryAvailable; the same action identity may retry (§13)
+     * AMBIGUOUS      → VerificationRequired; nothing progresses, nothing is replayed (§13)
+     * PersistenceFailure → the durable status is unchanged; the turn stays blocked and the failure
+     *                  is surfaced as a problem, never as a retry grant
+     * ```
+     */
+    private fun applyReviewerActionOutcome(
+        state: SessionMachineState,
+        local: AnkiStudyInteraction,
+        event: StudyEvent,
+        action: AnkiReviewerAction,
+        outcome: AnkiReviewerActionOutcome,
+        reconciliation: Boolean,
+        now: Long
+    ): Transition {
+        // A restored record has no live review session: resolution continues through the recovery
+        // flow (a fresh read-only session), never by rating or advancing the old turn.
+        if (local.restoredAction) {
+            return when (outcome) {
+                is AnkiReviewerActionOutcome.Applied -> movedActionRecovery(state, event, local, now)
+                is AnkiReviewerActionOutcome.RetryAvailable -> movedAction(
+                    state, event,
+                    state.copy(
+                        phase = SessionPhase.ReviewerActionRecoveryRequired,
+                        anki = local.copy(reviewerAction = action.copy(
+                            status = ReviewerActionStatus.RETRY_ALLOWED,
+                            reconciling = false,
+                            failureCategory = outcome.category,
+                            verifiedByReconciliation = reconciliation
+                        )),
+                        error = null
+                    )
+                )
+                is AnkiReviewerActionOutcome.Ambiguous -> movedAction(
+                    state, event,
+                    state.copy(
+                        phase = SessionPhase.ReviewerActionRecoveryRequired,
+                        anki = local.copy(reviewerAction = action.copy(
+                            status = ReviewerActionStatus.AMBIGUOUS,
+                            reconciling = false,
+                            failureCategory = outcome.category,
+                            verifiedByReconciliation = reconciliation
+                        ))
+                    )
+                )
+                is AnkiReviewerActionOutcome.PersistenceFailure -> movedAction(
+                    state, event,
+                    state.copy(anki = local.copy(reviewerAction = action.copy(
+                        reconciling = false, failureCategory = outcome.category
+                    )))
+                )
+                is AnkiReviewerActionOutcome.NotRecorded ->
+                    notRecordedAction(state, event, local, outcome, now)
+            }
+        }
+        val session = local.reviewSession
+        return when (outcome) {
+            is AnkiReviewerActionOutcome.Applied -> {
+                // §22/INV-13-15 — the one shared rule decides whether a *confirmed* action may open
+                // a fresh scheduler query; the flag path is exactly its `false` branch, not a second
+                // local comparison.
+                if (!nextCardAllowed(action.action, ReviewerActionStatus.APPLIED)) {
+                    // §18/INV-13-13 — a flag keeps the turn: same ReviewTurnId, same card, same
+                    // phase, same transcript, reveal state, compare mode, evaluation and audio.
+                    val flag = outcome.flag ?: (action.action as? ReviewerAction.SetFlag)?.flag
+                    val projected = flag?.let { value -> local.turn?.withFlag(value) } ?: local.turn
+                    movedAction(state, event, state.copy(anki = local.copy(
+                        turn = projected,
+                        reviewerAction = null,
+                        reviewerActionRefusal = null
+                    )))
+                } else if (session == null) {
+                    rejectAction(state, event, "no-anki-review-session")
+                } else {
+                    // §19/§20 — only a confirmed APPLIED invalidating action closes the turn.
+                    Transition(
+                        state.copy(
+                            phase = SessionPhase.WaitingForFirstCard,
+                            cardTurn = null,
+                            // The action is not a rating: no ReviewCommitStatus is created,
+                            // promoted or recorded (INV-13-04/05), and the session counters do not
+                            // move — an action is not a reviewed card.
+                            anki = local.copy(
+                                turn = null,
+                                transcript = null,
+                                turnPresentedAtMs = null,
+                                revealState = AnswerRevealState.HIDDEN,
+                                compareMode = local.request.defaultCompareMode,
+                                evaluation = null,
+                                evaluationStatus = AnswerEvaluationStatus.NOT_REQUESTED,
+                                evaluationFailureReason = null,
+                                activeEvaluationRequestId = null,
+                                audioSequencePhase = AnswerAudioSequencePhase.IDLE,
+                                renderFallbackReason = null,
+                                showRawReferenceAnswer = false,
+                                reviewerAction = null,
+                                reviewerActionRefusal = null,
+                                failure = null
+                            ),
+                            activeSpeechEffectId = null,
+                            activeRecognitionEffectId = null,
+                            error = null
+                        ).recordTransition(event, state.phase, SessionPhase.WaitingForFirstCard),
+                        // §22/INV-13-15 — the fresh next-card query happens only now, after the
+                        // backend confirmed the mutation, never before and never from a local guess.
+                        listOf(AnkiStudyEffect.Next(state.epoch, session))
+                    )
+                }
+            }
+            is AnkiReviewerActionOutcome.RetryAvailable -> movedAction(
+                state, event,
+                state.copy(anki = local.copy(reviewerAction = action.copy(
+                    status = ReviewerActionStatus.RETRY_ALLOWED,
+                    reconciling = false,
+                    failureCategory = outcome.category,
+                    verifiedByReconciliation = reconciliation
+                )))
+            )
+            is AnkiReviewerActionOutcome.Ambiguous -> movedAction(
+                state, event,
+                state.copy(
+                    anki = local.copy(reviewerAction = action.copy(
+                        status = ReviewerActionStatus.AMBIGUOUS,
+                        reconciling = false,
+                        failureCategory = outcome.category,
+                        verifiedByReconciliation = reconciliation
+                    )),
+                    error = SessionProblemHolder(
+                        SessionProblem.ANKI_REVIEWER_ACTION_UNCONFIRMED,
+                        "Study-Agent could not confirm whether this change was applied in Anki, so it " +
+                            "will not repeat it. Verify the card in AnkiDroid, or end the session.",
+                        false, now
+                    )
+                )
+            )
+            is AnkiReviewerActionOutcome.PersistenceFailure -> movedAction(
+                state, event,
+                state.copy(
+                    anki = local.copy(reviewerAction = action.copy(
+                        reconciling = false,
+                        failureCategory = outcome.category
+                    )),
+                    error = SessionProblemHolder(
+                        SessionProblem.ANKI_REVIEWER_ACTION_UNCONFIRMED,
+                        "Study-Agent could not record the result of this change, so it will not repeat " +
+                            "it. End the session to restart safely.",
+                        false, now
+                    )
+                )
+            )
+            is AnkiReviewerActionOutcome.NotRecorded ->
+                notRecordedAction(state, event, local, outcome, now)
+        }
+    }
+
+    /**
+     * GATE 13 §17/INV-13-08 — nothing durable exists and no backend mutation was dispatched, so the
+     * card is provably untouched. Presentation returns to `Idle` (there is no transaction to show)
+     * and the user is told what happened; the next request starts from scratch.
+     */
+    private fun notRecordedAction(
+        state: SessionMachineState,
+        event: StudyEvent,
+        local: AnkiStudyInteraction,
+        outcome: AnkiReviewerActionOutcome.NotRecorded,
+        now: Long
+    ): Transition = movedAction(
+        state, event,
+        state.copy(
+            anki = local.copy(reviewerAction = null, restoredAction = false),
             error = SessionProblemHolder(
                 SessionProblem.ANKI_REVIEWER_ACTION_UNCONFIRMED,
-                "Study-Agent could not confirm whether this action was applied in Anki, so it " +
-                    "will not repeat it. End the session to restart safely.",
-                false, now
+                "Study-Agent could not record this change, so nothing was sent to Anki.",
+                true, now
             )
-        ))
-    }
+        )
+    )
+
+    /** A resolved, *restored* action continues through a fresh read-only scheduler session (§30). */
+    private fun movedActionRecovery(
+        state: SessionMachineState,
+        event: StudyEvent,
+        local: AnkiStudyInteraction,
+        now: Long
+    ): Transition = Transition(
+        state.copy(
+            phase = SessionPhase.Starting,
+            anki = local.copy(
+                reviewerAction = null,
+                restoredAction = false,
+                failure = null
+            ),
+            error = null
+        ).recordTransition(event, state.phase, SessionPhase.Starting),
+        listOf(AnkiStudyEffect.Begin(state.epoch, local.request, now))
+    )
+
+    /** The shared transition builders for the reviewer-action handlers above. */
+    private fun rejectAction(state: SessionMachineState, event: StudyEvent, reason: String): Transition =
+        Transition.reject(state, event, reason)
+
+    private fun movedAction(
+        state: SessionMachineState,
+        event: StudyEvent,
+        next: SessionMachineState,
+        effects: List<StudyEffect> = emptyList()
+    ): Transition = Transition(next.recordTransition(event, state.phase, next.phase), effects)
 
     private fun selectRating(
         state: SessionMachineState,
@@ -1007,10 +1275,9 @@ object StudyReducer {
         // unresolved one means the scheduler may already have moved it out of the queue. Both make
         // a rating unsafe, so rating fails closed exactly like an unresolved commit blocks the next
         // card. A *rejected* action leaves nothing to protect and does not appear here.
-        ReviewerActionPolicy.ratingBlockReason(
-            actionInFlight = local.reviewerActionInFlight,
-            actionOutcomeUnresolved = local.reviewerActionUnresolved
-        )?.let { return Transition.reject(state, event, "anki-rating-blocked-by-${it.name.lowercase()}") }
+        // §25 — an unresolved action blocks the rating mutation (mutual exclusion below the UI).
+        local.ratingBlockedByAction
+            ?.let { return Transition.reject(state, event, "anki-rating-blocked-by-${it.name.lowercase()}") }
         val options = turn.ratingOptions
         if (options !is AnkiRatingOptions.Known) return Transition.reject(state, event, "anki-rating-options-unmapped")
         if (!options.supports(event.rating)) return Transition.reject(state, event, "unsupported-anki-rating")
@@ -1321,6 +1588,10 @@ object StudyReducer {
         SessionPhase.WaitingForEvaluation,
         SessionPhase.SpeakingFeedback,
         SessionPhase.WaitingForRating,
+        // §23: while the rating mutation is in flight the action request is answered by the policy
+        // (COMMIT_MUTATION_IN_FLIGHT) instead of being dismissed as an illegal phase, so the user
+        // is told *why* nothing was sent.
+        SessionPhase.SubmittingRating,
         SessionPhase.ShowingAnswer,
         SessionPhase.SpeakingHint,
         SessionPhase.SpeakingExplanation,

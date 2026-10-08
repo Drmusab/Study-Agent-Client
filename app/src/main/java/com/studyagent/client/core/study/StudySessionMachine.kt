@@ -382,7 +382,8 @@ class StudySessionMachine(
             }
             SessionPhase.RatingCommitFailed,
             SessionPhase.ReconciliationRequired,
-            SessionPhase.CommitPersistenceFailure -> StudyState.Error(
+            SessionPhase.CommitPersistenceFailure,
+            SessionPhase.ReviewerActionRecoveryRequired -> StudyState.Error(
                 machine.error?.message ?: "The rating could not be confirmed.",
                 recoverable = true
             )
@@ -591,7 +592,8 @@ class StudySessionMachine(
             is SessionPhase.Pausing,
             is SessionPhase.RatingCommitFailed,
             is SessionPhase.ReconciliationRequired,
-            is SessionPhase.CommitPersistenceFailure -> false
+            is SessionPhase.CommitPersistenceFailure,
+            is SessionPhase.ReviewerActionRecoveryRequired -> false
 
             is SessionPhase.WaitingForAnswer,
             is SessionPhase.PendingAnswerReview,
@@ -801,6 +803,8 @@ class StudySessionMachine(
                         is AnkiStudyEffect.CommitRating,
                         is AnkiStudyEffect.ReconcileCommit,
                         is AnkiStudyEffect.PerformReviewerAction,
+                        is AnkiStudyEffect.RetryReviewerAction,
+                        is AnkiStudyEffect.RecoverReviewerAction,
                         is AnkiStudyEffect.EndReview -> {
                             // Never touches the read job; ordered behind earlier write effects.
                             if (ankiWriteLane.trySend(effect).isFailure) {

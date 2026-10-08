@@ -6,6 +6,7 @@ import com.studyagent.client.core.anki.AnkiBackendSelector
 import com.studyagent.client.core.anki.ReviewCommitLedger
 import com.studyagent.client.data.anki.DataStoreReviewCommitStore
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidRatingGateway
+import com.studyagent.client.data.anki.DataStoreReviewerActionStore
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidReviewerActionGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidWritePermit
 import com.studyagent.client.core.audio.AndroidAudioRouteManager
@@ -270,9 +271,22 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         )
     }
 
+    /**
+     * GATE 13 §14 — the durable, backend-neutral **reviewer-action** ledger. One instance per
+     * process, and a *separate* store from [reviewCommitLedger]: the two ledgers hold different
+     * transaction truth and one corrupt file must never take the other with it (INV-13-02/03).
+     */
+    val reviewerActionLedger: com.studyagent.client.core.anki.ReviewerActionLedger by lazy {
+        com.studyagent.client.core.anki.DurableReviewerActionLedger(
+            store = DataStoreReviewerActionStore.create(context, ankiDroidScope),
+            clock = System::currentTimeMillis
+        )
+    }
+
     init {
-        // Startup recovery is off the splash path: load the ledger, do not mutate study state.
+        // Startup recovery is off the splash path: load both ledgers, do not mutate study state.
         ankiDroidScope.launch { reviewCommitLedger.health() }
+        ankiDroidScope.launch { reviewerActionLedger.health() }
     }
 
     override val ankiLibraryRepository: AnkiLibraryRepository by lazy {
@@ -424,6 +438,9 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             ankiEffects = com.studyagent.client.core.study.AnkiStudyEffectExecutor(
                 registry = ankiBackendRegistry,
                 ledger = reviewCommitLedger,
+                // GATE 13 — the separate reviewer-action ledger. Without it actions are refused
+                // before dispatch (fail closed), so both ledgers are wired together.
+                actionLedger = reviewerActionLedger,
                 phases = com.studyagent.client.core.anki.CommitPhaseSink { phase, attempt, commitId ->
                     // Correlation only: identity hash, backend, rating names and attempt count.
                     AppDiagnostics.timeline.record(

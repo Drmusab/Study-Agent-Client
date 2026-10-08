@@ -17,3 +17,4 @@ The normative contract these ADRs support is
 | [0006](0006-backend-provider-independence.md) | Anki backend selection is independent of AI/TTS/STT provider selection | Accepted |
 | [0007](0007-rating-authority-and-exactly-once.md) | Rating authority/turn identity; exactly-once and reconciliation claims corrected by ADR 0008 | Superseded in part |
 | [0008](0008-durable-review-attempts-and-exactly-once-limits.md) | Durable call boundary, fail-closed recovery, and per-backend guarantee limits | Accepted |
+| [0009](0009-reviewer-action-authority-and-durable-ledger.md) | Reviewer actions (flag/bury/suspend) get their own durable ledger, identity and closed transition table | Accepted |

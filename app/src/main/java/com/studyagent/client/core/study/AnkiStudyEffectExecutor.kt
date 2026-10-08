@@ -48,19 +48,27 @@ class AnkiStudyEffectExecutor(
      * GATE 12 — optional pluggable evaluator for Anki study turns. When absent or when the
      * evaluator fails, the turn degrades cleanly to manual review on the same [ReviewTurnId].
      */
-    private val answerEvaluator: AnkiAnswerEvaluator? = null
+    private val answerEvaluator: AnkiAnswerEvaluator? = null,
+    /**
+     * GATE 13 §14 — the durable **reviewer-action** ledger. Without it there is no action
+     * transaction truth across process death, so reviewer actions are refused before dispatch
+     * (§17, fail closed) — exactly like commits without a commit ledger.
+     */
+    private val actionLedger: ReviewerActionLedger? = null,
+    /**
+     * GATE 13 §16 — the only transaction orchestrator for reviewer actions. Defaults to the
+     * production coordinator over [actionLedger] and this process's commit ledger (the rating
+     * side of §23's mutual exclusion); tests may substitute a scripted one.
+     */
+    actionCoordinator: ReviewerActionCoordinator? = null
 ) : ReviewCommitCoordinator {
+
+    private val reviewerActionCoordinator: ReviewerActionCoordinator? = actionCoordinator
+        ?: actionLedger?.let { DefaultReviewerActionCoordinator(it, ledger, registry, clock) }
     init { require(reconcileTimeoutMs > 0) }
 
     /** Known only while this process lives. A lost durable response never authorizes replay. */
     private val unpersistedResponses = ConcurrentHashMap<ReviewCommitId, BackendCommitResult>()
-
-    /**
-     * GATE 13 — reviewer actions currently being applied, keyed by `(epoch, turn, action)`.
-     * Process-local, unbounded only by the number of live actions (one per turn at most), and it
-     * exists to make duplicate input one logical mutation (INV-13-19) — never as a truth store.
-     */
-    private val actionsInFlight = ConcurrentHashMap<String, Unit>()
 
     /**
      * GATE 11D §35 — content-free reconciliation observability (result token + latency, per
@@ -99,65 +107,155 @@ class AnkiStudyEffectExecutor(
             }
             is AnkiStudyEffect.EvaluateAnswer -> evaluateAnswer(effect)
             is AnkiStudyEffect.PerformReviewerAction -> reviewerAction(effect)
+            is AnkiStudyEffect.RetryReviewerAction -> retryReviewerAction(effect)
+            is AnkiStudyEffect.RecoverReviewerAction -> recoverReviewerAction(effect)
             is AnkiStudyEffect.Begin, is AnkiStudyEffect.Next, is AnkiStudyEffect.Hydrate -> read(effect)
         }
     }
 
     /**
-     * GATE 13 STEP 21/31/§34/§40 — performs exactly one reviewer action and reports the typed
-     * result as a study event.
+     * GATE 13 §16/§17 — performs exactly one reviewer action through the coordinator and reports
+     * the durable outcome as a study event.
      *
-     * Guarantees held here:
-     *
-     * - **one mutation per effect**: the backend call is issued once and never retried, in this
-     *   method or by any caller;
-     * - **no ledger**: unlike `commitTransaction`, nothing durable is written — a reviewer action
-     *   has no transaction identity in the pinned contract (STEP 30), and inventing one would put
-     *   action state into the rating ledger (INV-13-02);
-     * - **duplicate suppression**: a second effect for the same `(epoch, turn, action)` while the
-     *   first is still in flight reports nothing (first-wins). The reducer already refuses a second
-     *   request while one is `Applying`, so this only closes the residual races — e.g. a touch and
-     *   a voice command for the same action dispatched from different threads;
-     * - **unknown stays unknown**: an exception thrown by the backend becomes
-     *   [AnkiStudyEvent.ReviewerActionAmbiguous], never a "not applied" that would license a retry
-     *   (INV-13-13).
+     * Guarantees held **here** are only correlation and event shaping: the coordinator owns durable
+     * ordering (`PREPARED` → `SUBMITTING` → backend → final status), duplicate suppression and the
+     * §9 classification. The executor never dispatches a second backend call for one effect and
+     * never retries internally.
      */
-    private suspend fun reviewerAction(effect: AnkiStudyEffect.PerformReviewerAction): AnkiStudyEvent? {
-        val key = "${effect.epoch}|${effect.turnId.value}|${effect.action.key}"
-        if (actionsInFlight.putIfAbsent(key, Unit) != null) return null
-        try {
-            val backend = registry.find(effect.cardRef.backendId)
-                ?: return AnkiStudyEvent.ReviewerActionRejected(
-                    effect.epoch, effect.turnId, effect.cardRef, effect.action,
-                    AnkiError.BackendUnavailable()
-                )
-            return when (val result = backend.performReviewerAction(effect.cardRef, effect.action)) {
-                is ReviewerActionResult.Applied -> AnkiStudyEvent.ReviewerActionApplied(
-                    epoch = effect.epoch,
-                    turnId = effect.turnId,
-                    cardRef = effect.cardRef,
-                    action = effect.action,
-                    updatedCard = result.updatedCard,
-                    cardState = result.cardState,
-                    detail = result.detail
-                )
-                is ReviewerActionResult.Rejected -> AnkiStudyEvent.ReviewerActionRejected(
-                    effect.epoch, effect.turnId, effect.cardRef, effect.action, result.reason
-                )
-                is ReviewerActionResult.OutcomeUnknown -> AnkiStudyEvent.ReviewerActionAmbiguous(
-                    effect.epoch, effect.turnId, effect.cardRef, effect.action, result.reason, result.detail
-                )
+    private suspend fun reviewerAction(
+        effect: AnkiStudyEffect.PerformReviewerAction
+    ): AnkiStudyEvent? {
+        val actionId = ReviewerActionId.of(
+            effect.cardRef.backendId, effect.sessionId, effect.turnId, effect.action)
+        val coordinator = reviewerActionCoordinator
+            ?: return AnkiStudyEvent.ReviewerActionResolved(
+                effect.epoch, actionId,
+                AnkiReviewerActionOutcome.NotRecorded(ReviewActionCategories.LEDGER_UNAVAILABLE))
+        val request = ReviewerActionRequest(
+            sessionId = effect.sessionId,
+            turnId = effect.turnId,
+            cardRef = effect.cardRef,
+            action = effect.action,
+            backendId = effect.cardRef.backendId,
+            collectionRef = effect.collectionRef,
+            semantics = effect.semantics
+        )
+        val outcome = coordinator.perform(request)
+        return reviewerActionEvent(effect.epoch, actionId, outcome)
+    }
+
+    /** GATE 13 §13 — an explicit retry of the same logical action (same action id). */
+    private suspend fun retryReviewerAction(
+        effect: AnkiStudyEffect.RetryReviewerAction
+    ): AnkiStudyEvent? {
+        val coordinator = reviewerActionCoordinator
+            ?: return AnkiStudyEvent.ReviewerActionResolved(
+                effect.epoch, effect.actionId,
+                AnkiReviewerActionOutcome.NotRecorded(ReviewActionCategories.LEDGER_UNAVAILABLE))
+        return reviewerActionEvent(effect.epoch, effect.actionId, coordinator.retry(effect.actionId))
+    }
+
+    /**
+     * GATE 13 §26/§27 — read-only recovery of one action. The only backend call it may make is the
+     * reconciler's read-only probe; nothing is replayed.
+     */
+    private suspend fun recoverReviewerAction(
+        effect: AnkiStudyEffect.RecoverReviewerAction
+    ): AnkiStudyEvent? {
+        val coordinator = reviewerActionCoordinator
+            ?: return AnkiStudyEvent.ReviewerActionReconciled(
+                effect.epoch, effect.actionId,
+                AnkiReviewerActionOutcome.Ambiguous(ReviewActionCategories.LEDGER_UNAVAILABLE))
+        return when (val recovered = coordinator.recover(effect.actionId)) {
+            is ReviewerActionRecoveryOutcome.NoTransaction -> AnkiStudyEvent.ReviewerActionReconciled(
+                effect.epoch, effect.actionId,
+                AnkiReviewerActionOutcome.NotRecorded("action_record_missing"))
+            is ReviewerActionRecoveryOutcome.Indeterminate -> AnkiStudyEvent.ReviewerActionReconciled(
+                effect.epoch, effect.actionId,
+                AnkiReviewerActionOutcome.Ambiguous(recovered.reason))
+            is ReviewerActionRecoveryOutcome.IntegrityFailure -> AnkiStudyEvent.ReviewerActionReconciled(
+                effect.epoch, effect.actionId,
+                AnkiReviewerActionOutcome.Ambiguous(recovered.reason))
+            is ReviewerActionRecoveryOutcome.Recovered -> {
+                val outcome = recovered.outcome
+                if (outcome == null) {
+                    AnkiStudyEvent.ReviewerActionReconciled(
+                        effect.epoch, effect.actionId,
+                        AnkiReviewerActionOutcome.Ambiguous(
+                            recovered.record.failure?.category
+                                ?: ReviewActionCategories.RECONCILIATION_INCONCLUSIVE))
+                } else {
+                    reviewerActionEvent(effect.epoch, effect.actionId, outcome)!!.let { event ->
+                        if (event is AnkiStudyEvent.ReviewerActionResolved) {
+                            AnkiStudyEvent.ReviewerActionReconciled(effect.epoch, effect.actionId, event.outcome)
+                        } else event
+                    }
+                }
             }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            // No exception text (provider content may be sensitive) and never a replay.
-            AnkiStudyEvent.ReviewerActionAmbiguous(
-                effect.epoch, effect.turnId, effect.cardRef, effect.action,
-                AnkiError.Unknown("action_threw"), "executor_exception"
+        }
+    }
+
+    /**
+     * Durable coordinator outcome → study event. A conflict with **no** durable record means the
+     * action was refused before anything existed (the coordinator never dispatches without a
+     * durable boundary write), while a conflict *with* a record means an attempt is still live: that
+     * attempt reports, so nothing is emitted here.
+     */
+    private fun reviewerActionEvent(
+        epoch: Long,
+        actionId: ReviewerActionId,
+        outcome: ReviewerActionOutcome
+    ): AnkiStudyEvent? = when (outcome) {
+        is ReviewerActionOutcome.Applied -> {
+            val receipt = outcome.record.backendReceipt
+            AnkiStudyEvent.ReviewerActionResolved(
+                epoch, outcome.record.actionId,
+                AnkiReviewerActionOutcome.Applied(
+                    source = AnkiReviewerActionOutcome.SOURCE_BACKEND_CONFIRMED,
+                    detail = receipt?.detail,
+                    cardState = receipt?.cardState,
+                    flag = receipt?.flag
+                )
             )
-        } finally {
-            actionsInFlight.remove(key)
+        }
+        is ReviewerActionOutcome.RetryAllowed -> AnkiStudyEvent.ReviewerActionResolved(
+            epoch, outcome.record.actionId,
+            AnkiReviewerActionOutcome.RetryAvailable(
+                outcome.record.failure?.category ?: "not_applied")
+        )
+        is ReviewerActionOutcome.Ambiguous -> AnkiStudyEvent.ReviewerActionResolved(
+            epoch, outcome.record.actionId,
+            AnkiReviewerActionOutcome.Ambiguous(
+                outcome.record.failure?.category ?: "ambiguous")
+        )
+        is ReviewerActionOutcome.Conflict -> {
+            val record = outcome.record
+            when {
+                record == null -> AnkiStudyEvent.ReviewerActionResolved(
+                    epoch, actionId,
+                    AnkiReviewerActionOutcome.NotRecorded(outcome.error.commitCategory()))
+                record.status == ReviewerActionStatus.APPLIED ->
+                    AnkiStudyEvent.ReviewerActionResolved(
+                        epoch, record.actionId,
+                        AnkiReviewerActionOutcome.Applied(
+                            source = AnkiReviewerActionOutcome.SOURCE_LEDGER_REPLAY,
+                            detail = record.backendReceipt?.detail,
+                            cardState = record.backendReceipt?.cardState,
+                            flag = record.backendReceipt?.flag))
+                record.status == ReviewerActionStatus.RETRY_ALLOWED ->
+                    AnkiStudyEvent.ReviewerActionResolved(
+                        epoch, record.actionId,
+                        AnkiReviewerActionOutcome.RetryAvailable(
+                            record.failure?.category ?: "not_applied"))
+                record.status == ReviewerActionStatus.AMBIGUOUS ->
+                    AnkiStudyEvent.ReviewerActionResolved(
+                        epoch, record.actionId,
+                        AnkiReviewerActionOutcome.Ambiguous(
+                            record.failure?.category ?: "ambiguous"))
+                // PREPARED / SUBMITTING: an attempt of this turn is live and reports itself. A
+                // second effect must never become a second mutation (INV-13-19).
+                else -> null
+            }
         }
     }
 
@@ -442,6 +540,17 @@ class AnkiStudyEffectExecutor(
                 return AnkiStudyEvent.RecoveryBlocked(effect.epoch, it)
             }
         }
+        // GATE 13 §26/§30 — the same scan for reviewer actions, before any scheduler traffic: an
+        // unfinished action may already have been applied in AnkiDroid, so it is never replayed and
+        // no card is loaded until it is reconciled (or the user ends the session).
+        if (actionLedger != null) {
+            if (actionLedger.health() !is ReviewerActionLedgerHealth.Ready) {
+                return failed(AnkiError.ActionLedgerUnavailable("action_ledger_unavailable"))
+            }
+            actionLedger.recoveryBlocker(id, request.deck.collectionKey, request.studySessionId)?.let {
+                return AnkiStudyEvent.ReviewerActionRecoveryBlocked(effect.epoch, it)
+            }
+        }
         when (val decks = backend.getDecks()) {
             is AnkiResult.Failure -> return failed(decks.error)
             is AnkiResult.Success -> if (decks.value.none { it.ref == request.deck }) {
@@ -475,6 +584,22 @@ class AnkiStudyEffectExecutor(
         val ledger = this.ledger ?: return AnkiCommitOutcome.PersistenceFailure("ledger_unavailable")
         fun storageFault(category: String) = AnkiCommitOutcome.PersistenceFailure(category)
 
+
+        // GATE 13 §25 — mutual exclusion below the UI: while this turn has an unresolved reviewer
+        // action, no rating mutation may begin (the card may be mid-action or may already have left
+        // the scheduler's queue). The action's own coordinator enforces the reverse direction (§23).
+        if (actionLedger != null) {
+            val active = try {
+                actionLedger.findActiveForTurn(commitId.turnId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return storageFault("action_ledger_unavailable")
+            }
+            if (active != null) {
+                return refused("action_${active.status.name.lowercase()}_unresolved")
+            }
+        }
 
         faults.on(CommitFaultPoint.BEFORE_LEDGER_CREATE)
         // 1. Durable intent: PREPARED / INTENT_PERSISTED, or the existing record for this identity.

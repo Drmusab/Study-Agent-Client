@@ -62,6 +62,15 @@ sealed interface SessionPhase {
     /** Backend may have succeeded but its result/intent could not be made durable. Never retry. */
     data object CommitPersistenceFailure : SessionPhase
 
+    /**
+     * GATE 13 §26/§30 — the startup recovery scan found an unfinished **reviewer action** (flag /
+     * bury / suspend). No scheduler query has happened and none may happen until the durable record
+     * is reconciled: the action may already have been applied, so it is never replayed and no next
+     * card is loaded. The action's own state and identity travel on the interaction, never in this
+     * phase (a phase is not a transaction status).
+     */
+    data object ReviewerActionRecoveryRequired : SessionPhase
+
     /** A hint TTS is playing / hint overlay visible. */
     data object SpeakingHint : SessionPhase
 
@@ -126,6 +135,7 @@ sealed interface SessionPhase {
             Recovering -> "Recovering"
             Finishing -> "Finishing"
             Finished -> "Finished"
+            ReviewerActionRecoveryRequired -> "ReviewerActionRecovery"
             is Error -> "Error(${phase.problem.name})"
         }
     }

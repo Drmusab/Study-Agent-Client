@@ -1,51 +1,75 @@
 package com.studyagent.client.core.anki
 
 /**
- * GATE 13 — the backend-neutral reviewer action family (STEP 2/§3, STEP 16).
+ * GATE 13 — NORMATIVE NAMING MODEL for reviewer actions.
+ *
+ * One name belongs to exactly one layer, exactly like [ReviewCommitNaming] does for ratings:
+ *
+ * | Layer | Type | Example |
+ * |---|---|---|
+ * | study workflow | `SessionPhase` | `WaitingForRating` |
+ * | durable action transaction truth | [ReviewerActionStatus] | `AMBIGUOUS` |
+ * | backend evidence | [ReviewerActionBackendResult] | `OutcomeUnknown` |
+ * | backend evidence payload | [ReviewerActionReceipt] | `queue=-3` |
+ * | coordinator result | [ReviewerActionOutcome] | `Ambiguous` |
+ * | recovery decision | [ReviewerActionRecoveryAction] | `Reconcile` |
+ * | reconciliation evidence | [ReviewerActionReconciliationResult] | `Unresolved` |
+ * | presentation | `ReviewerActionUiState` | `VerificationRequired` |
+ *
+ * The two mutation families never share a vocabulary (INV-13-01…INV-13-05):
  *
  * ```text
- * Flag   — card metadata only        (never rates, never advances the scheduler)
- * Bury   — removes the card from today's queues, turn-invalidating
- * Suspend— removes the card from reviews entirely, turn-invalidating
+ * ReviewCommitStatus   / ReviewCommitLedger   → rating transaction truth
+ * ReviewerActionStatus / ReviewerActionLedger → reviewer-action transaction truth
+ * ```
+ */
+object ReviewerActionNaming
+
+/**
+ * GATE 13 §3 — the canonical reviewer action family.
+ *
+ * ```text
+ * SetFlag     — card metadata only      (never rates, never advances the scheduler)
+ * BuryCard    — leaves today's queues    turn-invalidating
+ * SuspendCard — leaves reviews entirely  turn-invalidating
  * ```
  *
  * Deliberately **not** part of this family:
  *
- * - **Rating** — owned by GATE 11's transaction pipeline (`ReviewCommitLedger`,
- *   `AnkiBackend.commitRating`). There is no `ReviewerAction.Rate` for the same reason
- *   `BackendCommitResult` has no `ReviewerActionResult` variant: the two mutation families have
+ * - **Rating** — owned by GATE 11's transaction pipeline ([ReviewCommitLedger],
+ *   [AnkiBackend.commitRating]). There is no `ReviewerAction.Rate`: the two mutation families have
  *   different guarantees, different evidence and different failure semantics, and one enum covering
- *   both would be exactly the "generic unsafe mutation shortcut" AUDIT 1 forbids
- *   (INV-13-01/INV-13-02).
- * - **Unbury / unsuspend** — the pinned AnkiDroid v2.24.1 public provider contract exposes no
- *   write path for either (STEP 11/14/20: "Do not add actions whose public backend contract is
- *   not yet verified"), so no such action exists here. Restoring is a *browse* operation, not a
- *   reviewer action at the pinned contract.
+ *   both would be exactly the generic-mutation shortcut AUDIT 1 forbids (INV-13-04/INV-13-05).
+ * - **Unbury / unsuspend** — §3: "Add further actions only after their public backend contracts are
+ *   audited." The pinned AnkiDroid v2.24.1 public provider contract exposes no write path for
+ *   either, so no such action exists here.
  *
- * [invalidatesTurn] is the one behavioural classification (STEP 16): a flag leaves the presentation
- * and the scheduler untouched, while bury/suspend remove the card from what the scheduler will
- * hand back, so the current study turn cannot continue towards a rating (STEP 12/18/19).
+ * [invalidatesCurrentTurn] is the one behavioural classification (§21) and it is a *domain
+ * property*, not a `when(action)` scattered through the UI: a flag leaves the presentation and the
+ * scheduler untouched, while bury/suspend remove the card from what the scheduler will hand back,
+ * so the current study turn cannot continue towards a rating (§18/§19/§20).
  */
 sealed interface ReviewerAction {
 
     val kind: ReviewerActionKind
 
-    /** Stable, content-free token used in diagnostics, block reasons and capability maps. */
+    /** Stable, content-free token used in action identity, diagnostics and capability maps. */
     val key: String
 
     /**
-     * True when a *confirmed* action makes the current review turn unratable (STEP 16): the card
-     * left the scheduler's queue, so continuing the presentation would rate a card that is no
-     * longer being reviewed.
+     * §21 — true when a *confirmed* (`APPLIED`) action makes the current review turn unratable:
+     * the card left the scheduler's queue, so continuing the presentation would rate a card that is
+     * no longer being reviewed. Only this property plus [ReviewerActionStatus.APPLIED] opens the
+     * fresh next-card query (§22, INV-13-14/INV-13-15).
      */
-    val invalidatesTurn: Boolean
+    val invalidatesCurrentTurn: Boolean
 
     /**
      * Set (or clear, with [AnkiFlag.NONE]) the card's flag. Metadata only: it must never rate the
-     * card, advance the scheduler or complete the review turn (STEP 10, INV-13-07/08).
+     * card, advance the scheduler or complete the review turn (§18, INV-13-13).
      *
-     * [flag] is the audited [AnkiFlag] domain value; [AnkiFlag.UNKNOWN] is rejected at construction
-     * because "this build could not name the backend's flag" is not something a user can set.
+     * [AnkiFlag.UNKNOWN] is rejected at construction: "this build could not name the backend's
+     * flag" is not something a user can set.
      */
     data class SetFlag(val flag: AnkiFlag) : ReviewerAction {
         init {
@@ -54,26 +78,36 @@ sealed interface ReviewerAction {
 
         override val kind: ReviewerActionKind get() = ReviewerActionKind.FLAG
         override val key: String get() = "flag:${flag.name.lowercase()}"
-        override val invalidatesTurn: Boolean get() = false
+        override val invalidatesCurrentTurn: Boolean get() = false
     }
 
-    /** Bury the *card* for today (never the note: STEP 11 keeps the two distinct operations). */
-    data object Bury : ReviewerAction {
+    /** Bury the *card* for today (never the note: §3 keeps the two distinct operations). */
+    data object BuryCard : ReviewerAction {
         override val kind: ReviewerActionKind get() = ReviewerActionKind.BURY
         override val key: String get() = "bury"
-        override val invalidatesTurn: Boolean get() = true
+        override val invalidatesCurrentTurn: Boolean get() = true
     }
 
-    /** Suspend the *card* (never the note: STEP 11/14). */
-    data object Suspend : ReviewerAction {
+    /** Suspend the *card* (never the note: §3/§28). */
+    data object SuspendCard : ReviewerAction {
         override val kind: ReviewerActionKind get() = ReviewerActionKind.SUSPEND
         override val key: String get() = "suspend"
-        override val invalidatesTurn: Boolean get() = true
+        override val invalidatesCurrentTurn: Boolean get() = true
     }
 
     companion object {
         /** Every action this build models, in menu order. */
-        val ALL: List<ReviewerAction> = listOf(SetFlag(AnkiFlag.NONE), Bury, Suspend)
+        val ALL: List<ReviewerAction> = listOf(SetFlag(AnkiFlag.NONE), BuryCard, SuspendCard)
+
+        /**
+         * A representative action of one kind, for capability and semantics projection (a
+         * capability is per kind; only the flag payload differs within one kind).
+         */
+        fun representative(kind: ReviewerActionKind): ReviewerAction = when (kind) {
+            ReviewerActionKind.FLAG -> SetFlag(AnkiFlag.NONE)
+            ReviewerActionKind.BURY -> BuryCard
+            ReviewerActionKind.SUSPEND -> SuspendCard
+        }
     }
 }
 
@@ -85,13 +119,13 @@ enum class ReviewerActionKind {
 }
 
 /**
- * The minimal, backend-reported card state a reviewer action needs (STEP 38: "Do not rehydrate
- * card unnecessarily" — this is the small projection the action result may carry back).
+ * The minimal, backend-reported card state a reviewer action needs (§4: the ledger stores identity
+ * and evidence, never question/answer/HTML/transcript/AI feedback).
  *
  * [queueCode] is the raw scheduler queue code from the *public* card contract, mapped by [fromQueue]
  * into the small set of states a reviewer action can produce. Anything unrecognised is
- * [ReviewerCardAvailability.UNKNOWN] — never guessed into "reviewable" or "buried"
- * (the same rule as [AnkiFlag.UNKNOWN]).
+ * [ReviewerCardAvailability.UNKNOWN] — never guessed into "reviewable" or "buried" (the same rule
+ * as [AnkiFlag.UNKNOWN]).
  */
 data class ReviewerCardState(
     val queueCode: Int,
@@ -105,10 +139,10 @@ data class ReviewerCardState(
 
     companion object {
         /**
-         * Maps a raw `queue` code. The codes themselves are pinned in
-         * [AnkiDroidApiContract] (`Card.RAW_QUEUE`: −3 manually buried, −2 sibling buried,
-         * −1 suspended, 0..4 the ordinary queues) and re-declared here for the backend-neutral
-         * domain, exactly like `AnkiFlag.fromBackendCode` re-declares the flag coding.
+         * Maps a raw `queue` code. The codes themselves are pinned in [AnkiDroidApiContract]
+         * (`Card.RAW_QUEUE`: −3 manually buried, −2 sibling buried, −1 suspended, 0..4 the ordinary
+         * queues) and re-declared here for the backend-neutral domain, exactly like
+         * `AnkiFlag.fromBackendCode` re-declares the flag coding.
          */
         fun fromQueue(code: Int): ReviewerCardState = ReviewerCardState(code, when (code) {
             QUEUE_MANUALLY_BURIED, QUEUE_SIBLING_BURIED -> ReviewerCardAvailability.BURIED
@@ -138,17 +172,46 @@ enum class ReviewerCardAvailability {
 }
 
 /**
- * GATE 13 STEP 5/§17 — the capability projection for reviewer actions.
+ * GATE 13 §28 — the *verified* backend semantics of one action capability.
+ *
+ * The shared status model does not mean all backend operations behave alike, so each capability
+ * declares what its public contract was audited to guarantee:
+ *
+ * - [supportsIdempotentReplay] — replaying the same action cannot produce a second effect. Even
+ *   when true, §29 forbids *automatic* replay of an unknown outcome; this flag only says a future
+ *   gate may relax that with proof.
+ * - [supportsAuthoritativeReconciliation] — a read-only query can prove applied / not applied, so
+ *   `AMBIGUOUS` can be resolved (§27). Without it, reconciliation stays
+ *   [ReviewerActionReconciliationResult.Unresolved] and the record remains `AMBIGUOUS`.
+ *
+ * The honest default is "nothing verified": an unaudited capability claims no replay safety and no
+ * reconciliation, so it can only ever fail closed.
+ */
+data class ReviewerActionSemantics(
+    val supportsIdempotentReplay: Boolean = false,
+    val supportsAuthoritativeReconciliation: Boolean = false
+) {
+    companion object {
+        /** Nothing is claimed until a backend contract has been audited (§28/§29). */
+        val UNVERIFIED = ReviewerActionSemantics()
+    }
+}
+
+/**
+ * GATE 13 §5/§17 — the capability projection for reviewer actions.
  *
  * Derived from the *one* capability source ([AnkiCapabilities]) instead of being a second,
  * freely-writable capability store: a backend that cannot bury cannot advertise bury here either
- * (INV-13-17). A backend-neutral value type so the study layer can freeze the set at session start
- * (INV-13-15: a later global preference change must not re-shape an in-flight action).
+ * (INV-13-16). A backend-neutral value type so the study layer can freeze the set at session start
+ * (a later global preference change must not re-shape an in-flight action).
+ *
+ * [semantics] carries the per-kind audited backend semantics (§28); the default claims nothing.
  */
 data class ReviewerActionCapabilities(
     val flag: Boolean = false,
     val bury: Boolean = false,
-    val suspend: Boolean = false
+    val suspend: Boolean = false,
+    val semantics: Map<ReviewerActionKind, ReviewerActionSemantics> = emptyMap()
 ) {
     fun supports(action: ReviewerAction): Boolean = when (action.kind) {
         ReviewerActionKind.FLAG -> flag
@@ -156,7 +219,11 @@ data class ReviewerActionCapabilities(
         ReviewerActionKind.SUSPEND -> suspend
     }
 
-    /** The kinds the UI may present, in a stable order (STEP 22: never a disabled lie). */
+    /** The audited semantics of one kind; [ReviewerActionSemantics.UNVERIFIED] when unclaimed. */
+    fun semanticsOf(kind: ReviewerActionKind): ReviewerActionSemantics =
+        semantics[kind] ?: ReviewerActionSemantics.UNVERIFIED
+
+    /** The kinds the UI may present, in a stable order (never a disabled lie). */
     val availableKinds: List<ReviewerActionKind>
         get() = ReviewerActionKind.entries.filter { kind ->
             when (kind) {
@@ -178,10 +245,30 @@ data class ReviewerActionCapabilities(
  * The one mapping from backend capabilities to reviewer-action capabilities.
  *
  * AnkiDroid's [AnkiCapabilities] names the suspend flag `suspendCards` because `suspend` is a
- * Kotlin keyword; the reviewer-action projection keeps the plain domain name.
+ * Kotlin keyword; the reviewer-action projection keeps the plain domain name. [semantics] is
+ * supplied by the backend that audited its own contract ([AnkiBackend.reviewerActionSemantics]).
  */
-fun AnkiCapabilities.reviewerActions(): ReviewerActionCapabilities = ReviewerActionCapabilities(
+fun AnkiCapabilities.reviewerActions(
+    semantics: Map<ReviewerActionKind, ReviewerActionSemantics> = emptyMap()
+): ReviewerActionCapabilities = ReviewerActionCapabilities(
     flag = flags,
     bury = bury,
-    suspend = suspendCards
+    suspend = suspendCards,
+    semantics = semantics
 )
+
+/**
+ * GATE 13 §17/§28 — the capability set a **session start** should freeze.
+ *
+ * It is derived from the backend's own live capabilities ([AnkiCapabilities]) plus the audited
+ * per-action semantics that backend declares ([AnkiBackend.reviewerActionSemantics]), so a session
+ * cannot invent an action the backend has not audited (INV-13-16) and a later capability or
+ * preference change cannot re-shape an in-flight action (the value is a backend-neutral snapshot).
+ * This is the one call a session-start path needs; nothing else may assemble a capability set.
+ */
+fun AnkiBackend.reviewerActionCapabilities(): ReviewerActionCapabilities =
+    capabilities.value.reviewerActions(
+        semantics = ReviewerActionKind.entries.associateWith { kind ->
+            reviewerActionSemantics(ReviewerAction.representative(kind))
+        }
+    )

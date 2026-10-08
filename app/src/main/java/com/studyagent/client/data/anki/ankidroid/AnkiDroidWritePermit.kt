@@ -16,11 +16,14 @@ import kotlinx.coroutines.withTimeoutOrNull
  * instance to the rating gateway and to the reviewer-action gateway, so an answer can never overlap
  * a bury/suspend (and vice versa), and `writeInFlight` answers for both.
  *
+ * It is a top-level public type only because the composition root wires it into the public
+ * constructors of both gateways; nothing above the composition root is meant to use it.
+ *
  * It deliberately carries no policy: acquiring, releasing and asking whether a write is in flight.
  * Timeouts are the caller's business because "how long a rating waits" and "how long a bury waits"
  * are different questions with different consequences.
  */
-internal class AnkiDroidWritePermit {
+class AnkiDroidWritePermit {
 
     private val mutex = Mutex()
 

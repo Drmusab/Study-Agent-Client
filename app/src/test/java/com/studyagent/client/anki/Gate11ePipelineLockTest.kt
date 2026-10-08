@@ -64,13 +64,20 @@ class Gate11ePipelineLockTest {
 
     // --------------------------------------------------------- PART I §6 — next-card barrier
 
-    @Test fun `the next-card barrier is declared exactly once in the transaction domain`() {
+    @Test fun `the next-card barrier is declared exactly once per mutation family`() {
         val declarations = main.flatMap { f ->
             Regex("fun nextCardAllowed\\(").findAll(f.code()).map { f.rel() }.toList()
         }
+        // GATE 13 §22 adds the *second* family's barrier (reviewer actions have their own status
+        // vocabulary, so they cannot share the rating overload). The rule stays one declaration per
+        // family, each owning file listed here — a third copy anywhere fails this test.
         assertEquals(
             "the barrier is a rule, and two copies of a rule are two rules: $declarations",
-            listOf("app/src/main/java/com/studyagent/client/core/anki/ReviewCommitRecovery.kt"), declarations
+            listOf(
+                "app/src/main/java/com/studyagent/client/core/anki/ReviewCommitRecovery.kt",
+                "app/src/main/java/com/studyagent/client/core/anki/ReviewerActionStatus.kt"
+            ),
+            declarations
         )
     }
 
@@ -115,9 +122,17 @@ class Gate11ePipelineLockTest {
         val machine = file("StudySessionMachine.kt").code()
         assertTrue("the machine's UI copy and invariant must read the shared barrier",
             machine.contains("nextCardAllowed("))
-        // The two legal next-card emissions after a rating: the commit outcome and the read retry.
+        // GATE 13 §22 — the reviewer-action site is the fourth legal emission, and it must route
+        // through the action family's own barrier instead of a local `status == APPLIED`.
+        assertTrue("the confirmed action must gate its next-card query on the shared rule",
+            reducer.contains("nextCardAllowed(action.action,"))
+        // The legal next-card emissions: session begin, read retry, commit outcome, confirmed
+        // turn-invalidating reviewer action. Anything else fails this test.
         val nextEmissions = Regex("AnkiStudyEffect\\.Next\\(").findAll(reducer).count()
-        assertEquals("session begin, read retry and commit outcome are the only Next emissions", 3, nextEmissions)
+        assertEquals(
+            "session begin, read retry, commit outcome and a confirmed reviewer action are the only Next emissions",
+            4, nextEmissions
+        )
     }
 
     // ------------------------------------------- PART I §3 — one production mutation path

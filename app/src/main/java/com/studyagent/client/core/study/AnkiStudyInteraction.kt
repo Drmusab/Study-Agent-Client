@@ -44,11 +44,16 @@ data class AnkiStudyInteraction(
     val renderFallbackReason: String? = null,
     val showRawReferenceAnswer: Boolean = false,
     /**
-     * GATE 13 — the current turn's reviewer-action projection (flag/bury/suspend). Separate from
-     * [commit] by contract: [commit] is the one *rating* transaction, this is an ephemeral action
-     * state with no ledger behind it (STEP 42, INV-13-16).
+     * GATE 13 — the current turn's reviewer-action transaction (flag/bury/suspend), in exactly the
+     * shape of [commit]: the durable [ReviewerActionStatus] as far as the reducer knows it, plus the
+     * fixed request. It is a *separate* transaction family from [commit] by contract — different
+     * ledger, different identity, different recovery semantics (INV-13-02/INV-13-05).
      */
-    val reviewerAction: ReviewerActionUiState = ReviewerActionUiState.Idle
+    val reviewerAction: AnkiReviewerAction? = null,
+    /** Presentation-only: the last request the policy refused before anything was recorded. */
+    val reviewerActionRefusal: ReviewerActionRefusal? = null,
+    /** True when [reviewerAction] was found by the startup recovery scan, not created live. */
+    val restoredAction: Boolean = false
 ) {
     /** Canonical final user answer transcript for comparison (STEP 3). */
     val userAnswerText: String? get() = transcript
@@ -59,10 +64,18 @@ data class AnkiStudyInteraction(
     /** Non-null only after the durable transaction is COMMITTED. */
     val committedRating: Rating? get() = commit?.committedRating
 
-    /** GATE 13 — the action being applied right now, if any (duplicate suppression). */
-    val reviewerActionInFlight: ReviewerActionKind? get() = reviewerAction.inFlightKind
-    /** GATE 13 — the action whose outcome is unknown, if any (fail-closed gate). */
-    val reviewerActionUnresolved: ReviewerActionKind? get() = reviewerAction.unresolvedKind
+    /** GATE 13 — the action being applied right now, if any (duplicate suppression, §15). */
+    val reviewerActionInFlight: ReviewerActionKind? get() = reviewerAction?.inFlightKind
+    /** GATE 13 — the action whose outcome is not proven, if any (fail-closed gate, §25). */
+    val reviewerActionUnresolved: ReviewerActionKind? get() = reviewerAction?.unresolvedKind
+    /** The durable action status as this projection knows it; `null` = no action record. */
+    val reviewerActionStatus: ReviewerActionStatus? get() = reviewerAction?.status
+    /** The §7 presentation projection of the durable action status. */
+    val reviewerActionUi: ReviewerActionUiState
+        get() = reviewerAction?.uiState(restoredAction) ?: ReviewerActionUiState.Idle
+    /** §25 — why a rating is blocked by reviewer-action state, if it is. */
+    val ratingBlockedByAction: ReviewerActionBlockReason?
+        get() = ReviewerActionPolicy.ratingBlockReason(reviewerAction?.status)
     /** Whether the current turn already spent its review (a committed rating closed it). */
     val ratingResolved: Boolean get() = commit?.status == ReviewCommitStatus.COMMITTED
 
@@ -114,6 +127,118 @@ data class AnkiRatingCommit(
             ReviewCommitStatus.AMBIGUOUS -> RatingCommitUiState.VerificationRequired(commitId)
             ReviewCommitStatus.COMMITTED -> RatingCommitUiState.Saved(commitId, request.rating)
         }
+}
+
+/**
+ * The reducer's view of the current turn's **reviewer-action transaction** (GATE 13).
+ *
+ * [status] is the durable [ReviewerActionStatus] as far as the reducer knows it — the same
+ * vocabulary, never a study-level synonym: `PREPARED` = the intent is durable and the mutation
+ * boundary is un-entered; `SUBMITTING` = the boundary marker is durable, so the backend may already
+ * have applied the action; `APPLIED` / `RETRY_ALLOWED` / `AMBIGUOUS` = the coordinator's final,
+ * persisted classification.
+ *
+ * Presentation is derived from this into [ReviewerActionUiState]; the two are never stored apart
+ * (§6/§7). [request] is fixed when the action is accepted and re-sent verbatim by a retry (same
+ * [ReviewerActionId], same action, same card), which is what makes the retry the *same* logical
+ * action (INV-13-11).
+ */
+data class AnkiReviewerAction(
+    val request: ReviewerActionRequest,
+    val status: ReviewerActionStatus,
+    /** Attempts the coordinator has started (1 = first submission). */
+    val attempt: Int = 0,
+    val failureCategory: String? = null,
+    /** A read-only reconciliation is in flight (`SUBMITTING`/`AMBIGUOUS` only). */
+    val reconciling: Boolean = false,
+    /** True only when reconciliation evidence, not the original answer, proved the outcome. */
+    val verifiedByReconciliation: Boolean = false
+) {
+    val actionId: ReviewerActionId get() = request.actionId
+    val action: ReviewerAction get() = request.action
+    val cardRef: AnkiCardRef get() = request.cardRef
+    val turnId: ReviewTurnId get() = request.turnId
+
+    /** The action being applied right now (duplicate suppression, §15). */
+    val inFlightKind: ReviewerActionKind?
+        get() = if (status == ReviewerActionStatus.PREPARED || status == ReviewerActionStatus.SUBMITTING) {
+            action.kind
+        } else null
+
+    /** The action whose outcome is not proven (§25 fail-closed gate). */
+    val unresolvedKind: ReviewerActionKind?
+        get() = if (status == ReviewerActionStatus.RETRY_ALLOWED || status == ReviewerActionStatus.AMBIGUOUS) {
+            action.kind
+        } else null
+
+    /** The §7 presentation projection of this transaction. */
+    fun uiState(recovered: Boolean = false): ReviewerActionUiState =
+        ReviewerActionUiState.from(status, actionId, action, recovered)
+}
+
+/**
+ * The executor's persisted classification of one reviewer action (or reconciliation), as delivered
+ * to the reducer. It always reflects the durable ledger *after* the executor wrote it — [status] is
+ * the durable status, never a second vocabulary (§9).
+ */
+sealed interface AnkiReviewerActionOutcome {
+    /**
+     * The durable [ReviewerActionStatus] this outcome reflects, or `null` for [NotRecorded] — which
+     * is not a status at all, because no durable record exists.
+     */
+    val status: ReviewerActionStatus?
+
+    /**
+     * The backend's own state shows the action took effect and the success is durable.
+     *
+     * [flag] is the flag the backend reports after a confirmed `SetFlag` (used for the minimal turn
+     * projection); [cardState] is the post-action card projection; [detail] is a stable token.
+     */
+    data class Applied(
+        val source: String,
+        val detail: String? = null,
+        val cardState: ReviewerCardState? = null,
+        val flag: AnkiFlag? = null
+    ) : AnkiReviewerActionOutcome {
+        override val status: ReviewerActionStatus get() = ReviewerActionStatus.APPLIED
+    }
+
+    /** Proven not applied; the same action identity may be retried (§13). */
+    data class RetryAvailable(val category: String) : AnkiReviewerActionOutcome {
+        override val status: ReviewerActionStatus get() = ReviewerActionStatus.RETRY_ALLOWED
+    }
+
+    /** May have been applied. Progression stays blocked; nothing is replayed (§13). */
+    data class Ambiguous(val category: String) : AnkiReviewerActionOutcome {
+        override val status: ReviewerActionStatus get() = ReviewerActionStatus.AMBIGUOUS
+    }
+
+    /**
+     * The answer could not be made durable. **Not** a backend failure and **not** a retry grant:
+     * the durable status stays whatever the ledger holds (normally `PREPARED` or `SUBMITTING`).
+     */
+    data class PersistenceFailure(val category: String) : AnkiReviewerActionOutcome {
+        override val status: ReviewerActionStatus get() = ReviewerActionStatus.PREPARED
+    }
+
+    /**
+     * The action was refused **before** any backend mutation and nothing durable exists. The
+     * coordinator never dispatches without a durable `SUBMITTING` write (INV-13-08), so the card is
+     * provably untouched; the presentation returns to `Idle` with a problem, and the user may simply
+     * try again.
+     */
+    data class NotRecorded(val category: String) : AnkiReviewerActionOutcome {
+        override val status: ReviewerActionStatus? get() = null
+    }
+
+    companion object {
+        /** The answer came from this attempt's own backend call. */
+        const val SOURCE_BACKEND_CONFIRMED = "backend_confirmed"
+        /** The answer came from the durable ledger, with no backend call at all (§12). */
+        const val SOURCE_LEDGER_REPLAY = "ledger_replay"
+        /** Authoritative read-only evidence, not the lost original answer (§27). */
+        const val SOURCE_RECONCILED = "reconciled"
+    }
 }
 
 /** Caller supplies a new logical session ID; a display deck name is never an identity. */
@@ -278,6 +403,11 @@ sealed interface AnkiStudyEvent : StudyEvent {
      * current turn. Correlation fields are optional because the caller is the *user*: the reducer
      * resolves them against the authoritative turn and rejects anything stale, so a late tap can
      * never act on a card that is no longer presented.
+     *
+     * The durable steps that follow (`PREPARED`, `SUBMITTING`, the final status) are owned by the
+     * [com.studyagent.client.core.anki.ReviewerActionCoordinator]; the reducer's projection mirrors
+     * them and is corrected by [ReviewerActionResolved]. There is deliberately no event that *is*
+     * the boundary — a projection is not transaction truth (§6/§7).
      */
     data class ReviewerActionRequested(
         val action: ReviewerAction,
@@ -286,41 +416,34 @@ sealed interface AnkiStudyEvent : StudyEvent {
         val cardId: String? = null
     ) : AnkiStudyEvent
 
-    /**
-     * The backend's own state now shows the action took effect (STEP 17/18/19). Correlation is
-     * strict: epoch, turn and card must all still be current, otherwise the result is stale (the
-     * executor has no ledger to remember it in — a reviewer action is not a transaction).
-     */
-    data class ReviewerActionApplied(
+    /** Final, persisted classification of one action attempt (flag / bury / suspend). */
+    data class ReviewerActionResolved(
         val epoch: Long,
-        val turnId: ReviewTurnId,
-        val cardRef: AnkiCardRef,
-        val action: ReviewerAction,
-        val updatedCard: AnkiCardRef? = null,
-        val cardState: ReviewerCardState? = null,
-        val detail: String? = null
+        val actionId: ReviewerActionId,
+        val outcome: AnkiReviewerActionOutcome
     ) : AnkiStudyEvent
 
-    /** The backend proved the action was not applied; the turn continues unchanged (STEP 39). */
-    data class ReviewerActionRejected(
+    /** User intent: retry an action that is proven not applied — same action id, same action. */
+    data class RetryReviewerAction(val epoch: Long, val actionId: ReviewerActionId) : AnkiStudyEvent
+
+    /** User intent: check an unresolved action against read-only backend evidence (§27). */
+    data class RecoverReviewerAction(val epoch: Long, val actionId: ReviewerActionId) : AnkiStudyEvent
+
+    /** Persisted outcome of a read-only reconciliation (§27). */
+    data class ReviewerActionReconciled(
         val epoch: Long,
-        val turnId: ReviewTurnId,
-        val cardRef: AnkiCardRef,
-        val action: ReviewerAction,
-        val reason: AnkiError
+        val actionId: ReviewerActionId,
+        val outcome: AnkiReviewerActionOutcome
     ) : AnkiStudyEvent
 
     /**
-     * The action may or may not have been applied (STEP 31). Nothing progresses until the session
-     * is restarted by explicit user action; the mutation is never replayed (INV-13-13).
+     * The startup recovery scan found an unfinished action for this backend/collection/session
+     * (§26/§30): no `beginReview` and no `nextCard` query has happened, and none may happen until
+     * the record is reconciled or the user ends the session.
      */
-    data class ReviewerActionAmbiguous(
+    data class ReviewerActionRecoveryBlocked(
         val epoch: Long,
-        val turnId: ReviewTurnId,
-        val cardRef: AnkiCardRef,
-        val action: ReviewerAction,
-        val reason: AnkiError? = null,
-        val detail: String? = null
+        val record: ReviewerActionRecord
     ) : AnkiStudyEvent
 
     // ---- GATE 12 answer evaluation & review events ----
@@ -387,7 +510,7 @@ sealed interface AnkiStudyEvent : StudyEvent {
  * an in-flight commit finishes, is persisted, and its late result is correlated (and rejected as
  * stale if the turn is gone).
  *
- * GATE 13 adds [PerformReviewerAction] to the *same* write lane: it is a mutation, so it must never
+ * GATE 13 adds [PerformReviewerAction], [RetryReviewerAction] and [RecoverReviewerAction] to the *same* write lane: it is a mutation, so it must never
  * be cancelled by a read refresh, and it must be ordered behind any rating mutation already
  * emitted — while the reducer's policy keeps it from being emitted at all while a rating is
  * unresolved.
@@ -407,15 +530,32 @@ sealed interface AnkiStudyEffect : StudyEffect {
     data class CommitRating(val epoch: Long, val request: CommitRatingRequest, val retry: Boolean = false) : AnkiStudyEffect
 
     /**
-     * GATE 13 STEP 21 — the single reviewer-action path. Exactly one backend mutation per effect;
-     * the executor never retries, and a result that cannot be attributed comes back as
-     * [AnkiStudyEvent.ReviewerActionAmbiguous] rather than being re-sent.
+     * GATE 13 §16/§17 — the single reviewer-action path. The executor hands it to the
+     * [com.studyagent.client.core.anki.ReviewerActionCoordinator], which owns durable ordering,
+     * duplicate suppression and recovery; a result that cannot be attributed comes back as
+     * [AnkiStudyEvent.ReviewerActionResolved] with an ambiguous outcome rather than being re-sent.
      */
     data class PerformReviewerAction(
         val epoch: Long,
+        val sessionId: String,
         val turnId: ReviewTurnId,
         val cardRef: AnkiCardRef,
-        val action: ReviewerAction
+        val action: ReviewerAction,
+        val collectionRef: AnkiCollectionIdentity? = null,
+        /** The semantics frozen at session start (§28); null = ask the backend. */
+        val semantics: ReviewerActionSemantics? = null
+    ) : AnkiStudyEffect
+
+    /** §13 — retry the *same* logical action (same [ReviewerActionId]) after non-application. */
+    data class RetryReviewerAction(
+        val epoch: Long,
+        val actionId: ReviewerActionId
+    ) : AnkiStudyEffect
+
+    /** §27 — read-only reconciliation of an unresolved action. Never a mutation. */
+    data class RecoverReviewerAction(
+        val epoch: Long,
+        val actionId: ReviewerActionId
     ) : AnkiStudyEffect
 
     /** Read-only reconciliation of an AMBIGUOUS commit. */
