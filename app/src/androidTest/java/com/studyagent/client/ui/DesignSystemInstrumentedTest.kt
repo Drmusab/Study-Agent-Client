@@ -45,8 +45,12 @@ class DesignSystemInstrumentedTest {
         compose.awaitNode(hasText("Study Agent"))
         compose.awaitNode(hasTestTag(BOTTOM_NAV_TEST_TAG))
         compose.onNodeWithText("Dashboard").assertIsDisplayed()
+        compose.onNodeWithText("Library").assertIsDisplayed()
         compose.onNodeWithText("Study").assertIsDisplayed()
         compose.onNodeWithText("Control").assertIsDisplayed()
+
+        compose.onNodeWithText("Library").performClick()
+        compose.awaitNode(hasText("Anki Library"))
 
         // Navigating to Study Control keeps the bar (no active session).
         compose.onNodeWithText("Control").performClick()
