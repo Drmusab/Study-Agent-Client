@@ -84,13 +84,22 @@ data class LibrarySnapshot(
  * reason (`null` = the backend did not say). Description is omitted: AnkiDroid's provider
  * currently writes the *selected* deck's description onto every row, so it is not a per-deck
  * fact we can trust. [isSelectedByBackend] is Anki's current deck, not Study-Agent's session deck.
+ *
+ * GATE 14 — [totalCards] is the deck's total card population **when the backend actually reports
+ * it**. `null` = the backend did not say (the pinned AnkiDroid public deck projection exposes
+ * only due counts, no total), and is never rendered as `0` nor derived locally by summing
+ * counts (INV-14-03/04). A future backend or provider contract may populate it; until then the
+ * honest value stays `null` and the UI hides the field.
  */
 data class AnkiDeckSummary(
     val deck: AnkiDeck,
     val counts: AnkiDeckCounts?,
     val isSelectedByBackend: Boolean?,
-    val isFiltered: Boolean?
-)
+    val isFiltered: Boolean?,
+    val totalCards: Int? = null
+) {
+    init { require(totalCards == null || totalCards >= 0) { "totalCards is never negative" } }
+}
 
 /**
  * GATE 05 — observable Library data state (§24/§56). One value, one `StateFlow`; no separate

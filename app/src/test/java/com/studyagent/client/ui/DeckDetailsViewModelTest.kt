@@ -4,12 +4,15 @@ import androidx.lifecycle.ViewModelStore
 import com.studyagent.client.anki.fake.FakeAnkiBackend
 import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiBackendMode
 import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiBackendSelector
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckCounts
 import com.studyagent.client.core.anki.AnkiDeckRef
+import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.reviewerActionCapabilities
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.core.study.AnkiStudyRequest
 import com.studyagent.client.data.anki.AnkiLibraryRepository
@@ -101,7 +104,42 @@ class DeckDetailsViewModelTest {
             assertEquals(2, backend.getDecksCalls) // one Library listing + one live ID validation at start
             assertEquals(0, backend.nextCardCount) // the scheduler is first queried by StudySession
             assertEquals("library-test-session", request.studySessionId)
+            // GATE 14 checkpoint 18/23 — the session is locked to the local backend preference and
+            // the reviewer-action capability set frozen at start equals what the backend audited.
+            assertEquals(AnkiBackendMode.ANKIDROID_LOCAL, request.preference)
+            assertEquals(backend.reviewerActionCapabilities(), request.reviewerActions)
             assertFalse((viewModel.uiState.value as DeckDetailsUiState.Ready).isStartingStudy)
+        } finally {
+            clearViewModels()
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `study start is refused typed when the deck disappears before the tap`() = runTest {
+        Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
+        try {
+            val backend = FakeAnkiBackend(
+                id = backendId,
+                decks = listOf(deck("1", "Medicine", AnkiDeckCounts(new = 1))),
+                initialCapabilities = capabilities,
+                initialAvailability = AnkiAvailability.Ready(capabilities)
+            )
+            val repository = AnkiLibraryRepository(backend)
+            repository.refresh()
+            val (viewModel, requests) = detailsViewModel(backend, repository, "1", backgroundScope)
+            assertTrue(viewModel.uiState.value is DeckDetailsUiState.Ready)
+
+            // The deck is deleted in the live collection between rendering and the tap.
+            backend.replaceDecks(emptyList())
+            viewModel.startStudy()
+            advanceUntilIdle()
+
+            assertTrue(requests.isEmpty()) // nothing dispatched into the state machine
+            val state = viewModel.uiState.value as DeckDetailsUiState.Ready
+            assertFalse(state.isStartingStudy)
+            assertTrue(state.studyStartError is AnkiError.DeckNotFound)
+            assertEquals(0, backend.nextCardCount) // scheduler authority untouched
         } finally {
             clearViewModels()
             Dispatchers.resetMain()

@@ -34,6 +34,41 @@ interface AnkiBackend {
     suspend fun getSelectedDeck(): AnkiResult<AnkiDeckRef?>
 
     /**
+     * GATE 14 — read-only summary of one deck, addressed by stable deck ID (never by name).
+     *
+     * The default is derived from the *same single batched listing read* as [getDecks] — one
+     * backend call, no N+1 fan-out (INV-14-17): a backend whose transport answers a per-deck
+     * summary more cheaply may override it, but no implementation may turn this into one query
+     * per count. Counts keep their nullability semantics (`null` = the backend did not say,
+     * never a guessed zero — INV-14-03); [AnkiDeckSummary.totalCards] stays `null` unless the
+     * backend genuinely reports a total, and [AnkiDeckSummary.isSelectedByBackend] stays `null`
+     * here because this read does not ask for the backend's selected deck.
+     *
+     * Outcomes: [AnkiResult.Success] with the summary; [AnkiError.DeckNotFound] when the listing
+     * succeeded but carries no deck with this identity; every listing failure propagates as-is
+     * (typed availability/permission/query errors — never remapped to an empty or zero summary).
+     * Read-only: no scheduler mutation, no review session, no write (INV-14-06).
+     */
+    suspend fun getDeckSummary(deckId: String): AnkiResult<AnkiDeckSummary> {
+        if (deckId.isBlank()) return AnkiResult.Failure(AnkiError.InvalidRequest(detail = "blank_deck_id"))
+        return when (val listing = getDecks()) {
+            is AnkiResult.Failure -> AnkiResult.Failure(listing.error)
+            is AnkiResult.Success -> {
+                val deck = listing.value.firstOrNull { it.ref.backendId == id && it.ref.deckId == deckId }
+                    ?: return AnkiResult.Failure(AnkiError.DeckNotFound(AnkiDeckRef(id, deckId)))
+                AnkiResult.Success(
+                    AnkiDeckSummary(
+                        deck = deck,
+                        counts = deck.counts,
+                        isSelectedByBackend = null,
+                        isFiltered = deck.isFiltered
+                    )
+                )
+            }
+        }
+    }
+
+    /**
      * Open a scheduled-review session bound immutably to this backend, one collection and one
      * deck (§10/§130). The deck is validated against the live collection before the session
      * exists, so a stale reference fails here rather than mid-session (§45/§46).
