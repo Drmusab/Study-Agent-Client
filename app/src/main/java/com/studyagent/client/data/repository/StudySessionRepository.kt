@@ -153,6 +153,29 @@ interface StudySessionRepository {
 
     /** GATE 12 — notify the machine that HTML answer rendering degraded to `CLEAN` mode. */
     suspend fun reportAnswerRenderFallback(reason: String) {}
+
+    // ---- GATE 13 reviewer actions (flag / bury / suspend). Default no-ops keep the legacy
+    // repository (and any other implementation) source-compatible: a repository without an Anki
+    // action path simply has no card actions to offer.
+
+    /**
+     * GATE 13 §17 — user intent to run one reviewer action on the active Anki review turn.
+     *
+     * Intent only. The machine correlates it with the authoritative turn, the reducer's
+     * [com.studyagent.client.core.anki.ReviewerActionPolicy] decides from durable state whether
+     * anything may be dispatched, and the single
+     * [com.studyagent.client.core.anki.ReviewerActionCoordinator] owns the transaction. No
+     * implementation of this interface may reach a backend directly, and this intent is deliberately
+     * *not* named after the backend mutation: `performReviewerAction(` is reserved for the one
+     * coordinator → backend call (AUDIT 3).
+     */
+    suspend fun requestReviewerAction(action: com.studyagent.client.core.anki.ReviewerAction) {}
+
+    /** GATE 13 §13/INV-13-11 — retry the *same* action identity after proven non-application. */
+    suspend fun retryReviewerAction() {}
+
+    /** GATE 13 §27 — read-only reconciliation of an unproven action. Never a replay. */
+    suspend fun recoverReviewerAction() {}
 }
 
 /**

@@ -46,6 +46,21 @@ class Gate13ArchitectureAuditTest {
     private fun offenders(pattern: String): List<String> =
         mainSources.filter { code(it).contains(pattern) }.map { it.name }.sorted()
 
+    /** Screens, ViewModels and Compose files: the layer that must stay projection-only. */
+    private val uiSources: List<File> by lazy {
+        File(mainJava, "ui").walkTopDown().filter { it.extension == "kt" }.toList()
+    }
+
+    /** App wiring (`di/`): the composition root, which owns the session-start site. */
+    private val wiringSources: List<File> by lazy {
+        File(mainJava, "di").walkTopDown().filter { it.extension == "kt" }.toList()
+    }
+
+    private fun codeOf(file: File): String = code(file)
+
+    private fun uiOffenders(pattern: String): List<String> =
+        uiSources.filter { code(it).contains(pattern) }.map { it.name }.sorted()
+
     // ------------------------------------------------------------------- AUDIT 1: one action model
 
     @Test
@@ -347,6 +362,98 @@ class Gate13ArchitectureAuditTest {
         // path (checked app-wide by the integration isolation test as well).
         assertTrue(offenders("getDatabasePath").isEmpty())
         assertTrue(offenders("/data/data").isEmpty())
+    }
+
+    // ------------------------------------------- the app wiring: mount, dispatch, freeze (STEP 32)
+
+    @Test
+    fun `AUDIT 3 and INV-13-18 - the card-action menu is mounted and can only dispatch intents`() {
+        // Mounted in the answer-review section (which StudyScreen renders for a live Anki turn)...
+        val section = sourceAt("ui/screens/study/AnkiAnswerReviewSection.kt")
+        assertTrue("the menu must be mounted where the turn is presented", section.contains("ReviewerActionMenu("))
+        assertTrue(section.contains("onAction = onReviewerAction"))
+        assertTrue(section.contains("onRetry = onRetryReviewerAction"))
+        assertTrue(section.contains("onRecover = onRecoverReviewerAction"))
+        // ...and wired to the ViewModel, which forwards to the repository intent only.
+        val screen = sourceAt("ui/screens/study/StudyScreen.kt")
+        assertTrue(screen.contains("onReviewerAction = { action -> viewModel.onReviewerAction(action) }"))
+        assertTrue(screen.contains("onRetryReviewerAction = { viewModel.onRetryReviewerAction() }"))
+        assertTrue(screen.contains("onRecoverReviewerAction = { viewModel.onRecoverReviewerAction() }"))
+        val viewModel = codeOf(uiSources.single { it.name == "StudyViewModel.kt" })
+        assertTrue(viewModel.contains("studySessionRepository.requestReviewerAction(action)"))
+        assertTrue(viewModel.contains("studySessionRepository.retryReviewerAction()"))
+        assertTrue(viewModel.contains("studySessionRepository.recoverReviewerAction()"))
+
+        // The composable itself owns no decision and no transaction machinery: it renders the
+        // projection and calls its callbacks. Any reference to the durable family here would be a
+        // bypass.
+        val menu = codeOf(uiSources.single { it.name == "ReviewerActionMenu.kt" })
+        listOf(
+            ".dispatch(", "machine", "Backend", "Ledger", "Coordinator",
+            "ReviewerActionRecord", "ReviewerActionStatus.", "ReviewerActionTransition"
+        ).forEach { token ->
+            assertFalse("the menu must not own '$token'", menu.contains(token))
+        }
+        assertFalse(
+            "the menu must not reach the data layer",
+            menu.contains("import com.studyagent.client.data.")
+        )
+    }
+
+    @Test
+    fun `INV-13-18 - no UI source reads durable action state or a store directly`() {
+        uiSources.forEach { file ->
+            val text = code(file)
+            listOf(
+                "core.anki.ReviewerActionStatus",
+                "ReviewerActionLedger",
+                "ReviewerActionStore",
+                "ReviewerActionRecord",
+                "ReviewerActionTransition",
+                "ReviewerActionCoordinator",
+                "ReviewCommitLedger",
+                "performReviewerAction(cardRef",
+                "reviewerActionCapabilities()"
+            ).forEach { token ->
+                assertFalse("${file.name} must stay projection-only: $token", text.contains(token))
+            }
+        }
+    }
+
+    @Test
+    fun `the session-start freeze has exactly one production home`() {
+        // Capability freezing: the extension's declaration plus the one site that calls it.
+        val freezers = (mainSources + uiSources + wiringSources)
+            .filter { code(it).contains("reviewerActionCapabilities()") }
+            .map { it.name }
+            .sorted()
+        assertEquals(listOf("AnkiLocalStudyStarter.kt", "ReviewerAction.kt"), freezers)
+
+        // Request assembly: the declaration plus the one site that builds a session request.
+        val builders = (mainSources + uiSources + wiringSources)
+            .filter { code(it).contains("AnkiStudyRequest(") }
+            .map { it.name }
+            .sorted()
+        assertEquals(listOf("AnkiLocalStudyStarter.kt", "AnkiStudyInteraction.kt"), builders)
+
+        // The site is app-wired: the container exposes it and the dashboard offers it.
+        val container = codeOf(wiringSources.single { it.name == "AppContainer.kt" })
+        assertTrue(container.contains("override val ankiLocalStudyStarter: AnkiLocalStudyStarter"))
+        assertTrue(container.contains("dispatch = { request -> machineBackedSession?.startAnkiStudy(request) }"))
+        val dashboard = sourceAt("ui/screens/home/DashboardUiState.kt")
+        assertTrue(dashboard.contains("START_LOCAL_ANKI"))
+        assertTrue(dashboard.contains("localAnkiReady"))
+        // The start site resolves the starter (null when no composition root wired one) and asks it
+        // for a session; it can never assemble a request or freeze capabilities itself.
+        val home = codeOf(uiSources.single { it.name == "HomeViewModel.kt" })
+        assertTrue(home.contains("val starter = ankiLocalStudyStarter ?: return"))
+        assertTrue(home.contains("starter.start(AnkiLocalStudyStarter.Options(deckName = deckName))"))
+        assertFalse(home.contains("AnkiStudyRequest"))
+        // The legacy repository must not grow one of these paths either.
+        assertFalse(
+            "the freeze may not live in the legacy repository",
+            source("StudySessionRepository.kt").contains("reviewerActionCapabilities()")
+        )
     }
 
     @Test

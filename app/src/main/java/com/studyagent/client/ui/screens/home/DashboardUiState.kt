@@ -25,7 +25,17 @@ enum class PrimaryAction {
     START,
     STARTING,
     RESUME_STUDY,
-    RESUME_SESSION
+    RESUME_SESSION,
+
+    /**
+     * GATE 13 STEP 32.2 — no PC agent is connected, but this phone's own Anki collection is ready, so
+     * the dominant action is a *local* review against AnkiDroid. It is a distinct value rather than a
+     * relabelled [START] because the two actions have different sources of truth: one asks the PC
+     * agent for a session, this one starts the on-device backend through
+     * [com.studyagent.client.data.repository.AnkiLocalStudyStarter] and freezes the session's
+     * reviewer-action capabilities at that moment.
+     */
+    START_LOCAL_ANKI
 }
 
 /** Coarse study lifecycle derived from the authoritative session state machine. */
@@ -50,6 +60,8 @@ data class DashboardUiState(
     val refreshing: Boolean = false,
     val error: DashboardError? = null,
     val primaryAction: PrimaryAction = PrimaryAction.CONNECT,
+    /** GATE 13 — true while a session could start on this phone's own Anki collection. */
+    val localAnkiReady: Boolean = false,
     /** What Smart Start will send (§75). */
     val startRequest: StartStudyRequest = StartStudyRequest(null, StudyMode.DUE_REVIEWS.wireValue, null),
     /** Display label for the current Control Center configuration (§77/§121). */
@@ -106,10 +118,21 @@ object DashboardUiMapper {
         connectionState: ConnectionState,
         sessionPhase: SessionPhaseSummary,
         hasServerActiveSession: Boolean,
-        serverSessionPaused: Boolean
+        serverSessionPaused: Boolean,
+        /**
+         * GATE 13 — a ready on-device Anki backend. Only consulted when no PC agent is connected: a
+         * connected agent keeps the app's existing primary action, so the local start stays an
+         * alternative rather than a silent replacement of the user's configured agent.
+         */
+        localAnkiReady: Boolean = false
     ): PrimaryAction = when {
         connectionState is ConnectionState.Connecting || connectionState is ConnectionState.Reconnecting ->
             PrimaryAction.CONNECTING
+
+        // "Study on this phone" is the dominant action exactly when there is no agent to ask and the
+        // device can review on its own (§21: one dominant action, never two competing ones).
+        !connectionState.isConnected && localAnkiReady && sessionPhase == SessionPhaseSummary.IDLE ->
+            PrimaryAction.START_LOCAL_ANKI
 
         !connectionState.isConnected -> PrimaryAction.CONNECT
 
@@ -160,7 +183,9 @@ object DashboardUiMapper {
         effectiveConfig: StudyControlConfig,
         startRequest: StartStudyRequest,
         audioRoute: EffectiveStudyAudioRoute?,
-        nowMs: Long
+        nowMs: Long,
+        /** GATE 13 — ready on-device Anki backend; see [primaryAction]. Defaults to "no". */
+        localAnkiReady: Boolean = false
     ): DashboardUiState {
         val phase = sessionPhase(studyState)
         val activeSession = when {
@@ -170,6 +195,7 @@ object DashboardUiMapper {
         return DashboardUiState(
             connectionState = connectionState,
             capabilities = capabilities,
+            localAnkiReady = localAnkiReady,
             freshness = com.studyagent.client.data.repository.FreshnessPolicy.evaluate(
                 hasData = dashboard.snapshot != null,
                 isConnected = connectionState.isConnected,
@@ -196,7 +222,8 @@ object DashboardUiMapper {
                 connectionState = connectionState,
                 sessionPhase = phase,
                 hasServerActiveSession = activeSession != null,
-                serverSessionPaused = activeSession?.isPaused == true
+                serverSessionPaused = activeSession?.isPaused == true,
+                localAnkiReady = localAnkiReady
             ),
             startRequest = startRequest,
             startSummary = startSummary(effectiveConfig),

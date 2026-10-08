@@ -53,7 +53,7 @@ import com.studyagent.client.core.models.DataFreshness
 import com.studyagent.client.core.models.DayStats
 import com.studyagent.client.core.models.RatingDistribution
 import com.studyagent.client.core.models.StatsRange
-import com.studyagent.client.core.models.StudyState
+import com.studyagent.client.data.repository.AnkiLocalStudyStarter
 import com.studyagent.client.data.repository.DashboardError
 import com.studyagent.client.ui.components.AppHeroCard
 import com.studyagent.client.ui.components.AudioRouteIndicator
@@ -115,6 +115,16 @@ fun HomeScreen(
     // Refresh when the dashboard becomes visible — the repository coalesces and
     // de-dupes from here; recomposition never spams the server.
     LaunchedEffect(Unit) { viewModel.onScreenActive() }
+
+    // GATE 13 — a local Anki start navigates only after the deck was validated against the live
+    // collection and the session really exists; a refusal renders as a banner instead of an empty
+    // study screen.
+    LaunchedEffect(Unit) {
+        viewModel.localStart.collect { result ->
+            if (result is AnkiLocalStudyStarter.Result.Started) onNavigateToStudy()
+        }
+    }
+    val localStartNotice by viewModel.localStartNotice.collectAsStateWithLifecycle()
 
     var showDeckPicker by rememberSaveable { mutableStateOf(false) }
     var selectedMetric by rememberSaveable { mutableStateOf(HistoryMetric.REVIEWED) }
@@ -217,6 +227,20 @@ fun HomeScreen(
                                 message = "Start and voice study work as usual. The live dashboard and " +
                                     "Study Control need a Protocol v2 Study Agent.",
                                 tone = BannerTone.INFO
+                            )
+                        }
+                    }
+
+                    // GATE 13 — a refused local Anki start (no ready backend, unknown deck). It is a
+                    // notice, not a dashboard error: nothing was sent and nothing changed.
+                    localStartNotice?.let { notice ->
+                        item(key = "local-start-notice") {
+                            InfoBanner(
+                                title = "Card actions need a review session",
+                                message = notice,
+                                tone = BannerTone.WARNING,
+                                actionLabel = "Dismiss",
+                                onAction = { viewModel.dismissLocalStartNotice() }
                             )
                         }
                     }

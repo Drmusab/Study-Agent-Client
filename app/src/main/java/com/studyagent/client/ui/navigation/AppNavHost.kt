@@ -42,7 +42,9 @@ fun AppNavHost(
                     dashboardRepository = container.dashboardRepository,
                     studyControlRepository = container.studyControlRepository,
                     studySessionRepository = container.studySessionRepository,
-                    studyAudioRouteCoordinator = container.studyAudioRouteCoordinator
+                    studyAudioRouteCoordinator = container.studyAudioRouteCoordinator,
+                    // GATE 13 STEP 32.2 — the local Anki start site (capabilities frozen at start).
+                    ankiLocalStudyStarter = container.ankiLocalStudyStarter
                 )
             }
             HomeScreen(

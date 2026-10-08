@@ -1,6 +1,7 @@
 package com.studyagent.client.core.study
 
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiFlag
 import com.studyagent.client.core.anki.AnkiRatingOptions
 import com.studyagent.client.core.anki.AnkiRenderedCard
 import com.studyagent.client.core.anki.ReviewTurnId
@@ -280,7 +281,19 @@ data class AnswerReviewModel(
      */
     val reviewerActionRefusal: ReviewerActionRefusal? = null,
     /** True while the turn presented here is the one an action may act on. */
-    val reviewerActionsEnabled: Boolean = false
+    val reviewerActionsEnabled: Boolean = false,
+    /**
+     * GATE 13 §18/§21 — the flag the *backend* currently reports for this card, when it reports one.
+     *
+     * It is a card projection, not action state: after a confirmed `SetFlag` the reducer projects the
+     * confirmed flag onto the turn ([com.studyagent.client.core.anki.AnkiReviewTurn.withFlag]) and it
+     * appears here. It changes no transaction status, schedules nothing and is never what the menu
+     * uses to decide whether an action *may* run (that is [reviewerActionState] plus the policy).
+     *
+     * `null` means "the backend did not say" (`AnkiRenderedCard.flag` is nullable) — never a guess of
+     * `NONE`. A flag is not answer content, so it stays visible while the answer is hidden.
+     */
+    val currentFlag: AnkiFlag? = null
 ) {
     /** True only after explicit or post-answer reveal. */
     val isRevealed: Boolean
@@ -418,7 +431,11 @@ data class AnswerReviewModel(
                 reviewerActionState = local.reviewerActionUi,
                 availableReviewerActionKinds = local.request.reviewerActions.availableKinds,
                 reviewerActionRefusal = local.reviewerActionRefusal,
-                reviewerActionsEnabled = true
+                reviewerActionsEnabled = true,
+                // The backend-reported flag after a confirmed SetFlag (§18). Read from the projected
+                // card, never from the request: a request that was refused or never applied must not
+                // show up as a flag.
+                currentFlag = projectedCard.flag
             )
         }
     }

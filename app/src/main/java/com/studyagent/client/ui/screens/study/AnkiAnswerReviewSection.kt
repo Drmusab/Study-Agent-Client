@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import com.studyagent.client.core.anki.ReviewerAction
 import com.studyagent.client.core.models.Rating
 import com.studyagent.client.core.render.AnkiCardRenderConfig
 import com.studyagent.client.core.render.AnkiCardRenderController
@@ -82,6 +83,12 @@ fun AnkiAnswerReviewSection(
     onRepeatFeedback: () -> Unit,
     onRenderFallback: (String) -> Unit,
     onRateCard: (Rating) -> Unit,
+    /** GATE 13 — user picked a card action (flag/bury/suspend). Dispatch only; nothing here decides. */
+    onReviewerAction: (ReviewerAction) -> Unit = {},
+    /** GATE 13 §13 — retry the *same* action identity after proven non-application. */
+    onRetryReviewerAction: () -> Unit = {},
+    /** GATE 13 §27 — ask for read-only reconciliation of an unproven action. Never a replay. */
+    onRecoverReviewerAction: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val uiState = remember(model, recovery) { AnswerReviewUiState.from(model, recovery) }
@@ -126,6 +133,20 @@ fun AnkiAnswerReviewSection(
             questionText = uiState.questionSummaryText,
             direction = uiState.questionDirection,
             compact = uiState.isQuestionCompact
+        )
+
+        // 1b. GATE 13 — card actions (flag / bury / suspend).
+        //
+        // Mounted with the question, not with the rating bar: a reviewer may flag or bury a card
+        // before revealing the answer, and the durable action model grants the turn exactly one
+        // mutation slot regardless of reveal state (§15). The menu renders itself away when the
+        // frozen capability set offers nothing (INV-13-16) and shows the durable projection —
+        // retry or reconcile — instead of ever replaying an unproven action (§31).
+        ReviewerActionMenu(
+            model = model,
+            onAction = onReviewerAction,
+            onRetry = onRetryReviewerAction,
+            onRecover = onRecoverReviewerAction
         )
 
         // 2. Mode Selector: Original | Clean | Compare (visible once revealed — STEP 6, 36, 45)

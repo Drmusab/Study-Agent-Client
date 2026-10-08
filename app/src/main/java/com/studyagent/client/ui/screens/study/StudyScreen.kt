@@ -307,7 +307,12 @@ fun StudyScreen(
                             onRepeatAnswer = { viewModel.onRepeatAnswer() },
                             onRepeatFeedback = { viewModel.onRepeatFeedback() },
                             onRenderFallback = { reason -> viewModel.onAnswerRenderFallback(reason) },
-                            onRateCard = { rating -> viewModel.onRateCard(rating) }
+                            onRateCard = { rating -> viewModel.onRateCard(rating) },
+                            // GATE 13 — card actions converge on the same reducer path as ratings,
+                            // voice and the notification actions: intent only, never a backend call.
+                            onReviewerAction = { action -> viewModel.onReviewerAction(action) },
+                            onRetryReviewerAction = { viewModel.onRetryReviewerAction() },
+                            onRecoverReviewerAction = { viewModel.onRecoverReviewerAction() }
                         )
                     } else {
                         // Question hero (PC Agent path).

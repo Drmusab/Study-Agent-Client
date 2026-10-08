@@ -1,21 +1,22 @@
 # GATE 13 — Reviewer Actions (Flag / Bury / Suspend): Durable Action Transactions
 
-**Repository:** Drmusab/Study-Agent-Client · **Branch:** `arena/1f126242-study-agent-client`
+**Repository:** Drmusab/Study-Agent-Client · **Branch:** `arena/cc71d67b-study-agent-client`
 **Base commit:** `f0a2eec` (merge of PR #46 — the *uncompiled* GATE 13 work-in-progress)
 **Counterpart:** AnkiDroid (ankdroid/Anki-Android), pinned public provider contract v2.24.1
-**Revision:** final for this branch (supersedes the reviewer-action model PR #46 carried).
+**Revision:** final for this branch, including the wiring pass that §11.2/§11.3 previously listed as
+gaps (Compose menu mounted, app session-start capability freeze, UI regression locks).
 
 ---
 
 ## 0. Verdict
 
 ```text
-GATE 13 (durable reviewer-action model):        IMPLEMENTED
+GATE 13 (durable reviewer-action model):        IMPLEMENTED AND WIRED
 Build:                                          the app module COMPILES (was broken at f0a2eec)
-JVM unit + architecture suites:                 1574 tests / 136 classes — 0 failures
+JVM unit + architecture suites:                 1599 tests / 139 classes — 0 failures
 Real AnkiDroid device mutation (VERIFICATION 14): NOT RUN (no device/emulator in this sandbox;
                                                   CI jobs remain billing-locked)
-Compose card-action menu + app session-start wiring: NOT WIRED (see §11)
+Compose card-action menu + app session-start wiring: WIRED (§3, §11.2-§11.3)
 ```
 
 **Baseline repair is part of this gate.** At `f0a2eec` the module did **not** compile: 18 Kotlin
@@ -110,7 +111,9 @@ fun nextCardAllowed(action: ReviewerAction, status: ReviewerActionStatus): Boole
 | study integration | `AnkiReviewerAction`, `AnkiReviewerActionOutcome`, events/effects | `core/study/AnkiStudyInteraction.kt`, `StudyReducer.kt`, `AnkiStudyEffectExecutor.kt` |
 | persistence | `DataStoreReviewerActionStore` | `data/anki/DataStoreReviewerActionStore.kt` |
 | AnkiDroid write path | protocol + gateway | `data/anki/ankidroid/AnkiDroidReviewerAction{Committer,Gateway}.kt` |
-| UI copy/projection (not yet mounted) | `ReviewerActionCopy`, `ReviewerActionMenuUi` | `ui/screens/study/ReviewerActionUiModels.kt` |
+| UI copy/projection | `ReviewerActionCopy`, `ReviewerActionMenuUi` | `ui/screens/study/ReviewerActionUiModels.kt` |
+| mounted card-action menu (renders the projection, dispatches intents only) | `ReviewerActionMenu` | `ui/screens/study/ReviewerActionMenu.kt` (+ `AnkiAnswerReviewSection.kt`, `StudyScreen.kt`, `StudyViewModel.kt`) |
+| app session-start capability freeze | `AnkiLocalStudyStarter` (+ container wiring, dashboard offer) | `data/repository/AnkiLocalStudyStarter.kt`, `di/AppContainer.kt`, `ui/screens/home/{DashboardUiState,HomeViewModel,HomeScreen}.kt` |
 
 ### 3.1 Deviations from the specification's literal names (with reasons)
 
@@ -233,7 +236,7 @@ buried" cannot prove "was never buried".
 |---|---|---|
 | **1. One action-state model** | **PASS** — `ReviewerActionStatus` is the only durable action state; the UI's `Idle/Saving/RetryAvailable/VerificationRequired` is derived in one function (`ReviewerActionUiState.from`) and a policy refusal is a separate, non-transactional `ReviewerActionRefusal`. No `Applying`/`Failed` business state exists. | `Gate13ArchitectureAuditTest.AUDIT 1 …` |
 | **2. Rating separation** | **PASS** — separate statuses, separate ids, separate stores, separate files. The action ledger/status/record/backend-result never name `ReviewCommitStatus`; the *policy* reads it deliberately (§23's table is defined in terms of the rating transaction); no action file calls `commitRating`/`ReviewCommitLedger`. | `AUDIT 2 …` |
-| **3. One mutation entry point** | **PASS** — the only production callers of `performReviewerAction` are the coordinator (caller) and the AnkiDroid backend (implementation); the executor is the only caller of the coordinator; the action effect is produced only by the reducer and consumed only by the machine/executor; no UI file references the gateway, the backend or the coordinator. | `AUDIT 3 …` |
+| **3. One mutation entry point** | **PASS** — the only production callers of `performReviewerAction` are the coordinator (caller) and the AnkiDroid backend (implementation); the executor is the only caller of the coordinator; the action effect is produced only by the reducer and consumed only by the machine/executor; no UI file references the gateway, the backend or the coordinator; the repository's intent is deliberately named `requestReviewerAction` so the mutation name stays exclusive. | `AUDIT 3 …`, `AUDIT 3 and INV-13-18 …` |
 | **4. Durable ordering** | **PASS** — proven behaviourally (the store is inspected *inside* the boundary callback: it already says `SUBMITTING`) and structurally (PREPARED → boundary-callback write → final status). | `ReviewerActionCoordinatorTest.durable ordering …`, `AUDIT 4 …` |
 | **5. Turn progression** | **PASS** — a flag keeps the turn (same turn id, card, phase, flag projected); bury/suspend close it and emit exactly one `AnkiStudyEffect.Next`, gated by the shared §22 rule. | `ReviewerActionMachineTest …`, `AUDIT 5 …` |
 | **6. Rating/action exclusion** | **PASS** — enforced in the coordinator (rating ledger consulted) *and* in the rating pipeline (action ledger consulted), never by a disabled button. | `AUDIT 6 …`, `ReviewerActionCoordinatorTest.a rating transaction …`, `ReviewerActionMachineTest.a rating transaction blocks …` |
@@ -261,9 +264,18 @@ buried" cannot prove "was never buried".
 | 13 | Duplicate bury ×100 | `…one hundred concurrent identical requests are one logical action and at most one mutation` — 1 id, 1 record, ≤1 backend mutation, 1 boundary crossing |
 | 14 | Real AnkiDroid | **NOT RUN** — no AnkiDroid/device/emulator in this sandbox and CI jobs are billing-locked, exactly as GATE 11's report records for its own device matrix. Procedure unchanged: `androidTest/.../AnkiDroidDisposableCommitInstrumentedTest`-style disposable collection, now extended in spirit by `AnkiDroidReviewSessionTest`-style session setup; a reviewer-action instrumented test is **not** added this pass (it could not be compiled or run here, and an unverifiable test is worse than an honest gap). |
 
-Structural evidence for the whole family: `Gate13ArchitectureAuditTest` (14 tests) plus the
-AnkiDroid isolation suite that now lists the reviewer-action gateway as the second sanctioned writer
-(and keeps `buried`/`suspended` owned by the pinned contract module only).
+Structural evidence for the whole family: `Gate13ArchitectureAuditTest` (17 tests: AUDIT 1-8, the
+INV-13 pack, the UI projection-only scan, the menu-mount/intent path, and the session-start freeze
+lock) plus the AnkiDroid isolation suite that now lists the reviewer-action gateway as the second
+sanctioned writer (and keeps `buried`/`suspended` owned by the pinned contract module only).
+
+Behavioural evidence for the wiring pass: `AnkiLocalStudyStarterTest` (6 tests — the frozen set equals
+the backend's declared set, the freeze is a snapshot not a live view, no-ready-backend/deck/agent-only
+refusals dispatch nothing, readiness follows the on-device backend), `ReviewerActionMenuUiTest`
+(9 tests — pure projection: hidden/disabled rules, the flag chooser never offers `UNKNOWN`, retry only
+after proven non-application, verify only for an unproven outcome), `ReviewerActionUiProjectionTest`
+(4 tests — the real reducer + executor + coordinator projected through `AnswerReviewModel.from`), and
+`DashboardUiMapperTest` (+3 tests — the local offer appears only when disconnected, ready and idle).
 
 ---
 
@@ -311,8 +323,8 @@ AnkiDroid isolation suite that now lists the reviewer-action gateway as the seco
 [x] Suspend implemented (same path)
 [x] recovery/reconciliation implemented (policy table, read-only reconciler, startup blocking)
 [x] UI projection derived from durable status (Idle / Saving / RetryAvailable / VerificationRequired)
-[ ] Compose card-action menu mounted in the study screen      (see §11)
-[ ] app-level session-start capability wiring                 (see §11)
+[x] Compose card-action menu mounted in the study screen      (ReviewerActionMenu in AnkiAnswerReviewSection; mount/intent locked by Gate13ArchitectureAuditTest, projection by ReviewerActionMenuUiTest + ReviewerActionUiProjectionTest)
+[x] app-level session-start capability wiring                 (AnkiLocalStudyStarter + AppContainer + HomeViewModel; AnkiLocalStudyStarterTest, DashboardUiMapperTest)
 [ ] real-device action run (VERIFICATION 14)                  (environment-blocked, see §7)
 ```
 
@@ -325,18 +337,20 @@ tools/jvm-harness/bin/bootstrap-sandbox.sh                 # one-time toolchain 
 HARNESS_WORK=/tmp/h tools/jvm-harness/bin/build.sh all     # main + tests, prints error counts
 HARNESS_WORK=/tmp/h tools/jvm-harness/bin/run.sh           # all tests
 HARNESS_WORK=/tmp/h tools/jvm-harness/bin/run.sh 'ReviewerAction|Gate13'
+HARNESS_WORK=/tmp/h tools/jvm-harness/bin/run.sh 'AnkiLocalStudyStarterTest'
 ```
 
-Observed on this branch: `main errors: 0 (216 files)`, `test errors: 0 (158 files)`,
-`RESULT classes=136 tests=1574 passed=1574 failed=0`. The harness deviations from Gradle are listed
-in `tools/jvm-harness/README.md`; the Gradle commands (`./gradlew testDebugUnitTest lint
+Observed on this branch: `main errors: 0 (217 files)`, `test errors: 0 (161 files)`,
+`RESULT classes=139 tests=1599 passed=1599 failed=0` (32.7 s), and the filtered
+`'ReviewerAction|Gate13'` group green at `classes=7 tests=104 passed=104 failed=0`. The harness deviations from Gradle are
+listed in `tools/jvm-harness/README.md`; the Gradle commands (`./gradlew testDebugUnitTest lint
 assembleDebug`) still cannot run here because every Maven mirror is unreachable — the same
 environment limitation GATE 11 documented, and the reason `di/` and Compose sources are verified by
 inspection plus the audit tests rather than by compilation in this sandbox.
 
 ---
 
-## 11. What this gate does *not* wire (honest gaps)
+## 11. Honest gaps (and what the wiring pass closed)
 
 **11.1 Baseline repair.** The module did not compile at `f0a2eec`. Fixed here: `endReview` added to
 `AnkiBackend` (the executor called it and the AnkiDroid backend overrode it, but the interface never
@@ -345,17 +359,30 @@ declared it); the executor's `reviewerAction` missing `return`; the missing impo
 functions of another scope); `AnkiDroidReviewerActionGateway`/`AnkiDroidWritePermit` visibility; the
 UI models rebuilt on the new projection.
 
-**11.2 Compose menu.** `ReviewerActionMenuUi`/`ReviewerActionCopy` are a presentation model derived
-from `AnswerReviewModel`; the composable that renders them is not part of this pass. The gate's
-contract here is that the projection is *derived from durable status* (which is implemented and
-tested), not that a particular screen exists.
+**11.2 Compose menu — wired.** `ReviewerActionMenu` renders `ReviewerActionMenuUi` and nothing else:
+it decides nothing (no dispatch, no backend, no ledger, no status type is named in it), every row and
+every flag choice is disabled while a durable action exists, rows appear in the frozen capability
+order, bury/suspend confirm, and a refusal is a `blockMessage`, not a state. It is mounted with the
+question in `AnkiAnswerReviewSection` and reaches the machine only through
+`StudyViewModel.onReviewerAction/onRetry/onRecover` → `StudySessionRepository.request…ReviewerAction`.
+Flag rows are text + semantics labels (`contentDescription`/`stateDescription`): the codebase has no
+flag icon mapping, and colour is never the sole identifier.
 
-**11.3 App session-start wiring.** Nothing in the app constructs an `AnkiStudyRequest` yet (the
-GATE 10/11 local start path is still unwired), so there is no site to freeze capabilities at. The
-one call such a site needs is `AnkiBackend.reviewerActionCapabilities()`, which derives the frozen
-set — capabilities *and* audited semantics — from the backend's single capability source.
+**11.3 App session-start wiring — wired.** `AnkiLocalStudyStarter` is the one session-start site:
+resolve → `refreshAvailability()` → re-resolve (fail closed) → deck lookup → **freeze**
+`backend.reviewerActionCapabilities()` (capabilities *and* audited semantics) into
+`AnkiStudyRequest.reviewerActions` → dispatch. It never mutates, never prepares an action and never
+schedules anything. `AppContainer` exposes it lazily with
+`dispatch = { request -> machineBackedSession?.startAnkiStudy(request) }`; Home offers
+`PrimaryAction.START_LOCAL_ANKI` only when disconnected + `localAnkiReady` + idle, navigates only on
+`Result.Started`, and renders refusals as one honest banner line.
 
 **11.4 Device verification.** VERIFICATION 14 needs a disposable AnkiDroid collection; see §7.
+
+**11.5 What the sandbox still cannot check.** The harness excludes Compose/AndroidX sources from
+compilation (they are covered by the audit scans and by the *pure* UI projection tests), so the
+composable, the ViewModel and the `di/` wiring are type-checked only by Gradle/CI — which cannot run
+here. The reviewer-action instrumented test remains the one intentionally absent artefact.
 
 ---
 

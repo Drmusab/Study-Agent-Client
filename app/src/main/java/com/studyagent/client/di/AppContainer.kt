@@ -79,6 +79,7 @@ import com.studyagent.client.data.repository.ManagementCacheStorage
 import com.studyagent.client.data.repository.PreferencesManagementCacheStorage
 import com.studyagent.client.data.repository.StudyControlRepository
 import com.studyagent.client.data.repository.StudySessionMachineRepository
+import com.studyagent.client.data.repository.AnkiLocalStudyStarter
 import com.studyagent.client.data.repository.StudySessionRepository
 import com.studyagent.client.core.network.NetworkStatsRegistry
 import kotlinx.coroutines.CoroutineScope
@@ -151,6 +152,16 @@ interface AppContainer {
     /** GATE 03 + GATE 04 — registry now includes real AnkiDroid backend */
     val ankiBackendRegistry: AnkiBackendRegistry
     val ankiBackendSelector: AnkiBackendSelector
+
+    /**
+     * GATE 13 §28 (STEP 32.2) — the app's session-start site for a *local* Anki review.
+     *
+     * It is the one production object that turns "the user wants to study this deck" into an
+     * [com.studyagent.client.core.study.AnkiStudyRequest] whose reviewer-action capability set was
+     * frozen from the backend's audited contract at that instant. Callers (screens) only ask it to
+     * start; they never assemble a request or a capability set themselves.
+     */
+    val ankiLocalStudyStarter: AnkiLocalStudyStarter
 }
 
 /**
@@ -421,6 +432,23 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
      * remains available for tests and as a migration fallback, but the app's
      * authoritative session coordinator is now the serialized state machine.
      */
+    /**
+     * GATE 13 STEP 32.2 — the one local-Anki session-start site.
+     *
+     * The dispatch lambda resolves the machine-backed repository lazily, so a start can never target
+     * the legacy repository and can never bypass the state machine (INV-13-17). Capabilities are
+     * frozen inside [AnkiLocalStudyStarter.start] — importing
+     * `AnkiBackend.reviewerActionCapabilities()` anywhere else would be a second capability store.
+     */
+    override val ankiLocalStudyStarter: AnkiLocalStudyStarter by lazy {
+        AnkiLocalStudyStarter(
+            registry = ankiBackendRegistry,
+            selector = ankiBackendSelector,
+            scope = ankiDroidScope,
+            dispatch = { request -> machineBackedSession?.startAnkiStudy(request) }
+        )
+    }
+
     override val studySessionRepository: StudySessionRepository by lazy {
         StudySessionMachineRepository(
             connectionRepository = connectionRepository,

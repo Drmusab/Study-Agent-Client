@@ -37,7 +37,9 @@ class DashboardUiMapperTest {
         connection: ConnectionState = connected,
         study: StudyState = StudyState.Idle,
         dashboard: DashboardData = DashboardData(),
-        capabilities: AgentCapabilities = capsV2
+        capabilities: AgentCapabilities = capsV2,
+        /** GATE 13 — a ready on-device Anki backend ("study on this phone"). */
+        localAnkiReady: Boolean = false
     ) = DashboardUiMapper.build(
         connectionState = connection,
         capabilities = capabilities,
@@ -46,7 +48,8 @@ class DashboardUiMapperTest {
         effectiveConfig = config,
         startRequest = startRequest,
         audioRoute = null,
-        nowMs = 1_000_000_000_000L
+        nowMs = 1_000_000_000_000L,
+        localAnkiReady = localAnkiReady
     )
 
     @Test
@@ -102,6 +105,30 @@ class DashboardUiMapperTest {
         val state = build(study = StudyState.SessionFinished(summary = "done", cardsReviewed = 10))
         assertEquals(PrimaryAction.START, state.primaryAction)
         assertTrue(state.finishedSession != null)
+    }
+
+    @Test
+    fun `without an agent a ready device backend makes the local review the primary action`() {
+        val state = build(connection = ConnectionState.Disconnected, localAnkiReady = true)
+        assertEquals(PrimaryAction.START_LOCAL_ANKI, state.primaryAction)
+        assertTrue("the state carries the reason, not just the label", state.localAnkiReady)
+    }
+
+    @Test
+    fun `a connected agent keeps its own primary action even when the device backend is ready`() {
+        assertEquals(
+            "the local start is an alternative, never a silent replacement of the configured agent",
+            PrimaryAction.START,
+            build(localAnkiReady = true).primaryAction
+        )
+    }
+
+    @Test
+    fun `an unready device backend leaves the disconnected state on CONNECT`() {
+        assertEquals(
+            PrimaryAction.CONNECT,
+            build(connection = ConnectionState.Disconnected, localAnkiReady = false).primaryAction
+        )
     }
 
     @Test
