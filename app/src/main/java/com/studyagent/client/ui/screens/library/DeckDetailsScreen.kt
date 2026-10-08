@@ -52,6 +52,7 @@ fun DeckDetailsScreen(
     viewModel: DeckDetailsViewModel,
     onNavigateBack: () -> Unit,
     onNavigateToStudy: () -> Unit,
+    onNavigateToCardBrowser: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -185,6 +186,15 @@ fun DeckDetailsScreen(
                         }
                         item(key = "identity") { DeckIdentityCard(current) }
                         item(key = "summary") { DeckSummaryCard(current) }
+                        if (current.capabilities.cardBrowser.browse && current.capabilities.cardBrowser.deckScope) {
+                            item(key = "browse-cards") {
+                                SecondaryButton(
+                                    text = "Browse cards",
+                                    onClick = { onNavigateToCardBrowser(current.summary.deck.ref.deckId) },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
                         if (current.activeSessionPreventsStudy) {
                             item(key = "active-study-notice") {
                                 InfoBanner(

@@ -56,7 +56,9 @@ object AnkiDroidCompatibilityPolicy {
                 noteTypes = CapabilitySupport.UNSUPPORTED,
                 cardTemplates = CapabilitySupport.UNSUPPORTED,
                 specVersion = spec,
-                reason = "spec $spec below minimum $MIN_SUPPORTED_SPEC"
+                reason = "spec $spec below minimum $MIN_SUPPORTED_SPEC",
+                cardBrowser = CapabilitySupport.UNSUPPORTED,
+                cardSearch = CapabilitySupport.UNSUPPORTED
             )
         }
 
@@ -91,7 +93,11 @@ object AnkiDroidCompatibilityPolicy {
             noteTypes = CapabilitySupport.SUPPORTED,
             cardTemplates = CapabilitySupport.SUPPORTED,
             specVersion = spec,
-            reason = "provider contract supported at spec $spec"
+            reason = "provider contract supported at spec $spec",
+            // The public card URI is an item lookup only; generic note search is not a bounded
+            // card-list/search contract and must not be presented as Card Browser support.
+            cardBrowser = CapabilitySupport.UNSUPPORTED,
+            cardSearch = CapabilitySupport.UNSUPPORTED
         )
     }
 
@@ -207,7 +213,9 @@ data class AnkiDroidApiCapabilityReport(
     val noteTypes: CapabilitySupport,
     val cardTemplates: CapabilitySupport,
     val specVersion: Int?,
-    val reason: String
+    val reason: String,
+    val cardBrowser: CapabilitySupport = CapabilitySupport.UNSUPPORTED,
+    val cardSearch: CapabilitySupport = CapabilitySupport.UNSUPPORTED
 ) {
     companion object {
         val UNKNOWN = AnkiDroidApiCapabilityReport(
@@ -230,7 +238,9 @@ data class AnkiDroidApiCapabilityReport(
             noteTypes = CapabilitySupport.UNKNOWN,
             cardTemplates = CapabilitySupport.UNKNOWN,
             specVersion = null,
-            reason = "spec not known"
+            reason = "spec not known",
+            cardBrowser = CapabilitySupport.UNKNOWN,
+            cardSearch = CapabilitySupport.UNKNOWN
         )
     }
 
@@ -262,7 +272,9 @@ data class AnkiDroidApiCapabilityReport(
         AnkiDroidCapabilityDetail("mediaWrite", mediaWrite, maturityFor(mediaWrite, implemented.media && implemented.createNotes), "not yet validated"),
         AnkiDroidCapabilityDetail("search", search, maturityFor(search, implemented.search), "provider contract"),
         AnkiDroidCapabilityDetail("noteTypes", noteTypes, maturityFor(noteTypes, implemented.renderedCards), "provider contract"),
-        AnkiDroidCapabilityDetail("cardTemplates", cardTemplates, maturityFor(cardTemplates, implemented.renderedCards), "provider contract")
+        AnkiDroidCapabilityDetail("cardTemplates", cardTemplates, maturityFor(cardTemplates, implemented.renderedCards), "provider contract"),
+        AnkiDroidCapabilityDetail("cardBrowser", cardBrowser, maturityFor(cardBrowser, implemented.cardBrowser.browse), "no public bounded card-list URI in the pinned contract"),
+        AnkiDroidCapabilityDetail("cardSearch", cardSearch, maturityFor(cardSearch, implemented.cardBrowser.textSearch), "known-card hydration is not collection-wide search")
     )
 
     private fun maturityFor(support: CapabilitySupport, implemented: Boolean): CapabilityMaturity = when {

@@ -4,6 +4,8 @@ import com.studyagent.client.core.anki.*
 import com.studyagent.client.core.models.Rating
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -76,6 +78,16 @@ class FakeAnkiBackend(
         private set
     var getSelectedDeckCalls: Int = 0
         private set
+
+    // GATE 15 — observable, bounded read-only browse requests. These counters never include row-level calls.
+    var browseCalls: Int = 0
+        private set
+    val browseLimits: MutableList<Int> = mutableListOf()
+    val browseQueries: MutableList<AnkiCardQuery> = mutableListOf()
+    var browseError: AnkiError? = null
+    var browseGate: CompletableDeferred<Unit>? = null
+    var ignoreBrowseCancellation: Boolean = false
+
     // Defensively detach caller-owned collections so fixture mutation cannot rewrite an active turn.
     private val cardData = cards.map { card ->
         card.copy(media = card.media.toList(), metadata = card.metadata.copy(tags = card.metadata.tags.toSet()),
@@ -252,6 +264,117 @@ class FakeAnkiBackend(
             AnkiResult.Success(deckData.toList())
         }
     }
+
+    /**
+     * GATE 15 fake transport: the backend, not the browser UI, evaluates text and filters across
+     * the fixture collection, then returns one bounded page. No scheduler operation is invoked.
+     */
+    override suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> {
+        val normalized = query.copy(text = normalizeAnkiCardSearchText(query.text))
+        return if (ignoreBrowseCancellation) {
+            withContext(NonCancellable) { performBrowse(normalized) }
+        } else {
+            performBrowse(normalized)
+        }
+    }
+
+    private suspend fun performBrowse(query: AnkiCardQuery): AnkiResult<AnkiCardPage> {
+        mutex.withLock {
+            browseCalls += 1
+            browseLimits += query.page.limit
+            browseQueries += query
+        }
+        delay(latencyMs)
+        browseGate?.await()
+        return mutex.withLock {
+            usabilityError()?.let { return@withLock AnkiResult.Failure(it) }
+            query.unsupportedFeature(capabilities.value.cardBrowser)?.let { feature ->
+                return@withLock AnkiResult.Failure(AnkiError.UnsupportedAction(feature))
+            }
+            browseError?.let { return@withLock AnkiResult.Failure(it) }
+
+            val normalizedText = normalizeAnkiCardSearchText(query.text)
+            val matching = cardData.asSequence()
+                .filter { card -> query.deckId == null || card.deckRef?.deckId == query.deckId }
+                .filter { card ->
+                    normalizedText == null ||
+                        card.questionText?.contains(normalizedText, ignoreCase = true) == true ||
+                        card.answerText?.contains(normalizedText, ignoreCase = true) == true
+                }
+                .filter { card -> query.filters.flags.isEmpty() || card.flag in query.filters.flags }
+                .filter { card -> query.filters.tags.all { it in card.metadata.tags } }
+                .filter { card ->
+                    query.filters.cardTypes.isEmpty() || card.browserType() in query.filters.cardTypes
+                }
+                .filter { card -> query.filters.suspended == null || card.isSuspended() == query.filters.suspended }
+                .filter { card -> query.filters.buried == null || card.isBuried() == query.filters.buried }
+                .toList()
+
+            val sorted = when (query.sort) {
+                AnkiCardSort.Default -> matching
+                AnkiCardSort.Reps -> matching.sortedWith(
+                    compareBy<AnkiRenderedCard> { it.scheduling?.reps ?: Int.MAX_VALUE }
+                        .thenBy { it.ref.stableKey }
+                )
+                AnkiCardSort.Lapses -> matching.sortedWith(
+                    compareBy<AnkiRenderedCard> { it.scheduling?.lapses ?: Int.MAX_VALUE }
+                        .thenBy { it.ref.stableKey }
+                )
+                else -> return@withLock AnkiResult.Failure(
+                    AnkiError.UnsupportedAction("card_sort_unsupported")
+                )
+            }
+            val offset = parseFakeCursor(query.page.cursor)
+                ?: return@withLock AnkiResult.Failure(AnkiError.InvalidRequest("card_cursor_invalid"))
+            if (offset > sorted.size) {
+                return@withLock AnkiResult.Failure(AnkiError.InvalidRequest("card_cursor_out_of_range"))
+            }
+            val pageItems = sorted.drop(offset).take(query.page.limit).map(::toListItem)
+            val nextOffset = offset + pageItems.size
+            val nextCursor = if (nextOffset < sorted.size) "fake-cursor:$nextOffset" else null
+            AnkiResult.Success(AnkiCardPage(pageItems, nextCursor, totalCount = sorted.size))
+        }
+    }
+
+    private fun parseFakeCursor(cursor: String?): Int? = when {
+        cursor == null -> 0
+        !cursor.startsWith("fake-cursor:") -> null
+        else -> cursor.removePrefix("fake-cursor:").toIntOrNull()?.takeIf { it >= 0 }
+    }
+
+    private fun AnkiRenderedCard.browserType(): AnkiCardType? = when (metadata.queueState) {
+        AnkiCardQueueState.NEW -> AnkiCardType.NEW
+        AnkiCardQueueState.LEARNING -> AnkiCardType.LEARNING
+        AnkiCardQueueState.REVIEW -> AnkiCardType.REVIEW
+        AnkiCardQueueState.RELEARNING -> AnkiCardType.RELEARNING
+        AnkiCardQueueState.UNKNOWN -> AnkiCardType.UNKNOWN
+        AnkiCardQueueState.SUSPENDED, AnkiCardQueueState.BURIED, null -> null
+    }
+
+    private fun AnkiRenderedCard.isSuspended(): Boolean? = when (metadata.queueState) {
+        null, AnkiCardQueueState.UNKNOWN -> null
+        else -> metadata.queueState == AnkiCardQueueState.SUSPENDED
+    }
+
+    private fun AnkiRenderedCard.isBuried(): Boolean? = when (metadata.queueState) {
+        null, AnkiCardQueueState.UNKNOWN -> null
+        else -> metadata.queueState == AnkiCardQueueState.BURIED
+    }
+
+    private fun toListItem(card: AnkiRenderedCard): AnkiCardListItem = AnkiCardListItem(
+        cardRef = card.ref,
+        noteRef = card.noteRef,
+        deckRef = card.deckRef,
+        deckName = card.metadata.deckName ?: deckData.firstOrNull { it.ref == card.deckRef }?.name,
+        questionText = card.questionText,
+        answerText = card.answerText,
+        tags = card.metadata.tags.toList(),
+        flag = card.flag,
+        type = card.browserType(),
+        scheduling = card.scheduling,
+        suspended = card.isSuspended(),
+        buried = card.isBuried()
+    )
 
     override suspend fun getSelectedDeck(): AnkiResult<AnkiDeckRef?> {
         delay(latencyMs)
@@ -741,8 +864,28 @@ class FakeAnkiBackend(
     }
 
     companion object {
-        val REVIEW_CAPABILITIES = AnkiCapabilities(review = true, scheduledReview = true, deckListing = true,
-            renderedCards = true, reviewIntervals = true)
+        val CARD_BROWSER_CAPABILITIES = AnkiCardBrowserCapabilities(
+            browse = true,
+            deckScope = true,
+            textSearch = true,
+            flagFilter = true,
+            tagFilter = true,
+            cardTypeFilter = true,
+            suspendedFilter = true,
+            buriedFilter = true,
+            sorts = setOf(AnkiCardSort.Reps, AnkiCardSort.Lapses),
+            totalCount = true,
+            answerPreview = true
+        )
+
+        val REVIEW_CAPABILITIES = AnkiCapabilities(
+            review = true,
+            scheduledReview = true,
+            deckListing = true,
+            renderedCards = true,
+            reviewIntervals = true,
+            cardBrowser = CARD_BROWSER_CAPABILITIES
+        )
 
         /**
          * GATE 13 — the rating capabilities plus the reviewer-action write path the fake models.

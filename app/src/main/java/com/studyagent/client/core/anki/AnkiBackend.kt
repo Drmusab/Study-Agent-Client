@@ -69,6 +69,19 @@ interface AnkiBackend {
     }
 
     /**
+     * GATE 15 — bounded, read-only card browsing. The backend receives normalized plain-text
+     * search semantics, neutral filters/sort keys, a bounded limit and an opaque domain cursor.
+     * It must reject query components it cannot honor, search across its collection rather than
+     * only the loaded page, and return lightweight plain-text projections (never full HTML).
+     *
+     * The default is intentionally unsupported: adding this contract must not make existing
+     * adapters look browser-capable. Implementations advertise the exact supported features in
+     * [AnkiCapabilities.cardBrowser] and return exact query totals only when authoritative.
+     */
+    suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> =
+        AnkiResult.Failure(AnkiError.UnsupportedAction("card_browser"))
+
+    /**
      * Open a scheduled-review session bound immutably to this backend, one collection and one
      * deck (§10/§130). The deck is validated against the live collection before the session
      * exists, so a stale reference fails here rather than mid-session (§45/§46).

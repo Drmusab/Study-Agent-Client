@@ -24,6 +24,9 @@ import com.studyagent.client.ui.screens.library.DeckDetailsScreen
 import com.studyagent.client.ui.screens.library.DeckDetailsViewModel
 import com.studyagent.client.ui.screens.library.LibraryScreen
 import com.studyagent.client.ui.screens.library.LibraryViewModel
+import com.studyagent.client.ui.screens.cardbrowser.CardBrowserScreen
+import com.studyagent.client.ui.screens.cardbrowser.CardBrowserViewModel
+import com.studyagent.client.ui.screens.cardbrowser.CardDetailsPlaceholderScreen
 import com.studyagent.client.ui.screens.settings.SettingsScreen
 import com.studyagent.client.ui.screens.settings.SettingsViewModel
 import com.studyagent.client.ui.screens.study.StudyScreen
@@ -99,7 +102,49 @@ fun AppNavHost(
                 onNavigateBack = { navController.popBackStack() },
                 onNavigateToStudy = {
                     navController.navigate(Screen.Study.route) { launchSingleTop = true }
+                },
+                onNavigateToCardBrowser = { stableDeckId ->
+                    navController.navigate(Screen.CardBrowser.createRoute(stableDeckId))
                 }
+            )
+        }
+
+        composable(
+            route = Screen.CardBrowser.route,
+            arguments = listOf(
+                navArgument(Screen.CardBrowser.ARG_DECK_ID) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
+            )
+        ) { backStackEntry ->
+            val deckId = Screen.CardBrowser.decodeDeckId(
+                backStackEntry.arguments?.getString(Screen.CardBrowser.ARG_DECK_ID)
+            )
+            val browserViewModel: CardBrowserViewModel = viewModel(
+                key = "card-browser:${container.ankiDroidBackend.id.stableId}:${deckId ?: "all"}"
+            ) {
+                CardBrowserViewModel(initialBackend = container.ankiDroidBackend, deckId = deckId)
+            }
+            CardBrowserScreen(
+                viewModel = browserViewModel,
+                onNavigateBack = { navController.popBackStack() },
+                onOpenCardDetails = { cardRef ->
+                    navController.navigate(Screen.CardDetails.createRoute(cardRef))
+                }
+            )
+        }
+
+        composable(
+            route = Screen.CardDetails.route,
+            arguments = listOf(navArgument(Screen.CardDetails.ARG_CARD_REF) { type = NavType.StringType })
+        ) { backStackEntry ->
+            CardDetailsPlaceholderScreen(
+                cardRef = Screen.CardDetails.decodeCardRef(
+                    backStackEntry.arguments?.getString(Screen.CardDetails.ARG_CARD_REF)
+                ),
+                onNavigateBack = { navController.popBackStack() }
             )
         }
 

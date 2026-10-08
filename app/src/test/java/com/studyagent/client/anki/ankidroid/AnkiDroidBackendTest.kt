@@ -13,6 +13,8 @@ import com.studyagent.client.core.anki.CommitRatingRequest
 import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiCardQuery
+import com.studyagent.client.core.anki.AnkiCardPage
 import com.studyagent.client.core.anki.ReviewTurnId
 import com.studyagent.client.core.anki.ReviewCommitId
 import com.studyagent.client.core.models.Rating
@@ -31,6 +33,7 @@ import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidCardGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidDeckGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidReviewGateway
 import com.studyagent.client.data.anki.ankidroid.FakeAnkiDroidGateway
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardBrowserGateway
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
@@ -333,5 +336,31 @@ class AnkiDroidBackendTest {
         )
         val result = backend.getDecks() as AnkiResult.Failure
         assertTrue(result.error is AnkiError.CollectionUnavailable)
+    }
+
+    @Test
+    fun `browse cards is capability gated before the public provider seam`() = runTest {
+        val gateway = FakeAnkiDroidGateway(stateToReturn = readyState())
+        val browser = object : AnkiDroidCardBrowserGateway {
+            var calls = 0
+            override suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> {
+                calls += 1
+                return AnkiResult.Success(AnkiCardPage(emptyList(), null, 0))
+            }
+        }
+        val backend = AnkiDroidBackend(
+            gateway = gateway,
+            scope = backgroundScope,
+            deckGateway = FakeAnkiDroidDeckGateway(),
+            reviewGateway = FakeAnkiDroidReviewGateway(),
+            cardGateway = FakeAnkiDroidCardGateway(),
+            cardBrowserGateway = browser
+        )
+
+        val result = backend.browseCards(AnkiCardQuery())
+
+        assertTrue(result is AnkiResult.Failure)
+        assertEquals(AnkiError.UnsupportedAction("card_browser"), (result as AnkiResult.Failure).error)
+        assertEquals(0, browser.calls)
     }
 }
