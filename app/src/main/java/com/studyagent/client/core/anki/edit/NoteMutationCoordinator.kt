@@ -1,6 +1,7 @@
 package com.studyagent.client.core.anki.edit
 
 import com.studyagent.client.core.anki.AnkiBackend
+import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCardDetails
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
@@ -53,11 +54,14 @@ sealed interface NoteMutationOutcome {
     /** The note changed since it was read. Nothing was written. Resolve by starting a new mutation. */
     data class Conflict(val record: NoteMutationRecord, val latest: NoteEditBase?) : NoteMutationOutcome
 
-    /** The backend confirmed the full plan. [refreshed] is the authoritative post-write read. */
+    /**
+     * The backend confirmed the full plan AND one authoritative post-write read holds the intended
+     * state (CONTRACT-06/15). [refreshed] is that read: it, not the local draft, is the presentation
+     * truth afterwards (INV-17-14).
+     */
     data class Applied(
         val record: NoteMutationRecord,
-        val refreshed: AnkiCardDetails?,
-        val refreshError: AnkiError?
+        val refreshed: AnkiCardDetails
     ) : NoteMutationOutcome
 
     /** Proven not applied. The record is RETRY_ALLOWED and can be retried with the same id. */
@@ -69,7 +73,17 @@ sealed interface NoteMutationOutcome {
 
 sealed interface NoteMutationRecoveryOutcome {
     data class Resolved(val record: NoteMutationRecord) : NoteMutationRecoveryOutcome
-    data class StillAmbiguous(val record: NoteMutationRecord, val error: AnkiError?) : NoteMutationRecoveryOutcome
+
+    /**
+     * Still AMBIGUOUS. [evidence] is read-only STATE COMPARISON offered to help a human decide; it is
+     * never transaction-correlated proof and it never changes the status by itself.
+     */
+    data class StillAmbiguous(
+        val record: NoteMutationRecord,
+        val error: AnkiError?,
+        val evidence: NoteMutationVerification? = null
+    ) : NoteMutationRecoveryOutcome
+
     data class Unchanged(val record: NoteMutationRecord) : NoteMutationRecoveryOutcome
     data object NotFound : NoteMutationRecoveryOutcome
     data class LedgerUnavailable(val detail: String) : NoteMutationRecoveryOutcome
@@ -95,6 +109,25 @@ interface NoteMutationCoordinator {
 
     /** Read-only evidence check for an AMBIGUOUS or interrupted mutation. */
     suspend fun recover(mutationId: NoteMutationId): NoteMutationRecoveryOutcome
+
+    /**
+     * Closes an AMBIGUOUS mutation on an explicit human attestation (CONTRACT-26). This exists because
+     * the pinned backend offers no reconciliation: without it an ambiguous record would block that
+     * note forever. The attestation is recorded as such ([NoteMutationReason.USER_ATTESTED_APPLIED] /
+     * [NoteMutationReason.USER_ATTESTED_NOT_APPLIED]) and is never presented as backend evidence.
+     */
+    suspend fun resolveAmbiguous(
+        mutationId: NoteMutationId,
+        attestation: NoteMutationAttestation
+    ): NoteMutationRecoveryOutcome
+
+    /**
+     * Read-only: the non-terminal mutation that currently owns this note, if any (CONTRACT-26). The
+     * editor uses it to explain why a save is blocked; it never writes and never resolves anything.
+     * A ledger that cannot be read answers `null` — the save path then reports the failure itself
+     * instead of the screen guessing.
+     */
+    suspend fun activeMutationFor(backendId: AnkiBackendId, noteId: String): NoteMutationRecord?
 }
 
 /**
@@ -107,8 +140,10 @@ interface NoteMutationCoordinator {
  * 5. re-read the note (`getCardDetails`); drift -> PREPARED -> CONFLICT, no write;
  * 6. persist SUBMITTING (the boundary) — no backend write is issued before this is durable;
  * 7. issue one backend write per plan operation; each later operation persists its index first;
- * 8. classify the result and persist the terminal status;
- * 9. refresh the card authoritatively (APPLIED only).
+ * 8. on a confirmed write take ONE authoritative read and verify the stored state against the payload
+ *    (CONTRACT-06/15) — that read is also the post-save refresh (INV-17-14);
+ * 9. persist the terminal status: APPLIED only when verification matched, AMBIGUOUS when it did not
+ *    or when the read could not be obtained. Nothing is replayed from here.
  *
  * One coordinator call runs at a time. A second call while one is in flight is refused ([SaveInProgress]).
  */
@@ -215,7 +250,8 @@ class DefaultNoteMutationCoordinator(
                 NoteMutationStatus.SUBMITTING -> {
                     // A submitted write whose outcome was never recorded (for example a cancelled call).
                     when (val step = ledger.apply(mutationId, NoteMutationStatus.SUBMITTING, NoteMutationEvent.RecoveryNormalizedUnknown)) {
-                        is NoteLedgerResult.Ok -> NoteMutationRecoveryOutcome.StillAmbiguous(step.value, null)
+                        is NoteLedgerResult.Ok ->
+                            NoteMutationRecoveryOutcome.StillAmbiguous(step.value, null, stateEvidence(step.value))
                         is NoteLedgerResult.Unavailable -> NoteMutationRecoveryOutcome.LedgerUnavailable(step.detail)
                         is NoteLedgerResult.Rejected -> NoteMutationRecoveryOutcome.LedgerUnavailable(step.reason)
                     }
@@ -262,8 +298,42 @@ class DefaultNoteMutationCoordinator(
                 }
             }
             is NoteMutationReconciliationResult.Unresolved ->
-                NoteMutationRecoveryOutcome.StillAmbiguous(record, evidence.error)
+                NoteMutationRecoveryOutcome.StillAmbiguous(record, evidence.error, stateEvidence(record))
         }
+    }
+
+    /**
+     * Read-only state comparison offered to a human who has to decide an AMBIGUOUS mutation.
+     *
+     * It is available only while this process still retains the in-process payload: the durable record
+     * holds ordinals, names and refs, never values, so after a restart the honest answer is
+     * [NoteMutationVerification.Unverifiable] instead of a guess. It is STATE COMPARISON ONLY and it
+     * never changes a status by itself (INV-17-07/08/09).
+     */
+    private suspend fun stateEvidence(record: NoteMutationRecord): NoteMutationVerification {
+        val payload = pending[record.mutationId]
+            ?: return NoteMutationVerification.Unverifiable("payload_not_retained")
+        val refreshed = when (val read = backend.getCardDetails(record.cardRef)) {
+            is AnkiResult.Success -> read.value
+            is AnkiResult.Failure -> return NoteMutationVerification.Unverifiable("post_write_read_failed")
+        }
+        return NoteMutationVerifier.verifyIntent(
+            record = record,
+            intent = NoteMutationIntent(
+                fieldValues = payload.fieldValues,
+                tags = payload.tags,
+                targetDeckId = payload.deckTo?.deckId
+            ),
+            refreshed = refreshed
+        )
+    }
+
+    override suspend fun activeMutationFor(
+        backendId: AnkiBackendId,
+        noteId: String
+    ): NoteMutationRecord? = when (val found = ledger.findActiveForNote(backendId, noteId)) {
+        is NoteLedgerResult.Ok -> found.value
+        is NoteLedgerResult.Unavailable, is NoteLedgerResult.Rejected -> null
     }
 
     private suspend fun saveLocked(
@@ -396,7 +466,7 @@ class DefaultNoteMutationCoordinator(
 
             when (result) {
                 is NoteMutationBackendResult.ConfirmedApplied -> {
-                    if (index == steps.lastIndex) return finishApplied(current, record)
+                    if (index == steps.lastIndex) return finishApplied(current, record, steps)
                 }
                 is NoteMutationBackendResult.ConfirmedNotApplied -> {
                     if (index == 0) {
@@ -439,17 +509,97 @@ class DefaultNoteMutationCoordinator(
         }
     }
 
-    private suspend fun finishApplied(current: NoteMutationRecord, record: NoteMutationRecord): NoteMutationOutcome {
-        val applied = when (val recorded = ledger.apply(record.mutationId, NoteMutationStatus.SUBMITTING, NoteMutationEvent.BackendConfirmedApplied)) {
+    /**
+     * CONTRACT-06/15 — the last step confirmed, but a provider row count proves only that the
+     * provider's code path completed, not that the collection holds the payload. APPLIED is recorded
+     * only after one authoritative read verifies the intended state; that same read is then the
+     * presentation truth (INV-17-14). A read that disagrees, or a read that cannot be obtained, is
+     * recorded as AMBIGUOUS: it is never reported as APPLIED and never replayed.
+     */
+    private suspend fun finishApplied(
+        current: NoteMutationRecord,
+        record: NoteMutationRecord,
+        steps: List<NoteMutationStep>
+    ): NoteMutationOutcome {
+        val id = record.mutationId
+        val refreshed = readForVerification(record)
+        when (val verification = NoteMutationVerifier.verify(steps, refreshed, record.backendId)) {
+            NoteMutationVerification.MatchesIntent -> Unit
+            is NoteMutationVerification.DiffersFromIntent, is NoteMutationVerification.Unverifiable -> {
+                val reason = if (verification is NoteMutationVerification.DiffersFromIntent) {
+                    NoteMutationReason.POST_WRITE_VERIFICATION_MISMATCH
+                } else {
+                    NoteMutationReason.POST_WRITE_UNVERIFIED
+                }
+                val detail = when (verification) {
+                    is NoteMutationVerification.DiffersFromIntent -> verification.detail
+                    is NoteMutationVerification.Unverifiable -> verification.detail
+                    NoteMutationVerification.MatchesIntent -> "none"
+                }
+                return when (val recorded = ledger.apply(
+                    id,
+                    NoteMutationStatus.SUBMITTING,
+                    NoteMutationEvent.PostWriteVerificationFailed(reason)
+                )) {
+                    is NoteLedgerResult.Ok ->
+                        NoteMutationOutcome.VerificationRequired(recorded.value, "${reason.name}:$detail")
+                    is NoteLedgerResult.Unavailable, is NoteLedgerResult.Rejected ->
+                        NoteMutationOutcome.VerificationRequired(current, "verification_not_recorded")
+                }
+            }
+        }
+        val applied = when (val recorded = ledger.apply(id, NoteMutationStatus.SUBMITTING, NoteMutationEvent.BackendConfirmedApplied)) {
             is NoteLedgerResult.Ok -> recorded.value
             is NoteLedgerResult.Unavailable, is NoteLedgerResult.Rejected ->
                 return NoteMutationOutcome.VerificationRequired(current, "applied_not_recorded")
         }
-        pending.remove(record.mutationId)
-        // The authoritative refresh is a read. Its failure never turns APPLIED into anything else.
-        return when (val refresh = backend.getCardDetails(record.cardRef)) {
-            is AnkiResult.Success -> NoteMutationOutcome.Applied(applied, refresh.value, null)
-            is AnkiResult.Failure -> NoteMutationOutcome.Applied(applied, null, refresh.error)
+        pending.remove(id)
+        // MatchesIntent implies a usable read; the fallback keeps the type honest if that ever changes.
+        val truth = refreshed ?: return NoteMutationOutcome.VerificationRequired(applied, "post_write_read_lost")
+        return NoteMutationOutcome.Applied(applied, truth)
+    }
+
+    /** One authoritative read, attempted twice: a single transient read failure must not decide truth. */
+    private suspend fun readForVerification(record: NoteMutationRecord): AnkiCardDetails? {
+        var attempts = 0
+        while (attempts < POST_WRITE_READ_ATTEMPTS) {
+            attempts++
+            when (val read = backend.getCardDetails(record.cardRef)) {
+                is AnkiResult.Success -> return read.value
+                is AnkiResult.Failure -> Unit
+            }
+        }
+        return null
+    }
+
+    override suspend fun resolveAmbiguous(
+        mutationId: NoteMutationId,
+        attestation: NoteMutationAttestation
+    ): NoteMutationRecoveryOutcome {
+        if (!gate.tryLock()) return NoteMutationRecoveryOutcome.Busy
+        try {
+            val record = when (val read = ledger.get(mutationId)) {
+                is NoteLedgerResult.Unavailable -> return NoteMutationRecoveryOutcome.LedgerUnavailable(read.detail)
+                is NoteLedgerResult.Rejected -> return NoteMutationRecoveryOutcome.LedgerUnavailable(read.reason)
+                is NoteLedgerResult.Ok -> read.value ?: return NoteMutationRecoveryOutcome.NotFound
+            }
+            if (record.status != NoteMutationStatus.AMBIGUOUS) {
+                return NoteMutationRecoveryOutcome.Unchanged(record)
+            }
+            val event = when (attestation) {
+                NoteMutationAttestation.APPLIED_IN_COLLECTION -> NoteMutationEvent.UserAttestedApplied
+                NoteMutationAttestation.ABSENT_FROM_COLLECTION -> NoteMutationEvent.UserAttestedNotApplied
+            }
+            return when (val closed = ledger.apply(mutationId, record.status, event)) {
+                is NoteLedgerResult.Ok -> {
+                    pending.remove(mutationId)
+                    NoteMutationRecoveryOutcome.Resolved(closed.value)
+                }
+                is NoteLedgerResult.Unavailable -> NoteMutationRecoveryOutcome.LedgerUnavailable(closed.detail)
+                is NoteLedgerResult.Rejected -> NoteMutationRecoveryOutcome.LedgerUnavailable(closed.reason)
+            }
+        } finally {
+            gate.unlock()
         }
     }
 
@@ -477,7 +627,10 @@ class DefaultNoteMutationCoordinator(
         when (operation) {
             is NoteMutationOperation.UpdateNoteContent -> NoteMutationStep.UpdateNoteContent(
                 fieldValues = if (operation.updatesFields) {
-                    latest.fields.map { field -> payload.fieldValues[field.ordinal] ?: field.value }
+                    // `NoteEditBase` proves every ordinal equals its template position, so the position
+                    // is the draft key. The domain ordinal stays nullable because a backend may not
+                    // report one; a null ordinal would have failed `NoteEditBase`'s own precondition.
+                    latest.fields.mapIndexed { index, field -> payload.fieldValues[index] ?: field.value }
                 } else {
                     null
                 },
@@ -563,5 +716,13 @@ class DefaultNoteMutationCoordinator(
         } finally {
             gate.unlock()
         }
+    }
+
+    private companion object {
+        /**
+         * Attempts made to obtain the authoritative post-write read. Two, not one: a single transient
+         * provider read failure must not decide whether a confirmed write is reported as APPLIED.
+         */
+        const val POST_WRITE_READ_ATTEMPTS = 2
     }
 }

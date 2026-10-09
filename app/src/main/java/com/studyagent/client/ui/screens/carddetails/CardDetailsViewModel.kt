@@ -39,7 +39,13 @@ class CardDetailsViewModel(
 ) : ViewModel() {
     private data class BackendSnapshot(
         val availability: AnkiAvailability,
-        val cardDetailsSupported: Boolean
+        val cardDetailsSupported: Boolean,
+        /**
+         * GATE 17 — capability truth for the editor entry only. This ViewModel performs no mutation
+         * and holds no mutation dependency (INV-16-01); it reports whether the connected backend
+         * offers any note-edit operation, and navigation decides what happens next.
+         */
+        val noteEditingOffered: Boolean
     )
 
     private data class RequestToken(
@@ -47,7 +53,8 @@ class CardDetailsViewModel(
         val backendId: AnkiBackendId,
         val collectionKey: String?,
         val cardRef: AnkiCardRef,
-        val generation: Long
+        val generation: Long,
+        val noteEditingOffered: Boolean
     )
 
     private var backend: AnkiBackend = initialBackend
@@ -112,7 +119,13 @@ class CardDetailsViewModel(
     private fun observeBackend(observed: AnkiBackend) {
         backendObservation = viewModelScope.launch {
             combine(observed.availability, observed.capabilities) { availability, capabilities ->
-                BackendSnapshot(availability, capabilities.cardDetails)
+                BackendSnapshot(
+                    availability = availability,
+                    cardDetailsSupported = capabilities.cardDetails,
+                    noteEditingOffered = capabilities.editNoteFields ||
+                        capabilities.editNoteTags ||
+                        capabilities.changeCardDeck
+                )
             }.collect { next ->
                 if (backend !== observed || next == backendSnapshot) return@collect
                 backendSnapshot = next
@@ -157,7 +170,8 @@ class CardDetailsViewModel(
             backendId = backend.id,
             collectionKey = cardRef.collectionKey,
             cardRef = cardRef,
-            generation = generation
+            generation = generation,
+            noteEditingOffered = backendSnapshot.noteEditingOffered
         )
         requestJob = viewModelScope.launch {
             val result = try {
@@ -183,7 +197,12 @@ class CardDetailsViewModel(
                         )
                         return@launch
                     }
-                    _uiState.value = CardDetailsUiState.Ready(CardDetailsMapper.map(result.value))
+                    _uiState.value = CardDetailsUiState.Ready(
+                        CardDetailsMapper.map(
+                            details = result.value,
+                            canOpenNoteEditor = token.noteEditingOffered
+                        )
+                    )
                 }
             }
         }
@@ -198,8 +217,14 @@ class CardDetailsViewModel(
         requestJob = null
     }
 
-    private fun snapshot(target: AnkiBackend) = BackendSnapshot(
-        availability = target.availability.value,
-        cardDetailsSupported = target.capabilities.value.cardDetails
-    )
+    private fun snapshot(target: AnkiBackend): BackendSnapshot {
+        val capabilities = target.capabilities.value
+        return BackendSnapshot(
+            availability = target.availability.value,
+            cardDetailsSupported = capabilities.cardDetails,
+            noteEditingOffered = capabilities.editNoteFields ||
+                capabilities.editNoteTags ||
+                capabilities.changeCardDeck
+        )
+    }
 }

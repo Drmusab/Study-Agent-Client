@@ -1,9 +1,12 @@
 package com.studyagent.client.ui.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import kotlinx.coroutines.launch
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
@@ -29,6 +32,8 @@ import com.studyagent.client.ui.screens.cardbrowser.CardBrowserViewModel
 import com.studyagent.client.ui.screens.carddetails.CardDetailsScreen
 import com.studyagent.client.ui.screens.carddetails.CardDetailsRouteErrorScreen
 import com.studyagent.client.ui.screens.carddetails.CardDetailsViewModel
+import com.studyagent.client.ui.screens.editnote.EditNoteScreen
+import com.studyagent.client.ui.screens.editnote.EditNoteViewModel
 import com.studyagent.client.ui.screens.settings.SettingsScreen
 import com.studyagent.client.ui.screens.settings.SettingsViewModel
 import com.studyagent.client.ui.screens.study.StudyScreen
@@ -161,9 +166,65 @@ fun AppNavHost(
                     ) {
                         CardDetailsViewModel(initialBackend = detailsBackend, initialCardRef = cardRef)
                     }
+                    // GATE 17 — a saved edit makes the details screen re-read the note: post-write
+                    // truth comes from the backend, never from the editor's draft (INV-17-14).
+                    val noteSaved by backStackEntry.savedStateHandle
+                        .getStateFlow(NOTE_EDIT_SAVED_KEY, false)
+                        .collectAsStateWithLifecycle()
+                    LaunchedEffect(noteSaved) {
+                        if (noteSaved) {
+                            backStackEntry.savedStateHandle[NOTE_EDIT_SAVED_KEY] = false
+                            detailsViewModel.refresh()
+                        }
+                    }
                     CardDetailsScreen(
                         viewModel = detailsViewModel,
-                        onNavigateBack = { navController.popBackStack() }
+                        onNavigateBack = { navController.popBackStack() },
+                        onOpenNoteEditor = { ref ->
+                            navController.navigate(Screen.EditNote.createRoute(ref))
+                        }
+                    )
+                }
+            }
+        }
+
+        composable(
+            route = Screen.EditNote.route,
+            arguments = listOf(navArgument(Screen.EditNote.ARG_CARD_REF) { type = NavType.StringType })
+        ) { backStackEntry ->
+            val editCardRef = Screen.EditNote.decodeCardRef(
+                backStackEntry.arguments?.getString(Screen.EditNote.ARG_CARD_REF)
+            )
+            when {
+                editCardRef == null -> CardDetailsRouteErrorScreen(
+                    message = "The stable card reference for editing is invalid. Return to the card and open it again.",
+                    onNavigateBack = { navController.popBackStack() }
+                )
+                container.ankiBackendRegistry.find(editCardRef.backendId) == null -> CardDetailsRouteErrorScreen(
+                    message = "The backend that owns this note is not registered. The editor was not opened against another backend.",
+                    onNavigateBack = { navController.popBackStack() }
+                )
+                else -> {
+                    val editBackend = checkNotNull(container.ankiBackendRegistry.find(editCardRef.backendId))
+                    val editViewModel: EditNoteViewModel = viewModel(
+                        key = "edit-note:${editCardRef.stableKey}"
+                    ) {
+                        EditNoteViewModel(
+                            initialBackend = editBackend,
+                            initialCardRef = editCardRef,
+                            // The only write path the editor has: the note-mutation coordinator.
+                            coordinator = container.noteMutationCoordinator
+                        )
+                    }
+                    EditNoteScreen(
+                        viewModel = editViewModel,
+                        onNavigateBack = { navController.popBackStack() },
+                        onSaved = {
+                            navController.previousBackStackEntry
+                                ?.savedStateHandle
+                                ?.set(NOTE_EDIT_SAVED_KEY, true)
+                            navController.popBackStack()
+                        }
                     )
                 }
             }
@@ -251,3 +312,6 @@ fun AppNavHost(
         }
     }
 }
+
+/** Back-stack signal that a note edit reached durable APPLIED, so the details screen re-reads. */
+private const val NOTE_EDIT_SAVED_KEY = "gate17_note_edit_saved"

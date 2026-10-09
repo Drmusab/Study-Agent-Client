@@ -58,11 +58,14 @@ class NoteMutationTransitionTest {
         NoteMutationEvent.BackendConfirmedNotApplied,
         NoteMutationEvent.BackendConflict,
         NoteMutationEvent.BackendOutcomeUnknown,
+        NoteMutationEvent.PostWriteVerificationFailed(NoteMutationReason.POST_WRITE_VERIFICATION_MISMATCH),
         NoteMutationEvent.PreBoundaryConflict(NoteMutationReason.CONFLICT_BEFORE_WRITE),
         NoteMutationEvent.RetryRequested,
         NoteMutationEvent.RecoveryNormalizedUnknown,
         NoteMutationEvent.ReconciliationConfirmedApplied,
-        NoteMutationEvent.ReconciliationConfirmedNotApplied
+        NoteMutationEvent.ReconciliationConfirmedNotApplied,
+        NoteMutationEvent.UserAttestedApplied,
+        NoteMutationEvent.UserAttestedNotApplied
     )
 
     /**
@@ -78,9 +81,16 @@ class NoteMutationTransitionTest {
         (NoteMutationStatus.SUBMITTING to "BackendConfirmedNotApplied") to NoteMutationStatus.RETRY_ALLOWED,
         (NoteMutationStatus.SUBMITTING to "BackendConflict") to NoteMutationStatus.CONFLICT,
         (NoteMutationStatus.SUBMITTING to "BackendOutcomeUnknown") to NoteMutationStatus.AMBIGUOUS,
+        // CONTRACT-06/15: a claimed write that an authoritative read cannot confirm is AMBIGUOUS, never
+        // APPLIED. The coordinator only emits this after the last step, and the transition accepts it at
+        // any index because the safe state does not depend on which step was open.
+        (NoteMutationStatus.SUBMITTING to "PostWriteVerificationFailed") to NoteMutationStatus.AMBIGUOUS,
         (NoteMutationStatus.SUBMITTING to "RecoveryNormalizedUnknown") to NoteMutationStatus.AMBIGUOUS,
         (NoteMutationStatus.AMBIGUOUS to "ReconciliationConfirmedApplied") to NoteMutationStatus.APPLIED,
-        (NoteMutationStatus.AMBIGUOUS to "ReconciliationConfirmedNotApplied") to NoteMutationStatus.RETRY_ALLOWED
+        (NoteMutationStatus.AMBIGUOUS to "ReconciliationConfirmedNotApplied") to NoteMutationStatus.RETRY_ALLOWED,
+        // CONTRACT-26: with no backend reconciliation the only way out is a human attestation.
+        (NoteMutationStatus.AMBIGUOUS to "UserAttestedApplied") to NoteMutationStatus.APPLIED,
+        (NoteMutationStatus.AMBIGUOUS to "UserAttestedNotApplied") to NoteMutationStatus.CONFLICT
     )
 
     private fun eventName(event: NoteMutationEvent): String = when (event) {
@@ -90,11 +100,14 @@ class NoteMutationTransitionTest {
         is NoteMutationEvent.BackendConfirmedNotApplied -> "BackendConfirmedNotApplied"
         is NoteMutationEvent.BackendConflict -> "BackendConflict"
         is NoteMutationEvent.BackendOutcomeUnknown -> "BackendOutcomeUnknown"
+        is NoteMutationEvent.PostWriteVerificationFailed -> "PostWriteVerificationFailed"
         is NoteMutationEvent.PreBoundaryConflict -> "PreBoundaryConflict"
         is NoteMutationEvent.RetryRequested -> "RetryRequested"
         is NoteMutationEvent.RecoveryNormalizedUnknown -> "RecoveryNormalizedUnknown"
         is NoteMutationEvent.ReconciliationConfirmedApplied -> "ReconciliationConfirmedApplied"
         is NoteMutationEvent.ReconciliationConfirmedNotApplied -> "ReconciliationConfirmedNotApplied"
+        is NoteMutationEvent.UserAttestedApplied -> "UserAttestedApplied"
+        is NoteMutationEvent.UserAttestedNotApplied -> "UserAttestedNotApplied"
     }
 
     @Test
@@ -184,6 +197,54 @@ class NoteMutationTransitionTest {
         val result = NoteMutationTransitions.apply(terminal, NoteMutationEvent.RetryRequested, 9L)
         assertTrue(result is NoteMutationTransitionResult.Rejected)
         assertEquals(NoteMutationStatus.APPLIED, (result as NoteMutationTransitionResult.Rejected).from)
+    }
+
+    @Test
+    fun postWriteVerificationFailureCarriesItsOwnReasonIntoAmbiguous() {
+        val submitting = record(NoteMutationStatus.SUBMITTING, lastEntered = 1)
+        val result = NoteMutationTransitions.apply(
+            submitting,
+            NoteMutationEvent.PostWriteVerificationFailed(NoteMutationReason.POST_WRITE_UNVERIFIED),
+            9L
+        ) as NoteMutationTransitionResult.Accepted
+        assertEquals(NoteMutationStatus.AMBIGUOUS, result.record.status)
+        assertEquals(NoteMutationReason.POST_WRITE_UNVERIFIED, result.record.reason)
+        // The claimed write is still visible: a failed verification never rewinds the operation index.
+        assertEquals(1, result.record.lastEnteredOperation)
+    }
+
+    @Test
+    fun attestationsAreRecordedAsAttestationsNeverAsBackendEvidence() {
+        val ambiguous = record(NoteMutationStatus.AMBIGUOUS, lastEntered = 0)
+        val applied = (NoteMutationTransitions.apply(
+            ambiguous,
+            NoteMutationEvent.UserAttestedApplied,
+            9L
+        ) as NoteMutationTransitionResult.Accepted).record
+        assertEquals(NoteMutationStatus.APPLIED, applied.status)
+        assertEquals(NoteMutationReason.USER_ATTESTED_APPLIED, applied.reason)
+        assertTrue(applied.status.isTerminal)
+
+        val closed = (NoteMutationTransitions.apply(
+            ambiguous,
+            NoteMutationEvent.UserAttestedNotApplied,
+            9L
+        ) as NoteMutationTransitionResult.Accepted).record
+        assertEquals(NoteMutationStatus.CONFLICT, closed.status)
+        assertEquals(NoteMutationReason.USER_ATTESTED_NOT_APPLIED, closed.reason)
+        assertTrue(closed.status.isTerminal)
+    }
+
+    @Test
+    fun attestationIsNotAvailableFromAnyOtherStatus() {
+        for (status in listOf(
+            NoteMutationStatus.PREPARED,
+            NoteMutationStatus.SUBMITTING,
+            NoteMutationStatus.RETRY_ALLOWED
+        )) {
+            assertEquals(null, accepted(NoteMutationTransitions.apply(record(status, 0), NoteMutationEvent.UserAttestedApplied, 9L)))
+            assertEquals(null, accepted(NoteMutationTransitions.apply(record(status, 0), NoteMutationEvent.UserAttestedNotApplied, 9L)))
+        }
     }
 
     @Test

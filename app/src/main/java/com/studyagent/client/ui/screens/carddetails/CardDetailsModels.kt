@@ -51,7 +51,13 @@ data class CardDetailsPresentation(
     val pureAnswerText: String?,
     val originalCard: AnkiRenderedCard?,
     val mediaFiles: List<String>,
-    val degradations: List<String>
+    val degradations: List<String>,
+    /**
+     * GATE 17 — the connected backend offers at least one note-edit operation for this card, so the
+     * details screen may show the editor entry. Capability truth only: this screen stays read-only
+     * (INV-16-01) and the entry navigates away to the editor, which owns every write.
+     */
+    val canOpenNoteEditor: Boolean = false
 ) {
     /**
      * `null` = backend did not expose source fields; empty = no fields. Do not collapse them.

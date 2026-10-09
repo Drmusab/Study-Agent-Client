@@ -18,6 +18,15 @@ done; }
 vmlayer() { for f in $(find com/studyagent/client/ui -name '*.kt' | sort); do
   [ -n "$(grep -E '^import (androidx|android)\.' "$f" | grep -vE '^import androidx\.lifecycle\.' || true)" ] || echo "$f"
 done; }
+# Pure UI files: no framework import at all (presentation models, mappers, routes). The README always
+# claimed these are built; without this they silently drop out of the compile, which is exactly how an
+# untested mapper survives. `vmlayer()` skips them because its test is "has only lifecycle imports".
+# AnkiRenderDiagnostics.kt is excluded: it is already in the Compose scope below, and compiling the
+# same declaration twice would report a phantom redeclaration.
+pureui() { for f in $(find com/studyagent/client/ui -name '*.kt' | sort); do
+  case "$f" in *AnkiRenderDiagnostics.kt) continue;; esac
+  grep -qE '^import (androidx|android)\.' "$f" || echo "$f"
+done; }
 if [ "$what" = shims ]; then
   LCP="$(ls "$H"/libs/*.jar | tr '\n' ':')"
   rm -rf "$H/shims-out"
@@ -29,7 +38,7 @@ if [ "$what" = shims ]; then
 fi
 if [ "$what" = main ] || [ "$what" = all ]; then
   cd "$R/main/java"
-  SRC="$(find com -name '*.kt' | grep -v "/ui/\|/service/\|MainActivity\|StudyAgentApp\|/di/") $(vmlayer) $(pure $(find "$R/debug/java" -name '*.kt')) ${HARNESS_EXTRA_MAIN_SRC:-}"
+  SRC="$(find com -name '*.kt' | grep -v "/ui/\|/service/\|MainActivity\|StudyAgentApp\|/di/") $(vmlayer) $(pureui) $(pure $(find "$R/debug/java" -name '*.kt')) ${HARNESS_EXTRA_MAIN_SRC:-}"
   LCP="$(ls "$H"/libs/*.jar | tr '\n' ':')$H/shims-out"
   rm -rf "$H/main-out"
   "$HARNESS_DIR/bin/kc" "$H/main-out" "$LCP" -opt-in=kotlinx.coroutines.ExperimentalCoroutinesApi $SRC "$HARNESS_DIR/shims/buildconfig/BuildConfig.kt" 2>&1 | grep -E "error:" > "$H/main-errors.txt"
@@ -50,9 +59,10 @@ if [ "$what" = compose ] || [ "$what" = all ]; then
     exit 1
   fi
   # STEP B — the app layer that needs Compose/Activity/Navigation, compiled against main-out.
-  # Default scope = the GATE 16 card/note-details UI closure, which must be error-free. Set
-  # GATE16_COMPOSE_ALL=1 to sweep every main file that imports a framework symbol; that sweep is a
-  # diagnostic, not a gate (see docs/GATE_16_CARD_NOTE_DETAILS.md, "Compose verification").
+  # Default scope = the GATE 16 card/note-details UI closure plus the GATE 17 note-editor closure,
+  # both of which must be error-free. Set GATE16_COMPOSE_ALL=1 to sweep every main file that imports a
+  # framework symbol; that sweep is a diagnostic, not a gate (see
+  # docs/GATE_16_CARD_NOTE_DETAILS.md, "Compose verification").
   cd "$R/main/java"
   GATE16_SET="com/studyagent/client/ui/screens/carddetails/CardDetailsScreen.kt
 com/studyagent/client/ui/components/anki/AnkiCardRenderer.kt
@@ -65,6 +75,11 @@ com/studyagent/client/ui/components/anki/CardSchedulingSection.kt
 com/studyagent/client/ui/components/anki/NoteFieldsSection.kt
 com/studyagent/client/ui/components/StudyAgentTopBar.kt
 com/studyagent/client/ui/components/AppPrimitives.kt
+com/studyagent/client/ui/components/AppControls.kt
+com/studyagent/client/ui/components/anki/NoteFieldEditor.kt
+com/studyagent/client/ui/components/anki/TagsEditor.kt
+com/studyagent/client/ui/components/anki/DeckSelector.kt
+com/studyagent/client/ui/screens/editnote/EditNoteScreen.kt
 $(find com/studyagent/client/ui/theme -name '*.kt')"
   if [ "${GATE16_COMPOSE_ALL:-0}" = 1 ]; then
     CSRC=$(composeset); SCOPE="all-framework-importing main files"

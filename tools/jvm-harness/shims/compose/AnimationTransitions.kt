@@ -18,6 +18,10 @@ interface EnterTransition {
     // `plus` is a *member* of the real transition types, which is why call sites can write
     // `fadeIn() + fadeOut()` without importing an operator.
     operator fun plus(other: ExitTransition): ContentTransform = object : ContentTransform {}
+
+    // Real Compose also combines two enter transitions into one enter transition, which is what
+    // `enter = fadeIn() + expandVertically()` at a call site needs.
+    operator fun plus(other: EnterTransition): EnterTransition = this
 }
 
 @Stable

@@ -31,7 +31,7 @@ object CardDetailsMapper {
     private val soundTag = Regex("(?i)\\[sound:([^\\[\\]]+)]")
     private val sourceAttribute = Regex("(?i)\\bsrc\\s*=\\s*[\"']([^\"']+)[\"']")
 
-    fun map(details: AnkiCardDetails): CardDetailsPresentation {
+    fun map(details: AnkiCardDetails, canOpenNoteEditor: Boolean = false): CardDetailsPresentation {
         val safeMediaFiles = details.mediaFiles.filter(AnkiMediaReferencePolicy::validateLogicalName)
         val fields = details.fields?.map { field ->
             FieldPresentation(
@@ -116,7 +116,8 @@ object CardDetailsMapper {
             pureAnswerText = details.pureAnswerText,
             originalCard = originalCard,
             mediaFiles = safeMediaFiles,
-            degradations = details.degradations.toList()
+            degradations = details.degradations.toList(),
+            canOpenNoteEditor = canOpenNoteEditor
         )
     }
 
