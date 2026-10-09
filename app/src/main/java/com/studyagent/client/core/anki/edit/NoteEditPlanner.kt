@@ -55,11 +55,17 @@ object NoteEditPlanner {
     /**
      * Computes the minimal patch. Precondition: [validateDraft] returned no errors. Unchanged
      * values, tag sets equal as sets, and a target equal to the current deck produce no change.
+     *
+     * Field values are canonicalized on the way in ([canonicalFieldValue]): the patch then carries
+     * exactly what the backend can store, so "no change" and the post-write comparison are both
+     * decided on storable text. Tag text is kept as the user wrote it (NFC-normalized, de-duplicated)
+     * — case and order are the backend's to canonicalize, and a case-only difference is a real
+     * intention, not a no-op.
      */
     fun buildPatch(base: NoteEditBase, draft: NoteEditDraft): NoteMutationPatch {
         val fieldChanges = draft.fieldValues.keys.sorted().mapNotNull { ordinal ->
             val field = base.fields.getOrNull(ordinal) ?: return@mapNotNull null
-            val newValue = draft.fieldValues.getValue(ordinal)
+            val newValue = canonicalFieldValue(draft.fieldValues.getValue(ordinal))
             if (newValue == field.value) null
             else NoteFieldChange(ordinal = ordinal, name = field.name, oldValue = field.value, newValue = newValue)
         }
@@ -108,20 +114,37 @@ object NoteEditPlanner {
         b != null && a.backendId == b.backendId && a.deckId == b.deckId
 
     /**
-     * Tag rules: trim each entry, drop entries that are empty after trimming, reject any entry that
-     * still contains whitespace or a control character (Anki tags are space-separated), and keep the
-     * first occurrence of each tag compared case-insensitively.
+     * Tag rules, derived from the pinned backend rather than from taste (CONTRACT-02):
+     * trim each entry; drop entries that are empty after trimming; reject any entry that still
+     * contains whitespace or a control character (Anki splits tags on space/U+3000 and strips ASCII
+     * control characters, so such an entry would not be stored as written); reject an entry with a
+     * blank `::` component (rslib rewrites it to the literal `blank`, so the stored tag would not be
+     * the requested tag); NFC-normalize (the backend stores NFC); and keep the first occurrence of
+     * each tag compared case-insensitively (rslib de-duplicates with UniCase, first instance wins).
      */
     fun normalizeTags(raw: List<String>): TagNormalization {
         val seen = LinkedHashMap<String, String>()
         for (entry in raw) {
-            val tag = entry.trim()
-            if (tag.isEmpty()) continue
-            if (tag.any { it.isWhitespace() || it.isISOControl() }) return TagNormalization.Invalid(tag)
+            val trimmed = entry.trim()
+            if (trimmed.isEmpty()) continue
+            if (trimmed.any { it.isWhitespace() || it.isISOControl() }) return TagNormalization.Invalid(trimmed)
+            val tag = NoteContentCanonicalization.nfc(trimmed)
+            if (NoteContentCanonicalization.tagHasBlankHierarchyComponent(tag)) {
+                return TagNormalization.Invalid(tag)
+            }
             seen.putIfAbsent(tag.lowercase(), tag)
         }
         return TagNormalization.Valid(seen.values.toList())
     }
+
+    /**
+     * The field value the pinned backend can actually store: ASCII control characters other than
+     * `\n` and `\t` are removed by rslib `normalize_field` on the way in, so they are removed here
+     * too — the payload then equals the stored value, which is what makes the post-write comparison
+     * meaningful. The field separator U+001F is rejected earlier ([validateDraft]) and never stripped,
+     * because stripping it would silently join two fields.
+     */
+    fun canonicalFieldValue(raw: String): String = NoteContentCanonicalization.fieldValue(raw)
 }
 
 sealed interface TagNormalization {

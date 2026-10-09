@@ -164,7 +164,27 @@ enum class NoteMutationReason {
     ABANDONED_ON_RESTART,
     RECOVERED_AFTER_RESTART,
     RECONCILED_APPLIED,
-    RECONCILED_NOT_APPLIED
+    RECONCILED_NOT_APPLIED,
+
+    /**
+     * The backend confirmed the write, but the authoritative post-write read does not hold the
+     * intended state (CONTRACT-06/15: a row count proves the provider path completed, not the stored
+     * value). The record becomes AMBIGUOUS; it is never reported as APPLIED.
+     */
+    POST_WRITE_VERIFICATION_MISMATCH,
+
+    /** The post-write read needed to confirm the write could not be obtained. */
+    POST_WRITE_UNVERIFIED,
+
+    /**
+     * A human inspected the collection and attested that the edit IS present. This is a *human*
+     * resolution of an ambiguous outcome, not backend proof: no receipt or transaction correlation
+     * exists at the pin, so the record says who confirmed it.
+     */
+    USER_ATTESTED_APPLIED,
+
+    /** A human inspected the collection and attested that the edit is NOT present. */
+    USER_ATTESTED_NOT_APPLIED
 }
 
 /** Why a draft cannot become a patch. Raised before any transaction; never RETRY_ALLOWED. */

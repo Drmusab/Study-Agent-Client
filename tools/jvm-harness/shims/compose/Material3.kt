@@ -547,12 +547,31 @@ object FilterChipDefaults {
     fun filterChipBorder(enabled: Boolean = true, selected: Boolean = false): BorderStroke? = null
 }
 
+// Real Material3 chip colour types: `SelectableChipColors` covers selected chips (filter/input),
+// `ChipColors` the assist/suggestion ones, and `AssistChipDefaults` supplies their defaults.
+abstract class SelectableChipColors
+abstract class ChipColors
+
+object AssistChipDefaults {
+    val shape: Shape = RectangleShape
+
+    fun assistChipColors(containerColor: Color = Color.Unspecified, labelColor: Color = Color.Unspecified): ChipColors =
+        object : ChipColors() {}
+
+    fun assistChipBorder(enabled: Boolean = true, borderWidth: Dp = Dp.Unspecified): BorderStroke? = null
+}
+
 @Composable
 fun AssistChip(
     onClick: () -> Unit,
     label: @Composable () -> Unit,
     modifier: Modifier = Modifier,
-    leadingIcon: @Composable (() -> Unit)? = null
+    enabled: Boolean = true,
+    shape: Shape = AssistChipDefaults.shape,
+    colors: ChipColors = AssistChipDefaults.assistChipColors(),
+    border: BorderStroke? = AssistChipDefaults.assistChipBorder(),
+    leadingIcon: @Composable (() -> Unit)? = null,
+    trailingIcon: @Composable (() -> Unit)? = null
 ) = Unit
 
 @Composable

@@ -13,6 +13,7 @@ import com.studyagent.client.core.anki.edit.NoteEditDraft
 import com.studyagent.client.core.anki.edit.NoteEditSafetyPolicy
 import com.studyagent.client.core.anki.edit.NoteEditValidationError
 import com.studyagent.client.core.anki.edit.NoteLedgerResult
+import com.studyagent.client.core.anki.edit.NoteMutationAttestation
 import com.studyagent.client.core.anki.edit.NoteMutationBackendResult
 import com.studyagent.client.core.anki.edit.NoteMutationCodec
 import com.studyagent.client.core.anki.edit.NoteMutationId
@@ -86,7 +87,7 @@ class NoteMutationCoordinatorTest {
     // ---- ordering and durability ----------------------------------------------------------------
 
     @Test
-    fun happyPathPersistsPreparedThenSubmittingThenWritesThenAppliedThenRefreshes() {
+    fun happyPathPersistsPreparedThenSubmittingThenWritesThenVerifiesThenApplied() {
         runBlocking {
             val h = Harness()
             val outcome = h.coordinator.save(h.base(), frontEdit("NEW FRONT"))
@@ -95,17 +96,22 @@ class NoteMutationCoordinatorTest {
             outcome as NoteMutationOutcome.Applied
             assertEquals(NoteMutationStatus.APPLIED, outcome.record.status)
             assertNotNull(outcome.refreshed)
+            assertEquals("NEW FRONT", outcome.refreshed!!.fields?.firstOrNull()?.value)
             assertEquals("NEW FRONT", h.backend.fields[0].value)
             assertEquals(1, h.backend.applyCalls.size)
 
             val prepared = h.events.indexOf("persist:[PREPARED]")
             val submitting = h.events.indexOf("persist:[SUBMITTING]")
             val write = h.events.indexOf("backend:apply:0")
+            val verificationRead = write + h.events.drop(write).indexOf("read:card")
             val applied = h.events.indexOf("persist:[APPLIED]")
             assertTrue("PREPARED before SUBMITTING", prepared in 0 until submitting)
             assertTrue("SUBMITTING durable before the first write", submitting < write)
-            assertTrue("terminal status persisted after the write", write < applied)
-            assertTrue("authoritative read happens last", applied < h.events.lastIndexOf("read:card"))
+            // CONTRACT-06/15: the row count is weak evidence, so APPLIED needs an authoritative read
+            // first, and that read (not a later one) is what the UI is shown.
+            assertTrue("the authoritative read happens after the write", write < verificationRead)
+            assertTrue("APPLIED is persisted only after that read verified intent", verificationRead < applied)
+            assertEquals("exactly one read after the write", verificationRead, h.events.lastIndexOf("read:card"))
         }
     }
 
@@ -406,20 +412,53 @@ class NoteMutationCoordinatorTest {
     }
 
     @Test
-    fun refreshFailureAfterAppliedKeepsTheAppliedStatus() {
+    fun appliedWriteWithoutAnAuthoritativeReadIsNeverReportedAsApplied() {
         runBlocking {
             val h = Harness()
+            // The provider's row count says the write happened, but every read afterwards fails, so no
+            // evidence ties the intended state to the collection.
             h.backend.applyHook = { request, backend ->
                 backend.applyFaithfully(request.step)
                 backend.readFailure = AnkiError.BackendUnavailable()
                 NoteMutationBackendResult.ConfirmedApplied
             }
             val outcome = h.coordinator.save(h.base(), frontEdit("applied"))
-            assertTrue(outcome is NoteMutationOutcome.Applied)
-            outcome as NoteMutationOutcome.Applied
-            assertEquals(NoteMutationStatus.APPLIED, outcome.record.status)
-            assertEquals(null, outcome.refreshed)
-            assertNotNull(outcome.refreshError)
+
+            assertTrue(outcome is NoteMutationOutcome.VerificationRequired)
+            outcome as NoteMutationOutcome.VerificationRequired
+            assertEquals(NoteMutationStatus.AMBIGUOUS, outcome.record.status)
+            assertEquals(NoteMutationReason.POST_WRITE_UNVERIFIED, outcome.record.reason)
+            assertTrue(outcome.reason.startsWith("POST_WRITE_UNVERIFIED:"))
+            assertEquals(NoteMutationStatus.AMBIGUOUS, h.persistedStatus("m-1"))
+            assertEquals(1, h.backend.applyCalls.size)
+
+            // The note stays blocked: an ambiguous record is never replayed and never re-saved over.
+            val blocked = h.coordinator.save(h.base(), frontEdit("again"))
+            assertTrue(blocked is NoteMutationOutcome.ActiveMutationExists)
+            assertEquals(NoteMutationStatus.AMBIGUOUS, (blocked as NoteMutationOutcome.ActiveMutationExists).record.status)
+            assertEquals("no second write while the first is unresolved", 1, h.backend.applyCalls.size)
+        }
+    }
+
+    @Test
+    fun appliedWriteThatReadsBackDifferentValuesIsRecordedAsAmbiguousNotApplied() {
+        runBlocking {
+            val h = Harness()
+            // A backend that claims success and then stores something else (normalization, a trigger,
+            // or a lie) must not be allowed to report APPLIED.
+            h.backend.applyHook = { request, backend ->
+                backend.applyFaithfully(request.step)
+                backend.fields[0] = backend.fields[0].copy(value = "silently different")
+                NoteMutationBackendResult.ConfirmedApplied
+            }
+            val outcome = h.coordinator.save(h.base(), frontEdit("intended"))
+
+            assertTrue(outcome is NoteMutationOutcome.VerificationRequired)
+            val record = (outcome as NoteMutationOutcome.VerificationRequired).record
+            assertEquals(NoteMutationStatus.AMBIGUOUS, record.status)
+            assertEquals(NoteMutationReason.POST_WRITE_VERIFICATION_MISMATCH, record.reason)
+            assertTrue(outcome.reason.startsWith("POST_WRITE_VERIFICATION_MISMATCH:"))
+            assertEquals(1, h.backend.applyCalls.size)
         }
     }
 
@@ -445,6 +484,151 @@ class NoteMutationCoordinatorTest {
             )
             assertEquals(NoteMutationStatus.AMBIGUOUS, h.persistedStatus("m-1"))
             assertEquals(1, h.backend.applyCalls.size)
+        }
+    }
+
+    // ---- human attestation (CONTRACT-26) --------------------------------------------------------
+
+    /**
+     * Drives one save into AMBIGUOUS the honest way: the backend claims the write applied, but no
+     * authoritative read can be obtained afterwards, so nothing ties the intent to the collection.
+     */
+    private suspend fun ambiguousBecauseTheCollectionCannotBeRead(h: Harness): NoteMutationRecord {
+        h.backend.applyHook = { request, backend ->
+            backend.applyFaithfully(request.step)
+            backend.readFailure = AnkiError.BackendUnavailable()
+            NoteMutationBackendResult.ConfirmedApplied
+        }
+        val outcome = h.coordinator.save(h.base(), frontEdit("applied"))
+        assertTrue(outcome is NoteMutationOutcome.VerificationRequired)
+        val record = (outcome as NoteMutationOutcome.VerificationRequired).record
+        assertEquals(NoteMutationStatus.AMBIGUOUS, record.status)
+        return record
+    }
+
+    @Test
+    fun attestationAppliedClosesTheRecordWithoutTouchingTheBackend() {
+        runBlocking {
+            val h = Harness()
+            val record = ambiguousBecauseTheCollectionCannotBeRead(h)
+            val writesBefore = h.backend.applyCalls.size
+
+            val resolved = h.coordinator.resolveAmbiguous(
+                record.mutationId,
+                NoteMutationAttestation.APPLIED_IN_COLLECTION
+            )
+
+            assertTrue(resolved is NoteMutationRecoveryOutcome.Resolved)
+            val closed = (resolved as NoteMutationRecoveryOutcome.Resolved).record
+            assertEquals(NoteMutationStatus.APPLIED, closed.status)
+            // Recorded as a human attestation, never as backend evidence (CONTRACT-26).
+            assertEquals(NoteMutationReason.USER_ATTESTED_APPLIED, closed.reason)
+            assertEquals(NoteMutationStatus.APPLIED, h.persistedStatus(record.mutationId.value))
+            assertEquals("an attestation is not a write", writesBefore, h.backend.applyCalls.size)
+            assertTrue(h.backend.reconcileCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun attestationAbsentClosesTheRecordAndFreesTheNoteForAFreshEdit() {
+        runBlocking {
+            val h = Harness()
+            val record = ambiguousBecauseTheCollectionCannotBeRead(h)
+
+            val resolved = h.coordinator.resolveAmbiguous(
+                record.mutationId,
+                NoteMutationAttestation.ABSENT_FROM_COLLECTION
+            ) as NoteMutationRecoveryOutcome.Resolved
+            assertEquals(NoteMutationStatus.CONFLICT, resolved.record.status)
+            assertEquals(NoteMutationReason.USER_ATTESTED_NOT_APPLIED, resolved.record.reason)
+
+            // CONFLICT is terminal, so the note is no longer owned: a new edit starts with a new id.
+            h.backend.readFailure = null
+            h.backend.applyHook = null
+            assertEquals(null, h.coordinator.activeMutationFor(h.backend.noteRef().backendId, h.backend.noteRef().noteId))
+            val fresh = h.coordinator.save(h.base(), frontEdit("after attestation"))
+            assertTrue(fresh is NoteMutationOutcome.Applied)
+            assertNotEquals(record.mutationId, (fresh as NoteMutationOutcome.Applied).record.mutationId)
+            assertEquals(2, h.backend.applyCalls.size)
+        }
+    }
+
+    @Test
+    fun attestationCannotChangeARecordThatIsNotAmbiguous() {
+        runBlocking {
+            val h = Harness()
+            val applied = h.coordinator.save(h.base(), frontEdit("done")) as NoteMutationOutcome.Applied
+
+            val unchanged = h.coordinator.resolveAmbiguous(
+                applied.record.mutationId,
+                NoteMutationAttestation.ABSENT_FROM_COLLECTION
+            )
+
+            assertTrue(unchanged is NoteMutationRecoveryOutcome.Unchanged)
+            assertEquals(NoteMutationStatus.APPLIED, (unchanged as NoteMutationRecoveryOutcome.Unchanged).record.status)
+            assertEquals(NoteMutationReason.NONE, unchanged.record.reason)
+            assertEquals(NoteMutationStatus.APPLIED, h.persistedStatus(applied.record.mutationId.value))
+        }
+    }
+
+    @Test
+    fun attestationForAnUnknownMutationIsNotFoundAndNeverInventsARecord() {
+        runBlocking {
+            val h = Harness()
+            val resolved = h.coordinator.resolveAmbiguous(
+                NoteMutationId("never-recorded"),
+                NoteMutationAttestation.APPLIED_IN_COLLECTION
+            )
+            assertEquals(NoteMutationRecoveryOutcome.NotFound, resolved)
+        }
+    }
+
+    @Test
+    fun attestationIsNeverReportedUnlessItIsDurable() {
+        runBlocking {
+            val h = Harness()
+            val record = ambiguousBecauseTheCollectionCannotBeRead(h)
+
+            // The durable write fails: the attestation must not be reported as a resolution, and the
+            // record must still read back as AMBIGUOUS.
+            h.store.writeFailure = { true }
+            val unwritten = h.coordinator.resolveAmbiguous(
+                record.mutationId,
+                NoteMutationAttestation.APPLIED_IN_COLLECTION
+            )
+            assertTrue(unwritten is NoteMutationRecoveryOutcome.LedgerUnavailable)
+            assertEquals(NoteMutationStatus.AMBIGUOUS, h.persistedStatus(record.mutationId.value))
+            assertEquals("an attestation is not a write", 1, h.backend.applyCalls.size)
+            h.store.writeFailure = null
+
+            // After a restart with an unreadable ledger it fails closed before any transition.
+            h.store.readFailure = "io"
+            val unreadable = h.restarted().resolveAmbiguous(
+                record.mutationId,
+                NoteMutationAttestation.ABSENT_FROM_COLLECTION
+            )
+            assertTrue(unreadable is NoteMutationRecoveryOutcome.LedgerUnavailable)
+            assertEquals(1, h.backend.applyCalls.size)
+            assertTrue(h.backend.reconcileCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun activeMutationForReportsTheOwningRecordAndNothingOnceTerminal() {
+        runBlocking {
+            val h = Harness()
+            val backendId = h.backend.noteRef().backendId
+            val noteId = h.backend.noteRef().noteId
+            assertEquals(null, h.coordinator.activeMutationFor(backendId, noteId))
+
+            val record = ambiguousBecauseTheCollectionCannotBeRead(h)
+            val active = h.coordinator.activeMutationFor(backendId, noteId)
+            assertNotNull(active)
+            assertEquals(record.mutationId, active!!.mutationId)
+            assertEquals(NoteMutationStatus.AMBIGUOUS, active.status)
+
+            // A different note is never blocked by this record.
+            assertEquals(null, h.coordinator.activeMutationFor(backendId, "some-other-note"))
         }
     }
 

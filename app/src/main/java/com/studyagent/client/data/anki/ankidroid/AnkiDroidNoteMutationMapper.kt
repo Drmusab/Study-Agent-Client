@@ -94,10 +94,35 @@ object AnkiDroidNoteMutationMapper {
     }
 
     /**
-     * Maps one provider answer to the mutation boundary. Only two answers are proof of non-application:
-     * a refusal before dispatch, and a thrown `SecurityException` / `IllegalArgumentException`, which the
-     * pinned provider raises in its `require` and permission guards before the single `updateNote` /
-     * `updateCard`. A matching row count is ConfirmedApplied. Everything else is OutcomeUnknown.
+     * Maps one provider answer to the mutation boundary. GATE 17 PART 0 finding **R1** was resolved
+     * here with source evidence rather than by guessing; the chain is:
+     *
+     * 1. **Every `IllegalArgumentException` site in the two writable branches runs before the single
+     *    backend write.** `CardContentProvider.update` (AnkiDroid v2.24.1): `NOTES_ID` throws only at
+     *    the `flds` count `require` (L511) and the unsupported-column `throw` (L530), both before
+     *    `col.updateNote(currentNote)` (L535); `getNoteFromUri`/`getCardFromUri` and the path-segment
+     *    parses (`toLong`/`toInt`, i.e. `NumberFormatException`, an IAE subclass) run before it too,
+     *    as does `getCard`'s "ord does not exist" throw (L1364). `NOTES_ID_CARDS_ORD` throws only at
+     *    `values.getAsLong` , the filtered-deck `require` (L550) and the "only updates of decks"
+     *    `throw` (L561), all before `col.updateCard(currentCard)` (L556). After those write calls the
+     *    branch does nothing but `updated++` and `return updated`.
+     * 2. **Backend (Rust) errors cannot arrive as an `IllegalArgumentException`.** `Collection.updateNote`
+     *    / `updateCard` are single `backend.updateNotes` / `backend.updateCards` calls; rsdroid turns a
+     *    Rust error into a `BackendException` subclass (`BackendException.fromError`, `unpackResult`),
+     *    which extends `RuntimeException`, or into a plain `RuntimeException`. So an IAE observed by the
+     *    caller originates in the provider's own Kotlin checks.
+     * 3. **A `SecurityException` is the permission guard**, the first statement of `update` (L484-486),
+     *    before the collection is even opened.
+     *
+     * Everything else is `OutcomeUnknown`, including a `RuntimeException`: rslib `transact_inner`
+     * rolls the whole transaction back on any error, so a Rust error *is* a non-application, but the
+     * binder only preserves a fixed list of exception types and wraps the rest in `RuntimeException`,
+     * which is indistinguishable from a transport failure after a commit. A `-1` row count (the
+     * platform's swallowed-`RemoteException` answer) and any count mismatch are unknown too.
+     *
+     * Defense in depth: even if a future pin threw an IAE after writing, a `RETRY_ALLOWED` retry
+     * re-reads the base and refuses on any drift (`PreBoundaryConflict`), so a misclassification cannot
+     * produce a second write over changed content.
      */
     fun classify(dispatch: AnkiDroidNoteWriteDispatch, expectedRows: Int): NoteMutationBackendResult =
         when (dispatch) {
@@ -107,7 +132,7 @@ object AnkiDroidNoteMutationMapper {
                 else NoteMutationBackendResult.OutcomeUnknown(AnkiError.QueryFailure("provider_row_count_mismatch"))
             is AnkiDroidNoteWriteDispatch.Threw -> when (dispatch.exceptionClass) {
                 "SecurityException" -> NoteMutationBackendResult.ConfirmedNotApplied(AnkiError.PermissionRequired())
-                "IllegalArgumentException" -> NoteMutationBackendResult.ConfirmedNotApplied(
+                "IllegalArgumentException", "NumberFormatException" -> NoteMutationBackendResult.ConfirmedNotApplied(
                     AnkiError.InvalidRequest("provider_refused_before_write")
                 )
                 else -> NoteMutationBackendResult.OutcomeUnknown(AnkiError.Unknown(cause = "provider_threw_${dispatch.exceptionClass}"))

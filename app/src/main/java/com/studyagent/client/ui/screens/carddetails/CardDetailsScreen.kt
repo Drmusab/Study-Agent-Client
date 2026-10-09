@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -39,6 +40,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.render.AnkiCardSide
 import com.studyagent.client.core.anki.ReviewTurnId
 import com.studyagent.client.core.render.AnkiCardRenderConfig
@@ -86,7 +88,13 @@ fun CardDetailsRouteErrorScreen(
 fun CardDetailsScreen(
     viewModel: CardDetailsViewModel,
     onNavigateBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * GATE 17 — opens the note editor for the exact card identity this screen already holds. It is
+     * offered only when the connected backend advertises a note-edit capability, and this screen
+     * itself stays read-only: the editor owns every write (INV-16-01, INV-17-17).
+     */
+    onOpenNoteEditor: ((AnkiCardRef) -> Unit)? = null
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val ready = (state as? CardDetailsUiState.Ready)?.details
@@ -98,19 +106,38 @@ fun CardDetailsScreen(
                 onBack = onNavigateBack,
                 subtitle = ready?.deckName,
                 trailing = {
-                    IconButton(
-                        onClick = viewModel::refresh,
-                        enabled = state !is CardDetailsUiState.Loading,
-                        modifier = Modifier.semantics { contentDescription = "Refresh card details" }
-                    ) {
-                        if (state is CardDetailsUiState.Loading) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                                color = AppColors.actionAccent
-                            )
-                        } else {
-                            Icon(Icons.Default.Refresh, contentDescription = null, tint = AppColors.contentPrimary)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // The affordance is absent, not disabled-looking, when no edit capability exists
+                        // (AUDIT-17-12: unsupported operations are absent, never silently ignored).
+                        if (ready?.canOpenNoteEditor == true && onOpenNoteEditor != null) {
+                            IconButton(
+                                onClick = { ready?.let { onOpenNoteEditor.invoke(it.cardRef) } },
+                                enabled = state !is CardDetailsUiState.Loading,
+                                modifier = Modifier
+                                    .testTag("card_details_open_editor")
+                                    .semantics { contentDescription = "Edit this note" }
+                            ) {
+                                Icon(Icons.Default.Edit, contentDescription = null, tint = AppColors.actionAccent)
+                            }
+                        }
+                        IconButton(
+                            onClick = viewModel::refresh,
+                            enabled = state !is CardDetailsUiState.Loading,
+                            modifier = Modifier.semantics { contentDescription = "Refresh card details" }
+                        ) {
+                            if (state is CardDetailsUiState.Loading) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = AppColors.actionAccent
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = AppColors.contentPrimary
+                                )
+                            }
                         }
                     }
                 }

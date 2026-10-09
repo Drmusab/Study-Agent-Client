@@ -7,12 +7,14 @@ import org.junit.Test
 import java.io.File
 
 /**
- * GATE 17 — repository source audit for note editing. Each test pins one structural rule that a
- * behavioural test cannot see from the outside: where writes may originate, which types may be
- * shared, what may be persisted, and which capability claims may be made.
+ * GATE 17 PART II — repository source audit for note editing (AUDIT-17-01 … AUDIT-17-14). Each test
+ * pins one structural rule that a behavioural test cannot see from the outside: where writes may
+ * originate, which types may be shared, what may be persisted, which capability claims may be made,
+ * and — since the UI now exists — that the presentation layer decides nothing.
  *
- * Note: the GATE 17 specification text was not available in the repository when this audit was
- * written, so tests are named by the rule they enforce, not by a spec identifier.
+ * The ID → test mapping is recorded in `docs/GATE_17_NOTE_EDITING.md` §PART II and each test below
+ * carries its ID. Rules are enforced on source text with comment lines stripped, so documentation
+ * may explain a retired or forbidden spelling while live code may not use it.
  */
 class Gate17ArchitectureAuditTest {
 
@@ -223,5 +225,225 @@ class Gate17ArchitectureAuditTest {
         val fileNames = listOf("anki_note_mutation_ledger", "anki_reviewer_action_ledger")
         assertEquals(fileNames.distinct().size, fileNames.size)
         assertTrue(main("data/anki/DataStoreNoteMutationStore.kt").code().contains("\"anki_note_mutation_ledger\""))
+    }
+
+    // ---- PART II: the editing UI and its navigation (AUDIT-17-09 … AUDIT-17-14) -------------------
+
+    private fun editUiSources(): List<File> =
+        File(mainRoot, "ui/screens/editnote").listFiles()!!.filter { it.extension == "kt" }.sortedBy { it.name }
+
+    /** The Compose layer of the editor: the screen plus the three controls it renders. */
+    private fun editComposeSources(): List<File> = listOf(
+        main("ui/screens/editnote/EditNoteScreen.kt"),
+        main("ui/components/anki/NoteFieldEditor.kt"),
+        main("ui/components/anki/TagsEditor.kt"),
+        main("ui/components/anki/DeckSelector.kt")
+    )
+
+    /**
+     * AUDIT-17-09 — the Compose layer renders decisions, it never makes one. Capability truth,
+     * declared semantics and every write live below it, so no screen can enable a control the
+     * contract refuses (INV-17-17).
+     */
+    @Test
+    fun theComposeEditLayerMakesNoCapabilityOrContractDecision() {
+        val forbidden = listOf(
+            "AnkiCapabilities", "NoteMutationSemantics", "NoteConflictGuarantee", "NoteDeckChangeScope",
+            "editNoteFields", "editNoteTags", "changeCardDeck", "deckChangeScope",
+            "NoteMutationCoordinator", "NoteMutationLedger", "applyNoteMutation", "AnkiBackend"
+        )
+        for (file in editComposeSources()) {
+            val text = file.code()
+            for (token in forbidden) {
+                assertFalse("${file.name} must not decide from $token", text.contains(token))
+            }
+        }
+    }
+
+    /**
+     * AUDIT-17-10 — the projection and its model are pure Kotlin: no Compose, no Android, no data
+     * layer. That is what makes every wording and gating rule unit-testable on the JVM.
+     */
+    @Test
+    fun theEditProjectionAndItsModelArePureKotlin() {
+        // The editor is exactly four files: model, projection, ViewModel, screen. A fifth would be a
+        // second place where a decision could hide.
+        assertEquals(
+            listOf("EditNoteMapper.kt", "EditNoteModels.kt", "EditNoteScreen.kt", "EditNoteViewModel.kt"),
+            editUiSources().map { it.name }
+        )
+        for (name in listOf("EditNoteModels.kt", "EditNoteMapper.kt")) {
+            val text = main("ui/screens/editnote/$name").readText()
+            assertFalse("$name must not import Compose", text.contains("androidx.compose"))
+            assertFalse("$name must not import Android", text.contains("import android."))
+            assertFalse("$name must not import the data layer", text.contains("com.studyagent.client.data."))
+        }
+    }
+
+    /**
+     * AUDIT-17-11 — one derived flag decides whether a write may be offered, and the screen only
+     * reads it. Nothing in the Compose layer recomputes dirtiness or blocking.
+     */
+    @Test
+    fun theSaveControlIsEnabledOnlyByTheMappedFlag() {
+        val screen = main("ui/screens/editnote/EditNoteScreen.kt").code()
+        assertTrue(screen.contains("enabled = editor.canSave"))
+        assertFalse("the screen must not recompute the rule", screen.contains("dirty &&"))
+        val model = main("ui/screens/editnote/EditNoteModels.kt").code()
+        assertTrue(model.contains("val canSave: Boolean"))
+        assertTrue(model.contains("blockedByMutation == null"))
+        assertTrue(model.contains("saveState !is EditNoteSaveState.Saving"))
+        assertTrue(model.contains("fields.none { it.issue?.blocking == true }"))
+    }
+
+    /**
+     * AUDIT-17-12 — recovery affordances follow the record's status exactly as mapped, and an
+     * unsupported one is absent rather than disabled-looking.
+     */
+    @Test
+    fun theRecoveryControlsFollowTheMappedAffordances() {
+        val screen = main("ui/screens/editnote/EditNoteScreen.kt").code()
+        for (gate in listOf(
+            "blocked.canRetry", "blocked.canResume", "blocked.canRecover",
+            "blocked.canAttest", "blocked.canRestartAfterConflict"
+        )) {
+            assertTrue("the screen must gate on $gate", screen.contains("if ($gate)"))
+        }
+        // AMBIGUOUS has exactly one escape, and it is the user's own attestation.
+        assertTrue(screen.contains("viewModel.attest(NoteMutationAttestation.APPLIED_IN_COLLECTION)"))
+        assertTrue(screen.contains("viewModel.attest(NoteMutationAttestation.ABSENT_FROM_COLLECTION)"))
+        val mapper = main("ui/screens/editnote/EditNoteMapper.kt").code()
+        assertTrue(mapper.contains("canAttest = ambiguous"))
+        assertTrue(mapper.contains("canRetry = record.status == NoteMutationStatus.RETRY_ALLOWED"))
+    }
+
+    /**
+     * AUDIT-17-13 — the read-only card-details screen offers the editor only when the connected
+     * backend actually claims an editing dimension, and it stays read-only either way.
+     */
+    @Test
+    fun theCardDetailsEntryIsCapabilityGatedAndTheScreenStaysReadOnly() {
+        val screen = main("ui/screens/carddetails/CardDetailsScreen.kt").code()
+        assertTrue(screen.contains("if (ready?.canOpenNoteEditor == true && onOpenNoteEditor != null)"))
+        assertTrue(screen.contains("card_details_open_editor"))
+        assertTrue(screen.contains("onOpenNoteEditor.invoke(it.cardRef)"))
+        assertTrue(main("ui/screens/carddetails/CardDetailsMapper.kt").code().contains("canOpenNoteEditor"))
+        val viewModel = main("ui/screens/carddetails/CardDetailsViewModel.kt").code()
+        assertTrue(viewModel.contains("noteEditingOffered"))
+        assertTrue(viewModel.contains("capabilities.editNoteFields"))
+        assertTrue(viewModel.contains("capabilities.editNoteTags"))
+        assertTrue(viewModel.contains("capabilities.changeCardDeck"))
+        for (name in listOf(
+            "CardDetailsScreen.kt", "CardDetailsMapper.kt", "CardDetailsModels.kt", "CardDetailsViewModel.kt"
+        )) {
+            val text = main("ui/screens/carddetails/$name").code()
+            assertFalse("$name must not write a note", text.contains("applyNoteMutation"))
+            assertFalse("$name must not own a mutation", text.contains("NoteMutationCoordinator"))
+        }
+    }
+
+    /**
+     * AUDIT-17-14 — the editor is reached by a stable reference, bound to the backend that owns the
+     * card, and a saved edit forces an authoritative re-read instead of trusting the draft.
+     */
+    @Test
+    fun theEditorIsReachedByReferenceBoundToTheOwningBackend() {
+        val routes = main("ui/navigation/Screen.kt").code()
+        assertTrue(routes.contains("data object EditNote : Screen(\"edit-note/{cardRef}\")"))
+        assertTrue(routes.contains("fun decodeCardRef(token: String?): AnkiCardRef?"))
+        val nav = main("ui/navigation/AppNavHost.kt").code()
+        assertTrue(nav.contains("container.ankiBackendRegistry.find(editCardRef.backendId)"))
+        assertTrue(nav.contains("coordinator = container.noteMutationCoordinator"))
+        assertTrue(nav.contains("navController.navigate(Screen.EditNote.createRoute(ref))"))
+        assertTrue(nav.contains("NOTE_EDIT_SAVED_KEY"))
+        assertTrue(nav.contains("detailsViewModel.refresh()"))
+        // The route carries an id, never note content.
+        for (token in listOf("fieldValues", "draftTags", "flds", "noteContent")) {
+            assertFalse("navigation must not carry $token", routes.contains(token) || nav.contains(token))
+        }
+    }
+
+    /** The editor's ViewModel writes only through the coordinator, and reads only through the backend. */
+    @Test
+    fun theEditViewModelWritesOnlyThroughTheCoordinator() {
+        val viewModel = main("ui/screens/editnote/EditNoteViewModel.kt").code()
+        for (call in listOf(
+            "coordinator.save(", "coordinator.retry(", "coordinator.resumePrepared(",
+            "coordinator.recover(", "coordinator.resolveAmbiguous(", "coordinator.startAfterConflict(",
+            "coordinator.activeMutationFor("
+        )) {
+            assertTrue("the ViewModel must reach the domain through $call", viewModel.contains(call))
+        }
+        for (token in listOf(
+            "applyNoteMutation", "ContentResolver", "FlashCardsContract", "com.studyagent.client.data.",
+            "safeUpdate("
+        )) {
+            assertFalse("the ViewModel must not touch $token", viewModel.contains(token))
+        }
+    }
+
+    /** Deck scope is CARD_ONLY at this pin, so every deck wording in the UI says card, never note. */
+    @Test
+    fun deckWordingIsCardScopedThroughoutTheUiLayer() {
+        File(mainRoot, "ui").walkTopDown().filter { it.isFile && it.extension == "kt" }.forEach { file ->
+            val text = file.code()
+            for (phrase in listOf("Move Note", "moves the note", "move this note", "move the whole note")) {
+                assertFalse("${file.name} must not offer a note-wide move", text.contains(phrase))
+            }
+        }
+        assertTrue(
+            main("ui/components/anki/DeckSelector.kt").code()
+                .contains("This moves the card you opened, not the note.")
+        )
+        assertTrue(
+            main("ui/screens/editnote/EditNoteMapper.kt").code()
+                .contains("Moving a deck moves THIS CARD ONLY.")
+        )
+    }
+
+    /** Tags are one replace-only write at this pin, so the UI never promises a delta operation. */
+    @Test
+    fun tagWordingIsReplaceOnlyThroughoutTheUiLayer() {
+        val tags = main("ui/components/anki/TagsEditor.kt").code()
+        assertTrue(tags.contains("One write replaces the whole tag set."))
+        assertTrue(tags.contains("Anki stores tags in its own order"))
+        for (file in editComposeSources()) {
+            val text = file.code()
+            assertFalse("${file.name} must not promise a tag delta", text.contains("addTag("))
+            assertFalse("${file.name} must not promise a tag delta", text.contains("removeTag("))
+        }
+    }
+
+    /**
+     * The presentation vocabulary never renames durable truth — the GATE 11B rule, applied to the
+     * GATE 17 save states. A log line and a label must not be confusable with a persisted status.
+     */
+    @Test
+    fun theEditPresentationVocabularyNeverRenamesADurableStatus() {
+        val model = main("ui/screens/editnote/EditNoteModels.kt").code()
+        // `code()` strips comments, so the boundary is the next declaration, not a doc line.
+        val saveStates = model.substringAfter("sealed interface EditNoteSaveState")
+            .substringBefore("data class EditNoteEditorState")
+        val cases = Regex("data (?:object|class) (\\w+)").findAll(saveStates)
+            .map { it.groupValues[1] }.toSet()
+        assertEquals(
+            setOf("Idle", "Saving", "Saved", "Blocked", "RetryAvailable", "Conflicted", "Ambiguous"),
+            cases
+        )
+        val durable = setOf("PREPARED", "SUBMITTING", "APPLIED", "RETRY_ALLOWED", "AMBIGUOUS", "CONFLICT")
+        assertTrue("a presentation case renames durable truth: ${cases intersect durable}",
+            (cases intersect durable).isEmpty())
+    }
+
+    /** Every screen of the editor is reachable in tests: the tag names the audit and QA rely on. */
+    @Test
+    fun theEditorExposesStableTestTagsForEveryAffordance() {
+        val screen = main("ui/screens/editnote/EditNoteScreen.kt").code()
+        assertTrue(screen.contains("const val EDIT_NOTE_TEST_TAG = \"edit_note\""))
+        for (suffix in listOf("blocked", "retry", "recover", "attest_applied", "attest_absent", "restart", "save")) {
+            assertTrue("missing test tag for $suffix", screen.contains("\$EDIT_NOTE_TEST_TAG $suffix"))
+        }
+        assertTrue(main("ui/components/anki/TagsEditor.kt").code().contains("const val TAGS_EDITOR_TEST_TAG"))
+        assertTrue(main("ui/components/anki/DeckSelector.kt").code().contains("const val DECK_SELECTOR_TEST_TAG"))
     }
 }

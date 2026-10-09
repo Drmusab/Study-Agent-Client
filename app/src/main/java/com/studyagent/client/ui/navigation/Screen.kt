@@ -26,41 +26,22 @@ sealed class Screen(val route: String) {
     data object CardDetails : Screen("card-details/{cardRef}") {
         const val ARG_CARD_REF: String = "cardRef"
 
-        fun createRoute(cardRef: AnkiCardRef): String {
-            val fields = listOf(
-                cardRef.backendId.stableId,
-                cardRef.collectionKey,
-                cardRef.cardId,
-                cardRef.noteId,
-                cardRef.cardOrd?.toString()
-            )
-            return "card-details/${fields.joinToString(".") { it?.let(::encode) ?: NULL_TOKEN }}"
-        }
+        fun createRoute(cardRef: AnkiCardRef): String = "card-details/${cardRefToken(cardRef)}"
 
-        fun decodeCardRef(token: String?): AnkiCardRef? {
-            return try {
-                val fields = token?.split('.')?.takeIf { it.size == 5 } ?: return null
-                val decoded = arrayOfNulls<String>(fields.size)
-                for (index in fields.indices) {
-                    val value = fields[index]
-                    val decodedValue = if (value == NULL_TOKEN) null else decode(value) ?: return null
-                    decoded[index] = decodedValue
-                }
-                val backendId = AnkiBackendId.fromStableId(decoded[0]) ?: return null
-                val cardOrdToken = decoded[4]
-                val cardOrd = cardOrdToken?.toIntOrNull()
-                if (cardOrdToken != null && cardOrd == null) return null
-                AnkiCardRef(
-                    backendId = backendId,
-                    collectionKey = decoded[1],
-                    cardId = decoded[2],
-                    noteId = decoded[3],
-                    cardOrd = cardOrd
-                )
-            } catch (_: RuntimeException) {
-                null
-            }
-        }
+        fun decodeCardRef(token: String?): AnkiCardRef? = cardRefFromToken(token)
+    }
+
+    /**
+     * GATE 17 — the note editor. It carries exactly the same backend-qualified card identity as Card
+     * Details and nothing else: no note content, no field values, no deck label (INV-17-10, and the
+     * GATE 16 rule that identity — never content — travels in a route).
+     */
+    data object EditNote : Screen("edit-note/{cardRef}") {
+        const val ARG_CARD_REF: String = "cardRef"
+
+        fun createRoute(cardRef: AnkiCardRef): String = "edit-note/${cardRefToken(cardRef)}"
+
+        fun decodeCardRef(token: String?): AnkiCardRef? = cardRefFromToken(token)
     }
 
     /** Stable deck identity is encoded into a single navigation segment; deck names are never routes. */
@@ -94,6 +75,44 @@ sealed class Screen(val route: String) {
 }
 
 private const val NULL_TOKEN: String = "~"
+
+/** One encoded card-identity token, shared by every route that carries an [AnkiCardRef]. */
+private fun cardRefToken(cardRef: AnkiCardRef): String {
+    val fields = listOf(
+        cardRef.backendId.stableId,
+        cardRef.collectionKey,
+        cardRef.cardId,
+        cardRef.noteId,
+        cardRef.cardOrd?.toString()
+    )
+    return fields.joinToString(".") { it?.let(::encode) ?: NULL_TOKEN }
+}
+
+/** Decodes a card-identity token, or null. A malformed token is never guessed at. */
+private fun cardRefFromToken(token: String?): AnkiCardRef? {
+    return try {
+        val fields = token?.split('.')?.takeIf { it.size == 5 } ?: return null
+        val decoded = arrayOfNulls<String>(fields.size)
+        for (index in fields.indices) {
+            val value = fields[index]
+            val decodedValue = if (value == NULL_TOKEN) null else decode(value) ?: return null
+            decoded[index] = decodedValue
+        }
+        val backendId = AnkiBackendId.fromStableId(decoded[0]) ?: return null
+        val cardOrdToken = decoded[4]
+        val cardOrd = cardOrdToken?.toIntOrNull()
+        if (cardOrdToken != null && cardOrd == null) return null
+        AnkiCardRef(
+            backendId = backendId,
+            collectionKey = decoded[1],
+            cardId = decoded[2],
+            noteId = decoded[3],
+            cardOrd = cardOrd
+        )
+    } catch (_: RuntimeException) {
+        null
+    }
+}
 
 private fun encode(value: String): String = Base64.getUrlEncoder().withoutPadding()
     .encodeToString(value.toByteArray(StandardCharsets.UTF_8))

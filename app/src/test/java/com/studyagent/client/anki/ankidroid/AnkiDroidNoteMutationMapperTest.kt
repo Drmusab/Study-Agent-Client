@@ -16,6 +16,7 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteWriteDispatch
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteWriteMapping
 import com.studyagent.client.data.anki.ankidroid.ProviderValue
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -220,6 +221,75 @@ class AnkiDroidNoteMutationMapperTest {
         assertTrue(
             AnkiDroidNoteMutationMapper.classify(AnkiDroidNoteWriteDispatch.Unknown("write_timeout"), 1)
                 is NoteMutationBackendResult.OutcomeUnknown
+        )
+    }
+
+    @Test
+    fun aNumericParseFailureIsProvenNonApplicationBecauseItPrecedesTheWrite() {
+        // `getCardFromUri` and `values.getAsLong` throw NumberFormatException (an IllegalArgumentException
+        // subclass) before `col.updateCard`/`col.updateNote` is ever reached.
+        val result = AnkiDroidNoteMutationMapper.classify(
+            AnkiDroidNoteWriteDispatch.Threw("NumberFormatException"),
+            expectedRows = 1
+        )
+        assertTrue(result is NoteMutationBackendResult.ConfirmedNotApplied)
+        assertEquals(
+            AnkiError.InvalidRequest("provider_refused_before_write"),
+            (result as NoteMutationBackendResult.ConfirmedNotApplied).error
+        )
+    }
+
+    @Test
+    fun aBinderWrappedBackendErrorIsUnknownNeverProvenNonApplication() {
+        // rsdroid turns a Rust error into a BackendException (a RuntimeException) or a plain
+        // RuntimeException, and the binder only preserves a fixed list of exception types: everything
+        // else arrives wrapped. A wrapped error is indistinguishable from a transport failure that
+        // happened after a commit, so it is never claimed as non-application.
+        for (exceptionClass in listOf(
+            "RuntimeException",
+            "BackendException",
+            "BackendInvalidInputException",
+            "BackendDbException",
+            "BackendNotFoundException",
+            "DeadObjectException",
+            "RemoteException",
+            "TransactionTooLargeException",
+            "IllegalStateException",
+            "NullPointerException",
+            "android.os.DeadObjectException"
+        )) {
+            val result = AnkiDroidNoteMutationMapper.classify(
+                AnkiDroidNoteWriteDispatch.Threw(exceptionClass),
+                expectedRows = 1
+            )
+            assertTrue("$exceptionClass must stay unknown", result is NoteMutationBackendResult.OutcomeUnknown)
+        }
+    }
+
+    @Test
+    fun onlyTheThreeProvenPreWriteFailuresAreEverConfirmedNotApplied() {
+        val proven = listOf("SecurityException", "IllegalArgumentException", "NumberFormatException")
+        val unknown = listOf("RuntimeException", "BackendException", "DeadObjectException", "OutOfMemoryError")
+        for (exceptionClass in proven) {
+            assertTrue(
+                exceptionClass,
+                AnkiDroidNoteMutationMapper.classify(AnkiDroidNoteWriteDispatch.Threw(exceptionClass), 1)
+                    is NoteMutationBackendResult.ConfirmedNotApplied
+            )
+        }
+        for (exceptionClass in unknown) {
+            assertFalse(
+                exceptionClass,
+                AnkiDroidNoteMutationMapper.classify(AnkiDroidNoteWriteDispatch.Threw(exceptionClass), 1)
+                    is NoteMutationBackendResult.ConfirmedNotApplied
+            )
+        }
+        // A lost answer is unknown too: no dispatch result at all.
+        assertTrue(
+            AnkiDroidNoteMutationMapper.classify(
+                AnkiDroidNoteWriteDispatch.Unknown("write_timeout_15s"),
+                expectedRows = 1
+            ) is NoteMutationBackendResult.OutcomeUnknown
         )
     }
 

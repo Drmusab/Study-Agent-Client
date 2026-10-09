@@ -128,14 +128,6 @@ fun Row(
 ) = Unit
 
 @Composable
-fun FlowRow(
-    modifier: Modifier = Modifier,
-    horizontalArrangement: Arrangement.Horizontal = Arrangement.Start,
-    verticalArrangement: Arrangement.Vertical = Arrangement.Top,
-    content: @Composable FlowRowScope.() -> Unit
-) = Unit
-
-@Composable
 fun Spacer(modifier: Modifier = Modifier) = Unit
 
 @Composable
@@ -178,7 +170,7 @@ fun FlowRow(
     horizontalArrangement: Arrangement.Horizontal = Arrangement.Start,
     verticalArrangement: Arrangement.Vertical = Arrangement.Top,
     maxItemsInEachRow: Int = Int.MAX_VALUE,
-    content: @Composable RowScope.() -> Unit
+    content: @Composable FlowRowScope.() -> Unit
 ) = Unit
 
 @Composable
