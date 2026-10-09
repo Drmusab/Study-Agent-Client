@@ -189,6 +189,28 @@ sealed interface AnkiError {
     ) : AnkiError
 
     /**
+     * GATE 18 — the note type a creation was based on no longer exists (deleted between the schema
+     * read and the boundary). Distinct from [InvalidRequest]: the backend was asked for the model
+     * and it is genuinely gone. Creation is refused; the draft must be restarted on a live model
+     * (never silently remapped — docs/GATE_18 §3).
+     */
+    data class NoteModelNotFound(
+        val modelId: String? = null,
+        override val message: String = "The selected note type no longer exists in this collection."
+    ) : AnkiError
+
+    /**
+     * GATE 18 — the backend (or the pre-boundary media probe) refused one media attachment:
+     * unreadable source, unknown MIME, oversize, or a store refusal. [detail] is a small stable
+     * token, never provider text or content. Media storage is a separate irreversible operation,
+     * so its refusal never says anything about note creation (docs/GATE_18 §9).
+     */
+    data class MediaRejected(
+        val detail: String? = null,
+        override val message: String = "The media attachment was rejected."
+    ) : AnkiError
+
+    /**
      * GATE 13 amendment — the backend's *public* semantics will not apply the requested reviewer
      * action to the card's current state, and that is known **before** any mutation is dispatched.
      *

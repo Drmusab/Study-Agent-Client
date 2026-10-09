@@ -1,5 +1,10 @@
 package com.studyagent.client.core.anki
 
+import com.studyagent.client.core.anki.create.CreateNoteBackendRequest
+import com.studyagent.client.core.anki.create.CreateNoteBackendResult
+import com.studyagent.client.core.anki.create.MediaStoreBackendResult
+import com.studyagent.client.core.anki.create.NoteCreationSemantics
+import com.studyagent.client.core.anki.create.StoreMediaBackendRequest
 import com.studyagent.client.core.anki.edit.BackendNoteMutationRequest
 import com.studyagent.client.core.anki.edit.NoteMutationBackendResult
 import com.studyagent.client.core.anki.edit.NoteMutationReconciliationRequest
@@ -349,6 +354,56 @@ interface AnkiBackend {
     suspend fun reconcileNoteMutation(
         request: NoteMutationReconciliationRequest
     ): NoteMutationReconciliationResult = NoteMutationReconciliationResult.Unresolved()
+
+    // ----------------------------------------------------------------------------------------
+    // GATE 18 — note/media creation (docs/GATE_18_BACKEND_CREATION_CONTRACT.md, locked).
+    //
+    // Media storage and note creation are SEPARATE irreversible operations because that is what
+    // the pinned backends offer; no single method may hide the media boundary (AUDIT-18-10).
+    // Only NoteCreationCoordinator calls the two write methods, and only after the boundary is
+    // durably recorded. The defaults refuse without any effect.
+    // ----------------------------------------------------------------------------------------
+
+    /** GATE 18 — the creation claims this backend makes; unverified adapters claim nothing. */
+    val noteCreationSemantics: NoteCreationSemantics get() = NoteCreationSemantics.UNVERIFIED
+
+    /**
+     * GATE 18 — read-only listing of every note type with its authoritative creation schema
+     * (CONTRACT-18-02): ordered field names, kind, template count and the note type's stored
+     * default deck id (display-only — the pinned provider accepts no deck at creation,
+     * CONTRACT-18-05). The creation UI derives every field editor from this read, never from
+     * rendered card HTML (INV-18-04).
+     */
+    suspend fun getNoteModels(): AnkiResult<List<AnkiNoteModel>> =
+        AnkiResult.Failure(AnkiError.UnsupportedAction(action = "note_model_listing"))
+
+    /**
+     * GATE 18 — ONE irreversible media-store operation (CONTRACT-18-09). The adapter must classify
+     * honestly: [MediaStoreBackendResult.Stored] only with the backend's authoritative returned
+     * name, [MediaStoreBackendResult.ConfirmedNotStored] only when it can prove nothing was stored,
+     * [MediaStoreBackendResult.OutcomeUnknown] otherwise. Never retried here.
+     */
+    suspend fun storeAnkiMedia(request: StoreMediaBackendRequest): MediaStoreBackendResult =
+        MediaStoreBackendResult.ConfirmedNotStored(AnkiError.UnsupportedAction(action = "store_media"))
+
+    /**
+     * GATE 18 — ONE irreversible create-note operation: note + tags in a single backend call
+     * (atomic where the backend says so — see [noteCreationSemantics]). No deck input exists at
+     * the pinned contract; Anki places the generated cards itself (CONTRACT-18-05), and Anki alone
+     * generates them (INV-18-02). Returns the authoritative note id on success; generated cards are
+     * discovered by [resolveCreatedNote], never assumed (CONTRACT-18-31).
+     */
+    suspend fun createAnkiNote(request: CreateNoteBackendRequest): CreateNoteBackendResult =
+        CreateNoteBackendResult.ConfirmedNotCreated(AnkiError.UnsupportedAction(action = "create_note"))
+
+    /**
+     * GATE 18 — read-only post-creation hydration (CONTRACT-18-30): the stored note, its tags and
+     * the backend's own enumeration of the cards Anki generated for it. The result is the only
+     * source of "what was created": it is never reconstructed from the creation request
+     * (INV-18-16), and one note is never assumed to mean one card (INV-18-03).
+     */
+    suspend fun resolveCreatedNote(noteRef: AnkiNoteRef): AnkiResult<AnkiCreatedNote> =
+        AnkiResult.Failure(AnkiError.UnsupportedAction(action = "resolve_created_note"))
 }
 
 /** Scheduled review only. Null deck means backend-defined collection-wide review. */

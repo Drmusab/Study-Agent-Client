@@ -478,6 +478,76 @@ object AnkiDroidApiContract {
     )
 
     // ------------------------------------------------------------------------------------------
+    // GATE 18 — creation contract (`insert` on notes and media, model listing for the creation
+    // schema), verified at v2.24.1 against the pinned `CardContentProvider.kt` /
+    // `FlashCardsContract.kt` sources and rslib `25.09.2` — see
+    // docs/GATE_18_BACKEND_CREATION_CONTRACT.md for the full evidence table (C1–C14).
+    //
+    // | Fact | Value | Verified from |
+    // |---|---|---|
+    // | Note-creation call | `ContentResolver.insert(content://<authority>/notes, values)` | `insert` NOTES branch |
+    // | `mid` (Long) | required note-type id; looked up via `Note.fromNotetypeId` BEFORE any write | NOTES branch L865 |
+    // | `flds` (String) | ordered field values joined by `0x1f`; COUNT must equal the model's field count or `IllegalArgumentException` BEFORE `col.addNote` | NOTES branch + `Utils.splitFields` |
+    // | `tags` (String) | optional, space-separated; canonified inside the same `Op::AddNote` rslib transaction | NOTES branch + rslib `canonify_note_tags` |
+    // | deck input | **none** — `col.addNote(newNote, newNote.notetype.did)`; template overrides may apply; missing/filtered deck silently falls back to Default(1) | NOTES branch + rslib `add_generated_cards`/`deck_for_adding` |
+    // | `allow_empty` column | exists in the contract but the provider branch has it commented out — ignored | NOTES branch |
+    // | return | `content://<authority>/notes/<newNoteId>` — rslib `AddNoteResponse.note_id`; null only via provider death (RemoteException swallowed by the platform) | NOTES branch |
+    // | media call | `ContentResolver.insert(content://<authority>/media, {file_uri, preferred_name})` | `insertMediaFile` |
+    // | media naming | temp name `<preferred>_<random>.<mimeExt>`; rslib NFC-normalizes, sha1-dedupes equal content, hash-suffix renames collisions; the returned `file://` URI's last segment is the authoritative stored name | `insertMediaFile` + rslib `add_data_to_folder_uniquely` |
+    // | media failure | provider returns null (cache/temp/IO/OOM/empty) or throws; empty file → `EmptyMediaException` caught → null | `insertMediaFile` |
+    // | media delete | **none** — `delete()` supports only `notes/<id>` and empty-cards; media → `UnsupportedOperationException` | `delete` |
+    // | security | `hasReadWritePermission()` checked first; `SecurityException` before any collection access | `insert` L854 |
+    // | model listing | `content://<authority>/models` — one row per note type; `addNoteTypeToCursor` supports `deck_id` (`noteType.did`, display-only at creation), `css`, `sort_field_index`, `note_count`, `latex_*` in addition to the GATE 16 five | NOTE_TYPES branch |
+    // | card generation | never by this app: `col.addNote` → rslib `generate_cards_for_new_note`; ≥1 card forced; cloze per cloze number | rslib `cardgen.rs` |
+    // | post-create reads | `notes/<id>` (GATE 16 columns) + `notes/<id>/cards` (one row per generated card, card projection) + `models/<id>` | NOTE/NOTES_ID_CARDS/NOTE_TYPES_ID branches |
+    // ------------------------------------------------------------------------------------------
+
+    /** Insert path for a new note (no id segment: the provider rejects inserts with an id). */
+    const val NOTES_INSERT_PATH: String = "notes"
+
+    /** `Note.MID` — the note type id a created note is based on. */
+    const val NOTE_INSERT_MID_COLUMN: String = "mid"
+
+    /** Insert path of the media endpoint (`FlashCardsContract.AnkiMedia.CONTENT_URI`). */
+    const val MEDIA_PATH: String = "media"
+
+    /** `AnkiMedia.FILE_URI` — string form of a content URI the provider process can read. */
+    const val MEDIA_FILE_URI_COLUMN: String = "file_uri"
+
+    /** `AnkiMedia.PREFERRED_NAME` — requested name; the backend owns the final name. */
+    const val MEDIA_PREFERRED_NAME_COLUMN: String = "preferred_name"
+
+    /**
+     * `Model.DECK_ID` — the note type's stored default/last deck (`noteType.did`). Creation uses it
+     * for DISPLAY only: the pinned insert accepts no deck input (see the table above).
+     */
+    const val MODEL_DECK_ID_COLUMN: String = "deck_id"
+
+    /** GATE 18 creation schema read: the GATE 16 columns plus the display-only default deck. */
+    val MODEL_CREATION_PROJECTION: Array<String> = arrayOf(
+        MODEL_ID_COLUMN,
+        MODEL_NAME_COLUMN,
+        MODEL_FIELD_NAMES_COLUMN,
+        MODEL_TYPE_COLUMN,
+        MODEL_NUM_CARDS_COLUMN,
+        MODEL_DECK_ID_COLUMN
+    )
+
+    /**
+     * GATE 18 post-create hydration of `notes/<id>/cards` (NOTES_ID_CARDS branch — one row per
+     * card Anki generated): identity, ordinal, template name and deck. All five columns are in the
+     * pinned card-column table (GATE 07/16); the rendered-content columns are deliberately absent —
+     * enumeration is not rendering.
+     */
+    val NOTE_CARDS_HYDRATION_PROJECTION: Array<String> = arrayOf(
+        CARD_ID_COLUMN,
+        CARD_NOTE_ID_COLUMN,
+        CARD_ORD_COLUMN,
+        CARD_NAME_COLUMN,
+        CARD_DECK_ID_COLUMN
+    )
+
+    // ------------------------------------------------------------------------------------------
     // GATE 11 — rating commit contract (`update` on the review-info endpoint, verified at v2.24.1)
     //
     // Source read for this gate: `CardContentProvider.update` SCHEDULE branch and its private

@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.LibraryBooks
@@ -63,11 +64,13 @@ import com.studyagent.client.ui.theme.AppSpacing
 
 const val LIBRARY_LIST_TEST_TAG = "library_deck_list"
 const val LIBRARY_SEARCH_TEST_TAG = "library_search"
+const val LIBRARY_ADD_NOTE_TEST_TAG = "library_add_note"
 
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
     onOpenDeck: (deckId: String) -> Unit,
+    onOpenAddNote: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -145,6 +148,17 @@ fun LibraryScreen(
                             text = "Browse your collection and choose a deck to study.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = AppColors.contentSecondary
+                        )
+                        Spacer(Modifier.height(AppSpacing.S))
+                        // GATE 18 — creation is offered from the library: the note type and the deck
+                        // it lands in are collection-level facts, and the Add Note screen states both.
+                        SecondaryButton(
+                            text = "New note",
+                            onClick = onOpenAddNote,
+                            icon = Icons.Default.Add,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag(LIBRARY_ADD_NOTE_TEST_TAG)
                         )
                     }
                 }

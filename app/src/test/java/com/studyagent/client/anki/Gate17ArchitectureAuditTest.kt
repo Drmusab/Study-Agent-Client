@@ -101,11 +101,17 @@ class Gate17ArchitectureAuditTest {
     @Test
     fun aNoteWriteValueIsConstructedOnlyByTheMapper() {
         // The read path legitimately selects `flds`/`tags`; only a typed write value may carry them.
+        // GATE 18 extends the sanctioned set with the creation mapper: it builds the one
+        // note-insert and media-insert value from the locked creation contract
+        // (docs/GATE_18_BACKEND_CREATION_CONTRACT.md). No other file may construct write values.
         val writers = mainSources()
             .filter { it.code().contains("ProviderValue.StringValue(") }
             .map { it.name }
             .sorted()
-        assertEquals(listOf("AnkiDroidNoteMutationMapper.kt"), writers)
+        assertEquals(
+            listOf("AnkiDroidCreationMapper.kt", "AnkiDroidNoteMutationMapper.kt"),
+            writers
+        )
     }
 
     @Test

@@ -143,10 +143,17 @@ class Gate11ePipelineLockTest {
         val found = main.flatMap { f ->
             writes.findAll(f.code()).map { "${f.rel()}: ${it.value}" }.toList()
         }
-        assertEquals("every scheduler write goes through one primitive: $found",
-            listOf("$providerClient: .update("), found)
+        // GATE 11 invariant: the scheduler writes through exactly one primitive — a single
+        // ContentResolver.update, owned by the provider client. GATE 18 adds a *creation* insert
+        // (notes/media) that is sanctioned by the isolation layer's write allowlist but is NOT a
+        // scheduler write: it is serialized on the same physical-write permit and its ordering is
+        // locked by docs/GATE_18_BACKEND_CREATION_CONTRACT.md. Both calls live in the one client.
+        assertEquals("scheduler update plus the GATE 18 creation insert, nothing else: $found",
+            listOf("$providerClient: .insert(", "$providerClient: .update("), found.sorted())
         assertEquals("exactly one ContentResolver.update call exists",
             1, Regex("contentResolver\\.update\\(").findAll(file("AnkiDroidProviderClient.kt").code()).count())
+        assertEquals("exactly one ContentResolver.insert call exists (GATE 18 creation)",
+            1, Regex("contentResolver\\.insert\\(").findAll(file("AnkiDroidProviderClient.kt").code()).count())
     }
 
     @Test fun `only the study coordinator calls commitRating`() {

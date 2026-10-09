@@ -45,11 +45,18 @@ class AnkiDroidIntegrationIsolationTest {
 
     private val outsideLayer: List<File> = mainSources.filterNot { it.isLayerFile() }
 
-    /** Only these files may touch the platform (INV-ANKI-DET-06, extended in GATE 04). */
+    /**
+     * Only these files may touch the platform (INV-ANKI-DET-06, extended in GATE 04).
+     * GATE 18 adds [AndroidAnkiDroidMediaProbe]: it reads a user-picked content URI's metadata
+     * through the app's OWN resolver (MIME, size, display name) before creation. It never touches
+     * the AnkiDroid provider and never reads Anki's media directories (INV-18-12); platform access
+     * is unavoidable because the picked URI itself is platform-owned.
+     */
     private val androidFacingFiles = setOf(
         "AndroidAnkiDroidProbe.kt",
         "AnkiDroidLauncher.kt",
-        "AnkiDroidProviderClient.kt"
+        "AnkiDroidProviderClient.kt",
+        "AndroidAnkiDroidMediaProbe.kt"
     )
 
     // ---------------------------------------------------------------- helpers
@@ -151,8 +158,9 @@ class AnkiDroidIntegrationIsolationTest {
     @Test
     fun `the integration layer writes only through its sanctioned writers and links no AnkiDroid internals`() {
         val forbidden = listOf(
-            // mutations other than the two GATE 11/13 own (§67/§79/§80)
-            ".insert(", ".delete(", "openFileDescriptor", "openInputStream",
+            // mutations other than the ones GATE 11/13/18 own (§67/§79/§80; GATE 18 insert is
+            // owned by the write allowlist test below, exactly like `.update(`)
+            ".delete(", "openFileDescriptor", "openInputStream",
             "openOutputStream", "ContentProviderOperation", "resolver.call(",
             // APIs that must not exist
             "addNote(", "addNotes(", "updateNote(", "addMediaFromUri(", "addNewDeck(",
@@ -186,16 +194,20 @@ class AnkiDroidIntegrationIsolationTest {
     }
 
     /**
-     * GATE 11 (+ GATE 13) — the write allowlist. The platform `update` call exists in exactly one
-     * place (the provider client), the provider columns are named only by the pinned contract, and
-     * only the three mutation gateways issue writes: the rating gateway (GATE 11), the
-     * reviewer-action gateway (GATE 13) and the note-mutation gateway (GATE 17). All share one
-     * physical-write permit by construction, and a *new* writer anywhere else still fails this test.
+     * GATE 11 (+ GATE 13/17/18) — the write allowlist. The platform `update` and `insert` calls
+     * exist in exactly one place (the provider client), the provider columns are named only by the
+     * pinned contract, and only the four mutation gateways issue writes: the rating gateway
+     * (GATE 11), the reviewer-action gateway (GATE 13), the note-mutation gateway (GATE 17) and the
+     * creation gateway (GATE 18). All share one physical-write permit by construction, and a *new*
+     * writer anywhere else still fails this test.
      */
     @Test
     fun `the mutation write tokens appear only in their owning files`() {
         val allowed = mapOf(
             ".update(" to setOf("AnkiDroidProviderClient.kt"),
+            // GATE 18 — the one creation insert call. Like `.update(`, the platform call lives only
+            // in the provider client; every gateway goes through `safeInsert(` below.
+            ".insert(" to setOf("AnkiDroidProviderClient.kt"),
             "\"answer_ease\"" to setOf("AnkiDroidApiContract.kt"),
             "\"time_taken\"" to setOf("AnkiDroidApiContract.kt"),
             "\"buried\"" to setOf("AnkiDroidApiContract.kt"),
@@ -207,12 +219,16 @@ class AnkiDroidIntegrationIsolationTest {
                 "AnkiDroidRatingGateway.kt", "AnkiDroidReviewerActionGateway.kt",
                 "AnkiDroidNoteMutationGateway.kt"
             ),
+            // GATE 18 — the creation writer is the fourth sanctioned writer, sharing the permit.
+            "safeInsert(" to setOf(
+                "AnkiDroidProviderClient.kt", "AnkiDroidCreationGateway.kt"
+            ),
             "submitAnswer(" to setOf("AnkiDroidRatingGateway.kt", "AnkiDroidRatingCommitter.kt"),
             "easeFor(" to setOf("AnkiDroidCommitEvidence.kt", "AnkiDroidRatingGateway.kt")
         )
         // Provider-specific tokens are checked app-wide; generic names only inside the layer
         // (the PC protocol legitimately has a `submitAnswer(` message factory).
-        val layerOnly = setOf(".update(", "submitAnswer(", "easeFor(", "\"buried\"", "\"suspended\"")
+        val layerOnly = setOf(".update(", ".insert(", "submitAnswer(", "easeFor(", "\"buried\"", "\"suspended\"")
         for ((token, owners) in allowed) {
             val found = offenders(token, if (token in layerOnly) layerFiles else mainSources).toSet()
             assertTrue("'$token' may only appear in $owners, found in $found", found.isNotEmpty() && owners.containsAll(found))
