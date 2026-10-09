@@ -8,9 +8,19 @@ import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiCardDetails
 import com.studyagent.client.core.anki.AnkiCardPage
 import com.studyagent.client.core.anki.AnkiCardQuery
+import com.studyagent.client.core.anki.AnkiCreatedNote
+import com.studyagent.client.core.anki.AnkiCreatedNoteCard
 import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.AnkiNoteModel
+import com.studyagent.client.core.anki.AnkiNoteModelRef
+import com.studyagent.client.core.anki.AnkiNoteRef
+import com.studyagent.client.core.anki.create.CreateNoteBackendRequest
+import com.studyagent.client.core.anki.create.CreateNoteBackendResult
+import com.studyagent.client.core.anki.create.MediaStoreBackendResult
+import com.studyagent.client.core.anki.create.NoteCreationSemantics
+import com.studyagent.client.core.anki.create.StoreMediaBackendRequest
 import com.studyagent.client.core.anki.AnkiRatingOptions
 import com.studyagent.client.core.anki.AnkiRenderedCard
 import com.studyagent.client.core.anki.AnkiResult
@@ -124,7 +134,15 @@ class AnkiDroidBackend(
      * `editNoteFields` / `editNoteTags` / `changeCardDeck` are not advertised. It shares the same
      * physical-write permit as rating and reviewer actions.
      */
-    private val noteMutationGateway: AnkiDroidNoteMutationGateway? = null
+    private val noteMutationGateway: AnkiDroidNoteMutationGateway? = null,
+    /**
+     * GATE 18 — the note-creation and creation-media writer plus its read side (model listing,
+     * post-create hydration). Absent = creation is refused truthfully and `createNotes` /
+     * `noteModelListing` / `storeMedia` are not advertised. It shares the same physical-write
+     * permit as every other mutation family, so a creation insert can never overlap a rating,
+     * reviewer action or note edit.
+     */
+    private val creationGateway: AnkiDroidCreationGateway? = null
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
@@ -203,7 +221,14 @@ class AnkiDroidBackend(
         // Coarse flag stays false: fields, tags and deck are each claimed separately (GATE 17 §18).
         editNotes = false,
         // No receipt or lookup-by-id exists at the pin, so nothing is claimed as authoritative.
-        authoritativeMutationReconciliation = false
+        authoritativeMutationReconciliation = false,
+        // GATE 18 — every creation dimension needs the creation writer; without it nothing is
+        // claimed. Reconciliation stays false: the pin has no transaction correlation (§14 of the
+        // contract doc), and no heuristic search is ever upgraded to proof (CONTRACT-18-21).
+        createNotes = capabilities.createNotes && creationGateway != null,
+        noteModelListing = capabilities.noteModelListing && creationGateway != null,
+        storeMedia = capabilities.storeMedia && creationGateway != null,
+        authoritativeCreationReconciliation = false
     )
 
     /**
@@ -244,6 +269,163 @@ class AnkiDroidBackend(
             ?: return NoteMutationBackendResult.ConfirmedNotApplied(AnkiError.QueryFailure("authority-unknown"))
         val dispatch = writer.submit(authority, write)
         return AnkiDroidNoteMutationMapper.classify(dispatch, write.expectedRows)
+    }
+
+    // ----------------------------------------------------------------------------------------
+    // GATE 18 — creation surface (docs/GATE_18_BACKEND_CREATION_CONTRACT.md).
+    // ----------------------------------------------------------------------------------------
+
+    /**
+     * GATE 18 — the evidence the pinned provider gives for note/media creation. Nothing is claimed
+     * when the writer is not wired, so an unwired backend never advertises a semantics it cannot
+     * honour.
+     */
+    override val noteCreationSemantics: NoteCreationSemantics
+        get() = if (creationGateway != null) NoteCreationSemantics.ANKIDROID_V2_24_1
+        else NoteCreationSemantics.UNVERIFIED
+
+    /**
+     * GATE 18 — read-only creation schema listing (CONTRACT-18-02). One `models` read; every row
+     * the pinned contract exposes, nothing more. A listing failure is a typed failure, never an
+     * empty list standing in for one.
+     */
+    override suspend fun getNoteModels(): AnkiResult<List<AnkiNoteModel>> {
+        val reader = creationGateway
+            ?: return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "note_model_listing"))
+        if (!capabilities.value.noteModelListing) {
+            return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "note_model_listing"))
+        }
+        val authority = currentAuthority()
+            ?: return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+        return when (val read = reader.listModels(authority, id)) {
+            is CreationModelsRead.Models -> AnkiResult.Success(read.models)
+            is CreationModelsRead.Failed -> AnkiResult.Failure(
+                AnkiError.QueryFailure(causeCategory = "model_listing_failed")
+            )
+        }
+    }
+
+    /**
+     * GATE 18 — ONE irreversible media store. Classified by
+     * [AnkiDroidCreationMapper.classifyMediaInsert]; never retried here. Only
+     * `NoteCreationCoordinator` calls this, after the media boundary is durably recorded.
+     */
+    override suspend fun storeAnkiMedia(request: StoreMediaBackendRequest): MediaStoreBackendResult {
+        val writer = creationGateway
+            ?: return MediaStoreBackendResult.ConfirmedNotStored(
+                AnkiError.UnsupportedAction(action = "store_media")
+            )
+        if (request.backendId != id) {
+            return MediaStoreBackendResult.ConfirmedNotStored(AnkiError.InvalidRequest("media_foreign_backend"))
+        }
+        if (!capabilities.value.storeMedia) {
+            return MediaStoreBackendResult.ConfirmedNotStored(AnkiError.UnsupportedAction(action = "store_media"))
+        }
+        if (request.sizeBytes > com.studyagent.client.core.anki.create.MAX_MEDIA_SIZE_BYTES) {
+            return MediaStoreBackendResult.ConfirmedNotStored(
+                AnkiError.MediaRejected("media_size_exceeded")
+            )
+        }
+        val values = when (val mapping = AnkiDroidCreationMapper.mapMediaStore(request)) {
+            is AnkiDroidCreationMapper.MediaStoreMapping.Refused ->
+                return MediaStoreBackendResult.ConfirmedNotStored(mapping.error)
+            is AnkiDroidCreationMapper.MediaStoreMapping.Ready -> mapping.values
+        }
+        val authority = currentAuthority()
+            ?: return MediaStoreBackendResult.ConfirmedNotStored(AnkiError.QueryFailure("authority-unknown"))
+        return AnkiDroidCreationMapper.classifyMediaInsert(writer.submitMediaStore(authority, values))
+    }
+
+    /**
+     * GATE 18 — ONE irreversible create-note dispatch (note + tags, one provider insert). Anki
+     * generates the cards (INV-18-02); the caller deck does not exist at this pin (CONTRACT-18-05).
+     * Classified by [AnkiDroidCreationMapper.classifyNoteInsert]; never retried here.
+     */
+    override suspend fun createAnkiNote(request: CreateNoteBackendRequest): CreateNoteBackendResult {
+        val writer = creationGateway
+            ?: return CreateNoteBackendResult.ConfirmedNotCreated(
+                AnkiError.UnsupportedAction(action = "create_note")
+            )
+        if (request.backendId != id) {
+            return CreateNoteBackendResult.ConfirmedNotCreated(AnkiError.InvalidRequest("create_foreign_backend"))
+        }
+        if (!capabilities.value.createNotes) {
+            return CreateNoteBackendResult.ConfirmedNotCreated(AnkiError.UnsupportedAction(action = "create_note"))
+        }
+        val values = when (val mapping = AnkiDroidCreationMapper.mapNoteCreate(request)) {
+            is AnkiDroidCreationMapper.NoteCreateMapping.Refused ->
+                return CreateNoteBackendResult.ConfirmedNotCreated(mapping.error)
+            is AnkiDroidCreationMapper.NoteCreateMapping.Ready -> mapping.values
+        }
+        val authority = currentAuthority()
+            ?: return CreateNoteBackendResult.ConfirmedNotCreated(AnkiError.QueryFailure("authority-unknown"))
+        return AnkiDroidCreationMapper.classifyNoteInsert(writer.submitNoteCreate(authority, values))
+    }
+
+    /**
+     * GATE 18 — post-creation hydration through the pinned read contract (CONTRACT-18-30/31):
+     * `notes/<id>` for the stored note, `notes/<id>/cards` for the cards Anki generated,
+     * `models` for the model display name and the deck listing for deck display names. Everything
+     * here is a read; the created state is NEVER reconstructed from the creation request
+     * (INV-18-16) and one note is never assumed to mean one card (INV-18-03).
+     */
+    override suspend fun resolveCreatedNote(noteRef: AnkiNoteRef): AnkiResult<AnkiCreatedNote> {
+        val reader = creationGateway
+            ?: return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "resolve_created_note"))
+        if (noteRef.backendId != id) {
+            return AnkiResult.Failure(AnkiError.InvalidRequest("created_note_foreign_backend"))
+        }
+        val authority = currentAuthority()
+            ?: return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+
+        val noteRow = when (val read = reader.readNoteRow(authority, noteRef.noteId)) {
+            is CreatedNoteRowRead.Found -> read
+            is CreatedNoteRowRead.Missing -> return AnkiResult.Failure(AnkiError.NoteNotFound())
+            is CreatedNoteRowRead.Failed ->
+                return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "created_note_read_failed"))
+        }
+        val cardsRead = when (val read = reader.readNoteCards(authority, noteRef.noteId)) {
+            is CreatedNoteCardsRead.Cards -> read
+            is CreatedNoteCardsRead.Failed ->
+                return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "created_cards_read_failed"))
+        }
+        // Supporting display reads (model name, deck names). Both are best-effort: a failure there
+        // degrades the display fields, never the identity-bearing core of the hydration.
+        val modelName = noteRow.modelId?.let { mid ->
+            when (val listing = reader.listModels(authority, id)) {
+                is CreationModelsRead.Models -> listing.models.firstOrNull { it.ref.modelId == mid }?.name
+                is CreationModelsRead.Failed -> null
+            }
+        }
+        val deckNames: Map<String, String> = when (val decks = deckGateway.queryDecks(authority)) {
+            is AnkiResult.Success -> decks.value.decks.associate { deck -> deck.ref.deckId to deck.name }
+            is AnkiResult.Failure -> emptyMap()
+        }
+
+        val cards = cardsRead.rows.map { row ->
+            val deckRef = row.deckId?.let { AnkiDeckRef(id, it) }
+            AnkiCreatedNoteCard(
+                ref = AnkiCardRef(
+                    backendId = id,
+                    cardId = row.cardId.takeIf { it.isNotBlank() },
+                    noteId = noteRef.noteId,
+                    cardOrd = row.ord
+                ),
+                cardName = row.name,
+                deckRef = deckRef,
+                deckName = row.deckId?.let { deckNames[it] }
+            )
+        }
+        return AnkiResult.Success(
+            AnkiCreatedNote(
+                noteRef = noteRef,
+                model = noteRow.modelId?.let { AnkiNoteModelRef(id, it) },
+                modelName = modelName,
+                fields = noteRow.fields,
+                tags = noteRow.tags,
+                cards = cards
+            )
+        )
     }
 
     /**

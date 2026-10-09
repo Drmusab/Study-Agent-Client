@@ -331,6 +331,9 @@ fun AnkiError.commitCategory(): String = when (this) {
     is AnkiError.TransientFailure -> "transient:${detail ?: "unspecified"}"
     is AnkiError.StaleCardReference -> "stale_card:${detail ?: "unspecified"}"
     is AnkiError.UnsupportedAction -> "unsupported:$action"
+    // GATE 18 creation categories: mapped for totality; the review path never produces them.
+    is AnkiError.NoteModelNotFound -> "note_model_not_found:${modelId ?: "unspecified"}"
+    is AnkiError.MediaRejected -> "media_rejected:${detail ?: "unspecified"}"
     is AnkiError.Unknown -> "unknown:${cause ?: "unspecified"}"
     is AnkiError.ProviderUnavailable -> "provider_unavailable"
     is AnkiError.UnsupportedApi -> "unsupported_api"

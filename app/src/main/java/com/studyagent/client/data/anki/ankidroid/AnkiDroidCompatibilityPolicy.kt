@@ -178,7 +178,17 @@ object AnkiDroidCompatibilityPolicy {
             editNoteFields = true,
             editNoteTags = true,
             changeCardDeck = true,
-            noteEditConflictGuarantee = NoteConflictGuarantee.BEST_EFFORT_PRE_SAVE_REREAD
+            noteEditConflictGuarantee = NoteConflictGuarantee.BEST_EFFORT_PRE_SAVE_REREAD,
+            // GATE 18 — note creation, creation-media storage and the model listing behind them are
+            // implemented through the audited public `insert(notes)` / `insert(media)` branches and
+            // the `models` listing (docs/GATE_18_BACKEND_CREATION_CONTRACT.md). The backend drops
+            // these again unless the creation writer is wired. Deck selection is NOT claimed: the
+            // pinned insert accepts no deck (CONTRACT-18-05). Maturity stays IMPLEMENTED: no
+            // real-device creation run has happened.
+            noteModelListing = true,
+            createNotes = true,
+            storeMedia = true,
+            authoritativeCreationReconciliation = false
         )
     }
 }
@@ -281,11 +291,11 @@ data class AnkiDroidApiCapabilityReport(
         AnkiDroidCapabilityDetail("suspend", suspend, maturityFor(suspend, implemented.suspendCards), "provider contract"),
         AnkiDroidCapabilityDetail("noteRead", noteRead, maturityFor(noteRead, implemented.renderedCards), "provider contract"),
         AnkiDroidCapabilityDetail("noteEdit", noteEdit, maturityFor(noteEdit, implemented.editNotes), "provider contract"),
-        AnkiDroidCapabilityDetail("noteCreate", noteCreate, maturityFor(noteCreate, implemented.createNotes), "provider contract"),
+        AnkiDroidCapabilityDetail("noteCreate", noteCreate, maturityFor(noteCreate, implemented.createNotes), "GATE 18 — insert(notes)"),
         AnkiDroidCapabilityDetail("mediaRead", mediaRead, maturityFor(mediaRead, implemented.media), "not yet validated"),
-        AnkiDroidCapabilityDetail("mediaWrite", mediaWrite, maturityFor(mediaWrite, implemented.media && implemented.createNotes), "not yet validated"),
+        AnkiDroidCapabilityDetail("mediaWrite", mediaWrite, maturityFor(mediaWrite, implemented.storeMedia), "GATE 18 — insert(media)"),
         AnkiDroidCapabilityDetail("search", search, maturityFor(search, implemented.search), "provider contract"),
-        AnkiDroidCapabilityDetail("noteTypes", noteTypes, maturityFor(noteTypes, implemented.renderedCards), "provider contract"),
+        AnkiDroidCapabilityDetail("noteTypes", noteTypes, maturityFor(noteTypes, implemented.noteModelListing), "GATE 18 — models listing"),
         AnkiDroidCapabilityDetail("cardTemplates", cardTemplates, maturityFor(cardTemplates, implemented.renderedCards), "provider contract"),
         AnkiDroidCapabilityDetail("cardBrowser", cardBrowser, maturityFor(cardBrowser, implemented.cardBrowser.canBrowse), "no public bounded card-list URI in the pinned contract"),
         AnkiDroidCapabilityDetail("cardSearch", cardSearch, maturityFor(cardSearch, implemented.cardBrowser.canSearchText), "known-card hydration is not collection-wide search")

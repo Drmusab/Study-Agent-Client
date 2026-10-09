@@ -44,6 +44,19 @@ sealed class Screen(val route: String) {
         fun decodeCardRef(token: String?): AnkiCardRef? = cardRefFromToken(token)
     }
 
+    /**
+     * GATE 18 — the Add Note screen. The route carries only the target backend identity: the note
+     * itself does not exist yet, so there is no note identity or content that could travel here.
+     */
+    data object AddNote : Screen("add-note/{backendId}") {
+        const val ARG_BACKEND_ID: String = "backendId"
+
+        fun createRoute(backendId: AnkiBackendId): String = "add-note/${encode(backendId.stableId)}"
+
+        fun decodeBackendId(token: String?): AnkiBackendId? =
+            decode(token)?.let(AnkiBackendId::fromStableId)
+    }
+
     /** Stable deck identity is encoded into a single navigation segment; deck names are never routes. */
     data object DeckDetails : Screen("deck-details/{deckId}") {
         const val ARG_DECK_ID: String = "deckId"

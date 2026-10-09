@@ -32,6 +32,8 @@ import com.studyagent.client.ui.screens.cardbrowser.CardBrowserViewModel
 import com.studyagent.client.ui.screens.carddetails.CardDetailsScreen
 import com.studyagent.client.ui.screens.carddetails.CardDetailsRouteErrorScreen
 import com.studyagent.client.ui.screens.carddetails.CardDetailsViewModel
+import com.studyagent.client.ui.screens.addnote.AddNoteScreen
+import com.studyagent.client.ui.screens.addnote.AddNoteViewModel
 import com.studyagent.client.ui.screens.editnote.EditNoteScreen
 import com.studyagent.client.ui.screens.editnote.EditNoteViewModel
 import com.studyagent.client.ui.screens.settings.SettingsScreen
@@ -84,6 +86,13 @@ fun AppNavHost(
                 viewModel = libraryViewModel,
                 onOpenDeck = { deckId ->
                     navController.navigate(Screen.DeckDetails.createRoute(deckId))
+                },
+                // GATE 18 — creation is opened against the backend this library is showing. The
+                // Add Note screen states the model and deck facts itself; nothing travels in the route.
+                onOpenAddNote = {
+                    navController.navigate(
+                        Screen.AddNote.createRoute(container.ankiDroidBackend.id)
+                    )
                 }
             )
         }
@@ -183,6 +192,42 @@ fun AppNavHost(
                         onOpenNoteEditor = { ref ->
                             navController.navigate(Screen.EditNote.createRoute(ref))
                         }
+                    )
+                }
+            }
+        }
+
+        composable(
+            route = Screen.AddNote.route,
+            arguments = listOf(navArgument(Screen.AddNote.ARG_BACKEND_ID) { type = NavType.StringType })
+        ) { backStackEntry ->
+            val addNoteBackendId = Screen.AddNote.decodeBackendId(
+                backStackEntry.arguments?.getString(Screen.AddNote.ARG_BACKEND_ID)
+            )
+            when {
+                addNoteBackendId == null -> CardDetailsRouteErrorScreen(
+                    message = "The backend for creating a note could not be read from the route. Return to the library and try again.",
+                    onNavigateBack = { navController.popBackStack() }
+                )
+                container.ankiBackendRegistry.find(addNoteBackendId) == null -> CardDetailsRouteErrorScreen(
+                    message = "The backend that should create this note is not registered.",
+                    onNavigateBack = { navController.popBackStack() }
+                )
+                else -> {
+                    val addNoteBackend = checkNotNull(container.ankiBackendRegistry.find(addNoteBackendId))
+                    val addNoteViewModel: AddNoteViewModel = viewModel(
+                        key = "add-note:${addNoteBackendId.stableId}"
+                    ) {
+                        AddNoteViewModel(
+                            backend = addNoteBackend,
+                            // The only creation path the screen has: the creation coordinator.
+                            coordinator = container.noteCreationCoordinator,
+                            mediaProbe = container.addNoteMediaProbe
+                        )
+                    }
+                    AddNoteScreen(
+                        viewModel = addNoteViewModel,
+                        onBack = { navController.popBackStack() }
                     )
                 }
             }

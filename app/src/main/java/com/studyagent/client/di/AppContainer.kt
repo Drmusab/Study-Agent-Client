@@ -46,12 +46,21 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteMutationGateway
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidNoteMutationGateway
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidCreationGateway
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidCreationGateway
+import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidMediaProbe
 import com.studyagent.client.data.anki.DataStoreNoteMutationStore
+import com.studyagent.client.data.anki.DataStoreNoteCreationStore
 import com.studyagent.client.core.anki.edit.DefaultNoteMutationCoordinator
 import com.studyagent.client.core.anki.edit.DefaultNoteMutationLedger
 import com.studyagent.client.core.anki.edit.NoteMutationCoordinator
 import com.studyagent.client.core.anki.edit.NoteMutationLedger
 import com.studyagent.client.core.anki.edit.StudyActivityNoteEditSafetyPolicy
+import com.studyagent.client.core.anki.create.DefaultNoteCreationCoordinator
+import com.studyagent.client.core.anki.create.DefaultNoteCreationLedger
+import com.studyagent.client.core.anki.create.MediaSourceProbe
+import com.studyagent.client.core.anki.create.NoteCreationCoordinator
+import com.studyagent.client.core.anki.create.NoteCreationLedger
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidNoteGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardBrowserGateway
 import com.studyagent.client.data.anki.ankidroid.UnsupportedAnkiDroidCardBrowserGateway
@@ -283,6 +292,20 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         )
     }
 
+    /**
+     * GATE 18 — the note-creation and creation-media writer, plus the creation surface's read side
+     * (model listing, post-create hydration). It shares the one physical-write permit with every
+     * other mutation family, so a creation insert can never overlap a rating, reviewer action or
+     * note edit.
+     */
+    private val ankiDroidCreationGateway: AnkiDroidCreationGateway by lazy {
+        DefaultAnkiDroidCreationGateway(
+            providerClient = ankiDroidProviderClient,
+            scope = ankiDroidScope,
+            writePermit = ankiDroidWritePermit
+        )
+    }
+
     override val ankiDroidBackend: AnkiBackend by lazy {
         AnkiDroidBackend(
             gateway = ankiDroidGateway,
@@ -293,6 +316,9 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             noteGateway = ankiDroidNoteGateway,
             // GATE 17 — note field, tag and card-deck writer. Shares the one physical-write permit.
             noteMutationGateway = ankiDroidNoteMutationGateway,
+            // GATE 18 — note/media creation writer and creation read side. Shares the same permit,
+            // so creation is serialized against every other mutation family.
+            creationGateway = ankiDroidCreationGateway,
             // GATE 11 — the single AnkiDroid writer. Its scope outlives callers so an issued
             // provider call is never abandoned mid-flight by a cancelled screen or session.
             ratingGateway = DefaultAnkiDroidRatingGateway(
@@ -363,6 +389,38 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             ),
             nowEpochMs = System::currentTimeMillis
         )
+    }
+
+    /**
+     * GATE 18 — the durable creation ledger. Its own file, its own record type, its own status
+     * table: it never shares storage with the rating, reviewer-action or note-mutation ledgers
+     * (INV-18-17). Metadata only — never field values, tag text or media content.
+     */
+    val noteCreationLedger: NoteCreationLedger by lazy {
+        DefaultNoteCreationLedger(
+            store = DataStoreNoteCreationStore.create(context, ankiDroidScope),
+            nowEpochMs = System::currentTimeMillis
+        )
+    }
+
+    /**
+     * GATE 18 — the only component that creates notes or stores creation media. Validation, the
+     * durable ordering, the boundaries and the post-create hydration all live here, never in the UI.
+     */
+    val noteCreationCoordinator: NoteCreationCoordinator by lazy {
+        DefaultNoteCreationCoordinator(
+            backend = ankiDroidBackend,
+            ledger = noteCreationLedger,
+            nowEpochMs = System::currentTimeMillis
+        )
+    }
+
+    /**
+     * GATE 18 — local media preparation. The only component allowed to read a user-picked media URI
+     * before creation; it never touches the AnkiDroid provider or Anki's media directories.
+     */
+    val addNoteMediaProbe: MediaSourceProbe by lazy {
+        AndroidAnkiDroidMediaProbe(context = context)
     }
 
     init {

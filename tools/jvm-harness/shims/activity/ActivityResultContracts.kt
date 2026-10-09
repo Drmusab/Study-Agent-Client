@@ -22,4 +22,10 @@ class ActivityResultContracts {
         override fun parseResult(resultCode: Int, intent: Intent?): ActivityResult =
             ActivityResult(resultCode, intent)
     }
+
+    /** GATE 18 — one content picker; the MIME type is the input, the picked URI the output. */
+    class GetContent : ActivityResultContract<String, android.net.Uri?>() {
+        override fun createIntent(context: Context, input: String): Intent = Intent()
+        override fun parseResult(resultCode: Int, intent: Intent?): android.net.Uri? = null
+    }
 }

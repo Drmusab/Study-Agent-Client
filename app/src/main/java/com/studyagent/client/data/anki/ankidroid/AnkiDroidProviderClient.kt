@@ -74,9 +74,38 @@ interface AnkiDroidProviderClient {
      */
     suspend fun safeUpdate(authority: String, path: String, values: List<ProviderValue>): ProviderUpdateResult =
         ProviderUpdateResult.NotDispatched("update_unsupported")
+
+    /**
+     * GATE 18 — the one provider *insert* primitive (`ContentResolver.insert`), used only by the
+     * creation gateway for the pinned `notes` and `media` endpoints.
+     *
+     * Same honesty rule as [safeUpdate]: it never interprets the outcome. The platform answers a
+     * provider insert with a [android.net.Uri] or with **null** — and null is ambiguous by
+     * construction, because the platform also returns null when the provider process dies mid-call
+     * (RemoteException swallowed). The gateway's mapper decides what each answer proves; nothing
+     * here upgrades a null to "not inserted". Values are typed ([ProviderValue]); upper layers
+     * never build `ContentValues` or URIs (INV-18-11: creation writes go through the public API
+     * surface only, exactly as every other provider write).
+     *
+     * The default refuses without any platform call, so a client that does not implement inserts
+     * can never be mistaken for one that inserted.
+     */
+    suspend fun safeInsert(authority: String, path: String, values: List<ProviderValue>): ProviderInsertResult =
+        ProviderInsertResult.NotDispatched("insert_unsupported")
 }
 
-/** One typed column value for [AnkiDroidProviderClient.safeUpdate]. */
+/**
+ * What one provider `insert` call produced. [Returned] and [Threw] both mean the call was issued;
+ * only [NotDispatched] proves no IPC happened. A [Returned] with `uri == null` is the platform's
+ * ambiguous answer (provider refused-by-null OR died mid-call) — never "confirmed not inserted".
+ */
+sealed interface ProviderInsertResult {
+    data class Returned(val uri: String?) : ProviderInsertResult
+    data class Threw(val exceptionClass: String, val failure: AnkiDroidFailure) : ProviderInsertResult
+    data class NotDispatched(val reason: String) : ProviderInsertResult
+}
+
+/** One typed column value for [AnkiDroidProviderClient.safeUpdate] / `safeInsert`. */
 sealed interface ProviderValue {
     val column: String
     data class LongValue(override val column: String, val value: Long) : ProviderValue
@@ -355,6 +384,45 @@ internal class AndroidAnkiDroidProviderClient(
             }
         }
     }
+
+    /**
+     * GATE 18 — `ContentResolver.insert`, off the main thread. Runs [NonCancellable] once started:
+     * a binder call cannot be interrupted, so cancelling the caller must not discard the answer of
+     * a call that did happen. This is the ONLY insert call in the app — note creation (`notes`) and
+     * media storage (`media`) both pass through it (docs/GATE_18 §8 boundaries).
+     */
+    override suspend fun safeInsert(
+        authority: String,
+        path: String,
+        values: List<ProviderValue>
+    ): ProviderInsertResult {
+        if (values.isEmpty()) return ProviderInsertResult.NotDispatched("no_values")
+        currentCoroutineContext().ensureActive()
+        return withContext(dispatchers.io + NonCancellable) {
+            val uri = Uri.parse("content://$authority/$path")
+            val contentValues = ContentValues(values.size).apply {
+                values.forEach { value ->
+                    when (value) {
+                        is ProviderValue.LongValue -> put(value.column, value.value)
+                        is ProviderValue.IntValue -> put(value.column, value.value)
+                        is ProviderValue.StringValue -> put(value.column, value.value)
+                    }
+                }
+            }
+            try {
+                // === REAL ANKIDROID PROVIDER ENTRY (GATE 18) ===
+                // One irreversible ContentResolver.insert. The caller has already persisted the
+                // boundary mark before this method can be entered; this primitive performs no retry
+                // and never interprets the returned URI (a null is reported as-is).
+                ProviderInsertResult.Returned(appContext.contentResolver.insert(uri, contentValues)?.toString())
+            } catch (throwable: Throwable) {
+                ProviderInsertResult.Threw(
+                    exceptionClass = throwable::class.java.simpleName,
+                    failure = AnkiDroidFailureClassifier.classify(throwable, AnkiDroidOperationStage.PROVIDER_UPDATE)
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -406,6 +474,17 @@ internal class FakeAnkiDroidProviderClient(
      * models "applied", "swallowed and not applied" or "died after applying".
      */
     val updateHandlers: MutableMap<String, suspend (List<ProviderValue>) -> ProviderUpdateResult> = mutableMapOf()
+
+    /** GATE 18 — every physical insert call, in order: `path` + the typed values. */
+    val insertLog: MutableList<Pair<String, List<ProviderValue>>> = mutableListOf()
+
+    /**
+     * GATE 18 — scripted insert behaviour keyed by path (`notes`, `media`). The handler runs *as*
+     * the provider: it may mutate [queryResponses] (the observable collection) before returning,
+     * which is how a test models "created", "refused before the write", "effect happened, response
+     * lost" (null) or a thrown provider exception.
+     */
+    val insertHandlers: MutableMap<String, suspend (List<ProviderValue>) -> ProviderInsertResult> = mutableMapOf()
 
     fun scriptRows(path: String, rows: List<Map<String, Any?>>) {
         queryResponses[path] = FakeProviderQueryResponse.Rows(rows)
@@ -481,6 +560,16 @@ internal class FakeAnkiDroidProviderClient(
     ): ProviderUpdateResult {
         updateLog.add(path to values)
         val handler = updateHandlers[path] ?: return ProviderUpdateResult.Returned(0)
+        return handler(values)
+    }
+
+    override suspend fun safeInsert(
+        authority: String,
+        path: String,
+        values: List<ProviderValue>
+    ): ProviderInsertResult {
+        insertLog.add(path to values)
+        val handler = insertHandlers[path] ?: return ProviderInsertResult.Returned(null)
         return handler(values)
     }
 }

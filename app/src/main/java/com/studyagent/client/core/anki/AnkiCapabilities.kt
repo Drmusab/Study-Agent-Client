@@ -156,7 +156,28 @@ data class AnkiCapabilities(
      */
     val authoritativeMutationReconciliation: Boolean = false,
     /** GATE 17 — how strongly the backend protects a note edit against concurrent changes. */
-    val noteEditConflictGuarantee: NoteConflictGuarantee = NoteConflictGuarantee.NONE
+    val noteEditConflictGuarantee: NoteConflictGuarantee = NoteConflictGuarantee.NONE,
+
+    /**
+     * GATE 18 — can list note types with their authoritative creation schema (ordered fields,
+     * kind, template count, stored default deck). The creation UI is built on this read
+     * (INV-18-04); without it, creation is refused rather than guessed.
+     */
+    val noteModelListing: Boolean = false,
+
+    /**
+     * GATE 18 — can store one media file through the backend's PUBLIC media API and report the
+     * authoritative stored name (CONTRACT-18-09). False means the media attachment surface is
+     * absent — never approximated by writing into Anki's private storage (INV-18-11/12).
+     */
+    val storeMedia: Boolean = false,
+
+    /**
+     * GATE 18 — can authoritatively resolve whether an ambiguous creation produced a note.
+     * `false` (everywhere at this pin) means an ambiguous creation is shown for user attestation
+     * and never auto-resolved — no heuristic search is ever treated as proof (CONTRACT-18-20/21).
+     */
+    val authoritativeCreationReconciliation: Boolean = false
 ) {
     companion object {
         /** Safe default for a backend whose probe has not completed. */

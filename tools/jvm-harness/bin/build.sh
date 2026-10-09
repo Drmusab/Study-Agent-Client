@@ -80,6 +80,7 @@ com/studyagent/client/ui/components/anki/NoteFieldEditor.kt
 com/studyagent/client/ui/components/anki/TagsEditor.kt
 com/studyagent/client/ui/components/anki/DeckSelector.kt
 com/studyagent/client/ui/screens/editnote/EditNoteScreen.kt
+com/studyagent/client/ui/screens/addnote/AddNoteScreen.kt
 $(find com/studyagent/client/ui/theme -name '*.kt')"
   if [ "${GATE16_COMPOSE_ALL:-0}" = 1 ]; then
     CSRC=$(composeset); SCOPE="all-framework-importing main files"
