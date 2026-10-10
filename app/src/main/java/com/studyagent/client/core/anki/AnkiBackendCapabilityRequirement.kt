@@ -98,6 +98,17 @@ fun AnkiCapabilities.supports(required: AnkiRequiredCapability): Boolean = when 
     AnkiRequiredCapability.CREATE_NOTE -> createNotes
 }
 
-/** The capability set a *rating-writing* study session must have before it may be locked. */
+/**
+ * The capability set a *rating-writing* study session must have before it may be locked.
+ *
+ * Single source of truth for [AnkiBackendSelector.REVIEW_REQUIREMENT]: the selector reads this
+ * constant rather than restating the literal, so the documented policy and the enforced policy
+ * cannot drift apart (AUDIT-21-13).
+ *
+ * DECKS is deliberately NOT here. A locked study session reads its next card by [AnkiCardRef] from
+ * the backend it is already locked to, so the rating loop never needs deck listing. Requiring DECKS
+ * would narrow which backends may hold a study session, and GATE 21 does not authorize changing
+ * that — the selector's GATE 01 selection behaviour is preserved exactly (DECISION-21-11).
+ */
 val STUDY_SESSION_REQUIREMENTS: Set<AnkiRequiredCapability> =
-    setOf(AnkiRequiredCapability.REVIEW, AnkiRequiredCapability.DECKS)
+    setOf(AnkiRequiredCapability.REVIEW)

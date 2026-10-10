@@ -67,7 +67,18 @@ class AnkiStudyEffectExecutor(
      * cleared when the session ends; it can never *change* a lock, and a preference change never
      * reaches it (INV-21-08). Absent in tests that do not assert on the lock.
      */
-    private val sessionLocks: AnkiStudyBackendLockTracker? = null
+    private val sessionLocks: AnkiStudyBackendLockTracker? = null,
+    /**
+     * GATE 21 — the transaction-recovery router (DECISION-21-14/15/31, INV-21-03/04).
+     *
+     * Recovery routes by the `backendId` **persisted in the record**, never by preference and never
+     * by "whichever backend is ready". This planner makes the *reason* a record cannot be recovered
+     * explicit and uniform — NOT_REGISTERED / UNREACHABLE / COLLECTION_MISMATCH — instead of one
+     * flat "backend_missing" that cannot tell a support report whether the backend vanished or was
+     * simply never in this build. Defaults to the production planner over [registry].
+     */
+    private val transactionRecovery: AnkiTransactionRecoveryPlanner =
+        AnkiTransactionRecoveryPlanner(registry)
 ) : ReviewCommitCoordinator {
 
     private val reviewerActionCoordinator: ReviewerActionCoordinator? = actionCoordinator
@@ -647,9 +658,17 @@ class AnkiStudyEffectExecutor(
             ReviewCommitStatus.PREPARED -> Unit
         }
 
-        val backend = registry.find(commitId.backendId)
+        // Route by the backendId persisted in this commit's identity — never by preference
+        // (INV-21-03). A record whose backend is gone stays refused; it is never replayed against
+        // another backend that never saw the original attempt (INV-21-04).
+        val route = transactionRecovery.plan(listOf(commitId.backendId))[commitId.backendId]
+        val backend = (route as? BackendTransactionRoute.Routed)?.backend
+            ?: registry.find(commitId.backendId)
         if (backend == null) {
-            val saved = ledger.markRefused(commitId, "backend_missing")
+            val reason = (route as? BackendTransactionRoute.Blocked)
+                ?.reason?.name?.lowercase()
+                ?: "backend_missing"
+            val saved = ledger.markRefused(commitId, reason)
             return if (saved != null) saved.toOutcome() else storageFault("commit_persistence_failure")
         }
 

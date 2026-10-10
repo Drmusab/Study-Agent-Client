@@ -39,6 +39,7 @@ import com.studyagent.client.core.voice.stt.SpeechRecognitionOrchestrator
 import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.core.voice.tts.TtsHealthSnapshot
 import com.studyagent.client.data.anki.AnkiLibraryRepository
+import com.studyagent.client.core.anki.AnkiBackendRoutingDiagnostics
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthRepository
@@ -180,7 +181,13 @@ class DefaultDiagnosticsRepository(
     private val ankiDroidGateway: AnkiDroidGateway? = null,
     private val ankiDroidBackend: AnkiDroidBackend? = null,
     private val ankiLibraryRepository: AnkiLibraryRepository? = null,
-    private val reviewCommitLedger: ReviewCommitLedger? = null
+    private val reviewCommitLedger: ReviewCommitLedger? = null,
+    /**
+     * GATE 21 — the four backend roles a support report must keep apart (DECISION-21-35,
+     * AUDIT-21-15): preferred / resolved / locked / transaction, plus per-backend availability.
+     * Absent means "not wired in this build", never "AUTO".
+     */
+    private val ankiBackendRouting: (() -> AnkiBackendRoutingDiagnostics?)? = null
 ) : DiagnosticsRepository {
 
     override val logs: StateFlow<List<LogEntry>> = AppLogger.logsFlow
@@ -579,6 +586,29 @@ class DefaultDiagnosticsRepository(
         )
     }?.let { it + commitSourceOfTruthRows() } ?: commitSourceOfTruthRows()
 
+    /**
+     * GATE 21 — backend routing rows. One row per role, so a reader can never mistake "the user
+     * prefers PC" for "the session is locked to PC" (INV-21-08, AUDIT-21-15). Stable tokens only:
+     * no card content, no provider text.
+     */
+    private fun ankiBackendRoutingRows(): List<Pair<String, String>> {
+        val routing = ankiBackendRouting?.invoke() ?: return emptyList()
+        val rows = mutableListOf(
+            "Preferred backend" to routing.preferred.stableId,
+            "Resolved backend" to (routing.resolved?.stableId ?: DiagnosticsFormatting.NOT_MEASURED),
+            "Resolution reason" to (routing.resolvedReason?.name ?: DiagnosticsFormatting.NOT_MEASURED),
+            "Locked session backend" to
+                (routing.lockedSessionBackend?.stableId ?: DiagnosticsFormatting.NOT_MEASURED),
+            "Locked session count" to routing.lockedSessionCount.toString()
+        )
+        routing.transactionBackend?.let { rows.add("Transaction backend" to it.stableId) }
+        // Sorted by stable token, so two reports of the same state diff cleanly.
+        routing.availability.entries.sortedBy { it.key.stableId }.forEach { (id, status) ->
+            rows.add("Availability ${id.stableId}" to status)
+        }
+        return rows
+    }
+
     override fun ankiDroidDiagnosticsRows(): List<Pair<String, String>> {
         val repository = ankiDroidHealthRepository
         val gateway = ankiDroidGateway
@@ -586,7 +616,8 @@ class DefaultDiagnosticsRepository(
 
         // If neither is wired, report not wired
         if (repository == null && gateway == null) {
-            return listOf("Integration" to "not wired in this build") + commitLedgerRows()
+            return listOf("Integration" to "not wired in this build") +
+                ankiBackendRoutingRows() + commitLedgerRows()
         }
 
         // Prefer gateway state when available (GATE 04 single source of truth, §45)
@@ -595,7 +626,7 @@ class DefaultDiagnosticsRepository(
         val detection = integrationState?.healthSnapshot?.detection ?: snapshot?.detection
 
         if (detection == null && integrationState == null) {
-            return listOf("Integration" to "no data yet",
+            return ankiBackendRoutingRows() + listOf("Integration" to "no data yet",
                 "Commit guarantee" to (backend?.commitSemantics?.guaranteeLevel?.name ?: "Not wired / unverified"),
                 "Idempotent replay" to if (backend?.commitSemantics?.supportsIdempotentReplay == true) "Verified" else "No / unverified",
                 "Authoritative reconciliation" to if (backend?.commitSemantics?.supportsAuthoritativeReconciliation == true)
@@ -627,10 +658,13 @@ class DefaultDiagnosticsRepository(
         }
 
         val rows = mutableListOf<Pair<String, String>>()
+        rows.addAll(ankiBackendRoutingRows())
 
         // Basic health (GATE 02)
         rows.add("Status" to (detection?.availability?.statusCode ?: integrationState?.availability?.statusCode ?: DiagnosticsFormatting.UNKNOWN))
-        rows.add("Backend" to (backend?.id?.stableId ?: "ankidroid_local"))
+        // GATE 21 fix: report UNKNOWN when no backend was observed. Defaulting this label to
+        // "ankidroid_local" claimed a backend the diagnostics never saw (DISCOVERY-21-34).
+        rows.add("Backend" to (backend?.id?.stableId ?: DiagnosticsFormatting.UNKNOWN))
         val semantics = backend?.commitSemantics
         rows.add("Commit guarantee" to when (semantics?.guaranteeLevel) {
             com.studyagent.client.core.anki.CommitGuaranteeLevel.AT_MOST_ONCE_FAIL_CLOSED -> "At-most-once / fail-closed"

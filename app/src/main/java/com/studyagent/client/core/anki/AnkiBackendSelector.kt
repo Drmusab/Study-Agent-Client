@@ -64,8 +64,13 @@ class AnkiBackendSelector(private val registry: AnkiBackendRegistry) {
     )
 
     companion object {
-        /** A study session is the complete rating loop; anything less is not a study backend. */
-        val REVIEW_REQUIREMENT: Set<AnkiRequiredCapability> = setOf(AnkiRequiredCapability.REVIEW)
+        /**
+         * A study session is the complete rating loop; anything less is not a study backend.
+         *
+         * GATE 21: aliased to the shared declaration so the policy is stated once and the selector
+         * cannot drift from it. Same contents as before — no selection behaviour changed.
+         */
+        val REVIEW_REQUIREMENT: Set<AnkiRequiredCapability> = STUDY_SESSION_REQUIREMENTS
 
         /** The GATE 21 result shape folded back into the GATE 01 result shape (1:1, no new cases). */
         fun toResolution(

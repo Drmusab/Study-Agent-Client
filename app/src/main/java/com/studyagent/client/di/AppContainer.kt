@@ -7,6 +7,9 @@ import com.studyagent.client.core.anki.AnkiBackendResolver
 import com.studyagent.client.core.anki.AnkiBackendStatusCenter
 import com.studyagent.client.core.anki.AnkiStudyBackendLockTracker
 import com.studyagent.client.core.anki.AnkiTransactionRecoveryPlanner
+import com.studyagent.client.core.anki.STUDY_SESSION_REQUIREMENTS
+import com.studyagent.client.core.anki.BackendResolutionResult
+import com.studyagent.client.core.anki.AnkiBackendRoutingDiagnostics
 import com.studyagent.client.core.anki.AnkiBackendSelector
 import com.studyagent.client.core.anki.ReviewCommitLedger
 import com.studyagent.client.data.anki.DataStoreReviewCommitStore
@@ -684,6 +687,9 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
                 ledger = reviewCommitLedger,
                 // GATE 21 — publish each session's immutable backend lock for Study UI/diagnostics.
                 sessionLocks = ankiStudyBackendLocks,
+                // GATE 21 — one shared recovery router, so commit recovery and the diagnostics
+                // routing snapshot classify "why is this blocked?" identically.
+                transactionRecovery = ankiTransactionRecoveryPlanner,
                 // GATE 13 — the separate reviewer-action ledger. Without it actions are refused
                 // before dispatch (fail closed), so both ledgers are wired together.
                 actionLedger = reviewerActionLedger,
@@ -726,6 +732,41 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         )
     }
 
+    /**
+     * GATE 21 — the routing snapshot Diagnostics renders.
+     *
+     * The locked role comes from the lock tracker, the only authority that knows which backend a
+     * session is locked to (INV-21-05). When more than one session holds a lock the row reports how
+     * many instead of naming one arbitrarily and implying it is "the" active session.
+     *
+     * Availability is the last KNOWN status per backend and resolution is a pure function of the
+     * registry descriptors — nothing here probes or refreshes, so opening Diagnostics can never
+     * change which backend a session resolves to (INV-21-19).
+     *
+     * The transaction role is reported only when a transaction is actually in flight. There is no
+     * ambient "current transaction backend" to sample, so the row is absent rather than guessed.
+     */
+    private fun ankiBackendRoutingDiagnostics(): AnkiBackendRoutingDiagnostics {
+        val snapshot = ankiBackendStatusCenter.snapshotNow()
+        val heldLocks = ankiStudyBackendLocks.locks.value
+        // Exactly one lock: name it. Several: report the count and name none of them.
+        val lockedRow = if (heldLocks.size == 1) heldLocks.values.single().backendId else null
+        val resolution = ankiBackendStatusCenter.resolveFor(
+            requiredCapabilities = STUDY_SESSION_REQUIREMENTS,
+            purpose = "diagnostics"
+        )
+        val resolved = resolution as? BackendResolutionResult.Resolved
+        return AnkiBackendRoutingDiagnostics(
+            preferred = ankiBackendPreferenceStore.mode.value,
+            resolved = resolved?.backendId,
+            resolvedReason = resolved?.reason,
+            lockedSessionBackend = lockedRow,
+            lockedSessionCount = heldLocks.size,
+            transactionBackend = null,
+            availability = snapshot.entries.associate { it.id to it.statusToken }
+        )
+    }
+
     override val diagnosticsRepository: DiagnosticsRepository by lazy {
         DefaultDiagnosticsRepository(
             connectionRepository,
@@ -753,7 +794,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             // GATE 04: gateway + backend for capability matrix (§64/§121)
             ankiDroidGateway = ankiDroidGateway,
             ankiDroidBackend = ankiDroidBackend as? AnkiDroidBackend,
-            reviewCommitLedger = reviewCommitLedger
+            reviewCommitLedger = reviewCommitLedger,
+            // GATE 21 DECISION-21-35: a support report must show preferred / resolved / locked /
+            // transaction as FOUR distinct rows. Sampled on demand so the snapshot is current.
+            ankiBackendRouting = ::ankiBackendRoutingDiagnostics
         )
     }
 

@@ -13,6 +13,7 @@ import com.studyagent.client.core.anki.edit.newPreparedNoteMutationRecord
 import com.studyagent.client.core.models.Rating
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -166,6 +167,92 @@ class Gate21TransactionRecoveryRoutingTest {
         )
 
         assertTrue(plan.getValue(localId) is BackendTransactionRoute.Routed)
+    }
+
+    // --------------------------------------- VER-21-23: routing is wired into commit recovery
+
+    /**
+     * The planner is not decorative: commit recovery actually routes through it, and a record whose
+     * backend is absent is refused with the *specific* reason the planner computed. Before GATE 21
+     * every such record produced one indistinguishable "backend_missing", which could not tell a
+     * support report whether the backend had vanished or was never in this build (DECISION-21-14,
+     * INV-21-03).
+     */
+    @Test
+    fun `commit recovery refuses an orphaned record with the planner's own reason`() = runTest {
+        val store = InMemoryReviewCommitStore()
+        val ledger = ReviewCommitLedger(store, clock = { 1L })
+        val card = AnkiCardRef(localId, cardId = "card-1", collectionKey = "collection")
+        val request = CommitRatingRequest(
+            commitId = ReviewCommitId(localId, "study-1", ReviewTurnId("turn-1")),
+            card = card,
+            rating = Rating.GOOD,
+            ratedAtEpochMs = 1L,
+            deckRef = AnkiDeckRef(localId, "deck-a", "collection"),
+            collectionRef = AnkiCollectionIdentity(localId, "collection")
+        )
+        assertTrue(ledger.prepare(request) is ReviewCommitLedger.PrepareResult.Prepared)
+
+        // An executor for a process where ONLY the PC backend exists: the AnkiDroid record's own
+        // backend is unregistered here. Recovery must refuse it — and must not borrow the PC
+        // backend that is standing right there and ready (INV-21-04).
+        val executor = com.studyagent.client.core.study.AnkiStudyEffectExecutor(
+            registry = AnkiBackendRegistry(listOf(pc())),
+            ledger = ledger,
+            clock = { 1L }
+        )
+
+        executor.commit(request)
+
+        // The canonical status set is closed (GATE 11B): a refusal is RETRY_ALLOWED plus the
+        // refused_before_dispatch resolution token, never a dedicated REFUSED status. The new part
+        // is the *reason* — it now names why the backend could not be reached.
+        val refused = ledger.get(request.commitId)
+        assertEquals(ReviewCommitStatus.RETRY_ALLOWED, refused?.status)
+        assertEquals(ReviewCommitResolution.REFUSED_BEFORE_DISPATCH, refused?.resolution)
+        assertEquals("backend_not_registered", refused?.failure?.category)
+        // Nothing was dispatched anywhere: no scheduler on any backend saw this rating.
+        assertEquals(0, ledger.pendingRecovery(localId).size)
+    }
+
+    /**
+     * The same orphaned record routed through a registry that *does* hold its backend must not be
+     * refused for that reason — otherwise the new reason would be a blanket failure rather than a
+     * distinction.
+     */
+    @Test
+    fun `commit recovery does not call a registered backend orphaned`() = runTest {
+        val store = InMemoryReviewCommitStore()
+        val ledger = ReviewCommitLedger(store, clock = { 1L })
+        val card = AnkiCardRef(localId, cardId = "card-1", collectionKey = "collection")
+        val request = CommitRatingRequest(
+            commitId = ReviewCommitId(localId, "study-2", ReviewTurnId("turn-1")),
+            card = card,
+            rating = Rating.GOOD,
+            ratedAtEpochMs = 1L,
+            deckRef = AnkiDeckRef(localId, "deck-a", "collection"),
+            collectionRef = AnkiCollectionIdentity(localId, "collection")
+        )
+        assertTrue(ledger.prepare(request) is ReviewCommitLedger.PrepareResult.Prepared)
+
+        val executor = com.studyagent.client.core.study.AnkiStudyEffectExecutor(
+            registry = AnkiBackendRegistry(listOf(local())),
+            ledger = ledger,
+            clock = { 1L }
+        )
+
+        executor.commit(request)
+
+        val record = ledger.get(request.commitId)
+        // This bare fake has no live review session, so the commit is legitimately refused for a
+        // *different* reason. The point of this test is the contrast: a registered backend is
+        // never reported as orphaned, so "backend_not_registered" is a real distinction rather
+        // than a blanket failure that would fire either way.
+        assertTrue(
+            "registered backend must not be called orphaned, got ${record?.failure?.category}",
+            record?.failure?.category != "backend_not_registered"
+        )
+        assertNotEquals("backend_not_registered", record?.failure?.category)
     }
 
     // -------------------------------------------------------------- review-commit identity
