@@ -333,6 +333,10 @@ fun AnkiError.commitCategory(): String = when (this) {
     is AnkiError.UnsupportedAction -> "unsupported:$action"
     // GATE 18 creation categories: mapped for totality; the review path never produces them.
     is AnkiError.NoteModelNotFound -> "note_model_not_found:${modelId ?: "unspecified"}"
+    // GATE 19 model/template categories: mapped for totality; the review path never produces them.
+    // Content-free on purpose: a template ref carries an ordinal/name, and this token is a
+    // diagnostics category, not a content channel (same rule as `deck_not_found`).
+    is AnkiError.TemplateNotFound -> "template_not_found"
     is AnkiError.MediaRejected -> "media_rejected:${detail ?: "unspecified"}"
     is AnkiError.Unknown -> "unknown:${cause ?: "unspecified"}"
     is AnkiError.ProviderUnavailable -> "provider_unavailable"

@@ -77,6 +77,18 @@ object AppSettingsPreferencesCodec {
         val AUTO_SUBMIT_TRANSCRIPT = booleanPreferencesKey("auto_submit_transcript")
         val CONFIRM_RATING = booleanPreferencesKey("confirm_rating")
         val SHOW_TRANSCRIPT = booleanPreferencesKey("show_transcript")
+
+        /**
+         * GATE 21 — the user's *preferred* Anki backend mode (`auto` | `ankidroid_local` |
+         * `pc_agent`, the [com.studyagent.client.core.anki.AnkiBackendMode.stableId] tokens).
+         *
+         * A preference, never an "effective backend": it only answers what a *new, unbound*
+         * operation should use. Active sessions, bound editors and durable transactions keep their
+         * own backend identity (DECISION-21-32, INV-21-08). Absent means AUTO — the pre-GATE-21
+         * behavior was already "the one ready local backend", which is exactly what AUTO resolves.
+         */
+        val ANKI_BACKEND_MODE = stringPreferencesKey("anki_backend_mode")
+
         val USE_FAKE_AGENT = booleanPreferencesKey("use_fake_agent")
         val DEBUG_LOGGING = booleanPreferencesKey("debug_logging")
         val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
@@ -291,6 +303,10 @@ object AppSettingsPreferencesCodec {
         prefs.remove(Keys.AUTO_SUBMIT_TRANSCRIPT)
         prefs.remove(Keys.CONFIRM_RATING)
         prefs.remove(Keys.SHOW_TRANSCRIPT)
+        // GATE 21: the preferred Anki backend is a device setting, so a settings reset returns it to
+        // AUTO. It cannot affect anything already bound — active sessions and durable transactions
+        // carry their own backend identity (DECISION-21-32).
+        prefs.remove(Keys.ANKI_BACKEND_MODE)
         prefs.remove(Keys.USE_FAKE_AGENT)
         prefs.remove(Keys.DEBUG_LOGGING)
         prefs.remove(Keys.AUTO_RECONNECT)

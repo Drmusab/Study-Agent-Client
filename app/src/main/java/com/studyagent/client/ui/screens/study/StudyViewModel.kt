@@ -7,6 +7,7 @@ import com.studyagent.client.core.audio.AudioRouteManager
 import com.studyagent.client.core.audio.EffectiveStudyAudioRoute
 import com.studyagent.client.core.audio.StudyAudioAttention
 import com.studyagent.client.core.audio.StudyAudioRouteCoordinator
+import com.studyagent.client.core.anki.AnkiStudyBackendLockTracker
 import com.studyagent.client.core.anki.ReviewerAction
 import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.models.Rating
@@ -21,8 +22,11 @@ import com.studyagent.client.core.voice.tts.SpeechOrchestrator
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import com.studyagent.client.data.repository.ConnectionRepository
 import com.studyagent.client.data.repository.StudySessionRepository
+import com.studyagent.client.ui.components.anki.displayLabel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -33,7 +37,12 @@ class StudyViewModel(
     private val recognitionOrchestrator: SpeechRecognitionOrchestrator,
     private val speechOrchestrator: SpeechOrchestrator,
     private val preferencesDataStore: PreferencesDataStore,
-    studyAudioRouteCoordinator: StudyAudioRouteCoordinator? = null
+    studyAudioRouteCoordinator: StudyAudioRouteCoordinator? = null,
+    /**
+     * GATE 21 — the active session's immutable backend lock (IMPLEMENTATION-21-19).
+     * Optional so existing call sites/tests compile unchanged; absent means no indicator is shown.
+     */
+    ankiSessionLocks: AnkiStudyBackendLockTracker? = null
 ) : ViewModel() {
 
     val studyState: StateFlow<StudyState> = studySessionRepository.studyState
@@ -66,6 +75,27 @@ class StudyViewModel(
 
     val appSettings = preferencesDataStore.settingsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /**
+     * GATE 21 — "Using AnkiDroid" / "Using PC Agent", taken from the **session lock**.
+     *
+     * Deliberately not the preferred backend: while a session is running the two may legitimately
+     * differ, and Study is exactly the screen where showing the preference would misreport where the
+     * user's ratings are being written (INV-21-08, DECISION-21-36, VER-21-08). `null` when no Anki
+     * session is bound (for example the remote PC-agent study path), which renders as nothing rather
+     * than as a guess.
+     */
+    val lockedAnkiBackendLabel: StateFlow<String?> = run {
+        val locks = ankiSessionLocks
+        if (locks == null) {
+            MutableStateFlow<String?>(null)
+        } else {
+            combine(currentSession, locks.locks) { session, locked ->
+                val context = session?.let { locked[it.sessionId] }
+                context?.backendId?.let { "Using ${it.displayLabel()}" }
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
     fun onRateCard(rating: Rating) {
         viewModelScope.launch {

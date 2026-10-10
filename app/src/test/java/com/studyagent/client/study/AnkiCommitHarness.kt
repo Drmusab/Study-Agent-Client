@@ -36,6 +36,12 @@ class AnkiCommitHarness(
      * observable: a preference-driven resolution could pick another backend, and must not.
      */
     val extraBackends: List<AnkiBackend> = emptyList(),
+    /**
+     * GATE 21 — optional observable projection of the session's immutable backend lock. Passing one
+     * lets a test assert that Study UI/diagnostics see the *lock*, and that a preference change or an
+     * availability change never rewrites it (INV-21-02/08).
+     */
+    val sessionLocks: AnkiStudyBackendLockTracker? = null,
     /** GATE 11 checkpoint 4 — deterministic scheduler failure mode for the fake backend. */
     fakeMode: FakeCommitMode = FakeCommitMode.SUCCESS,
     /** LOCAL_DEDUP_ONLY makes the fake re-apply any repeated id that already had an effect. */
@@ -51,7 +57,8 @@ class AnkiCommitHarness(
     var ledger = ReviewCommitLedger(store, clock)
         private set
     var executor = AnkiStudyEffectExecutor(
-        AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults)
+        AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults,
+        sessionLocks = sessionLocks)
         private set
 
     var state = SessionMachineState.initial()
@@ -61,7 +68,8 @@ class AnkiCommitHarness(
     fun restartLedger() {
         ledger = store.restart(clock)
         executor = AnkiStudyEffectExecutor(
-            AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults)
+            AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults,
+            sessionLocks = sessionLocks)
     }
 
     /**

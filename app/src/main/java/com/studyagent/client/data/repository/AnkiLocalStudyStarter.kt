@@ -48,17 +48,27 @@ class AnkiLocalStudyStarter(
     private val scope: CoroutineScope,
     /** The machine dispatch. A lambda so this class never depends on the repository implementation. */
     private val dispatch: (AnkiStudyRequest) -> Unit,
-    private val studySessionIdFactory: () -> String = { UUID.randomUUID().toString() }
+    private val studySessionIdFactory: () -> String = { UUID.randomUUID().toString() },
+    /**
+     * GATE 21 — the *preferred* backend mode for a brand-new session (DECISION-21-06/32).
+     *
+     * Read once, at start, and only for this session: the value it returns is what the resolution
+     * uses, and from then on the session's own locked identity is the only routing input
+     * (INV-21-08/09). The default stays [LOCAL_PREFERENCE] so a caller that has not opted into the
+     * user's preference keeps the pre-GATE-21 "study on this phone" meaning.
+     */
+    private val preferenceProvider: () -> AnkiBackendMode = { LOCAL_PREFERENCE }
 ) {
 
     /** Everything a caller may choose about the local session; the rest is the request's own default. */
     data class Options(
         /**
-         * The on-device backend only. `AUTO` is deliberately *not* the default here: `AUTO` would fall
-         * back to a PC agent, and a PC agent is not "this phone" — a caller that chooses this starter
-         * has already decided that the session must run against the device's own collection.
+         * `null` (the default) = use the app's persisted preference via the starter's
+         * `preferenceProvider` (GATE 21). Set it explicitly to pin one backend for this start —
+         * for example [LOCAL_PREFERENCE] when the caller means "this phone" specifically, because
+         * `AUTO` may resolve to a PC agent, and a PC agent is not this phone.
          */
-        val preference: AnkiBackendMode = LOCAL_PREFERENCE,
+        val preference: AnkiBackendMode? = null,
         /** `null` = the deck the backend itself has selected, when it exposes one. */
         val deckName: String? = null,
         /** Stable ID from Library navigation. Preferred over a mutable/display-only name. */
@@ -119,7 +129,10 @@ class AnkiLocalStudyStarter(
      * misspelled deck fails here rather than mid-session (§45/§46 of the Anki contract).
      */
     suspend fun start(options: Options = Options()): Result {
-        val backendId = when (val resolution = selector.resolve(options.preference)) {
+        // The preference is sampled exactly once. Re-reading it mid-start could resolve one backend
+        // for the capability freeze and another for the dispatch.
+        val preference = options.preference ?: preferenceProvider()
+        val backendId = when (val resolution = selector.resolve(preference)) {
             is AnkiBackendSelector.Resolution.Resolved -> resolution.backendId
             is AnkiBackendSelector.Resolution.Unavailable ->
                 return Result.Refused(REASON_NO_READY_BACKEND, resolution.error)
@@ -134,7 +147,7 @@ class AnkiLocalStudyStarter(
         backend.refreshAvailability()
 
         // Fail closed if the refresh changed the answer: resolution is re-run, never remembered.
-        if (selector.resolve(options.preference) !is AnkiBackendSelector.Resolution.Resolved) {
+        if (selector.resolve(preference) !is AnkiBackendSelector.Resolution.Resolved) {
             return Result.Refused(REASON_BACKEND_NOT_READY, null)
         }
 
@@ -149,7 +162,7 @@ class AnkiLocalStudyStarter(
         dispatch(
             AnkiStudyRequest(
                 studySessionId = studySessionId,
-                preference = options.preference,
+                preference = preference,
                 deck = deck,
                 speakQuestion = options.speakQuestion,
                 evaluateAnswers = options.evaluateAnswers,

@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.studyagent.client.core.anki.AnkiBackendMode
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.ServerProfile
@@ -105,6 +106,36 @@ class PreferencesDataStore(
     val settingsFlow: Flow<AppSettings> = preferencesFlow
         .map(AppSettingsPreferencesCodec::readSettings)
         .distinctUntilChanged()
+
+    /**
+     * GATE 21 — the persisted *preferred* Anki backend mode.
+     *
+     * An unknown token (a mode removed by a future build, or hand-edited storage) falls back to AUTO
+     * rather than failing: AUTO is the only mode that can still find a usable backend on its own, and
+     * a stale preference must never make the app refuse to study.
+     */
+    val ankiBackendModeFlow: Flow<AnkiBackendMode> = preferencesFlow
+        .map { prefs ->
+            AnkiBackendMode.fromStableId(prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_MODE])
+                ?: AnkiBackendMode.AUTO
+        }
+        .distinctUntilChanged()
+
+    /**
+     * Persist the preferred backend mode. `false` means storage refused and the flow still holds the
+     * previous value, so the UI must not claim the switch happened. A preference change reaches only
+     * *future unbound* operations — never an active session, bound editor or durable transaction
+     * (DECISION-21-32).
+     */
+    suspend fun setAnkiBackendMode(mode: AnkiBackendMode): Boolean = try {
+        context.dataStore.edit { prefs ->
+            prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_MODE] = mode.stableId
+        }
+        true
+    } catch (error: IOException) {
+        AppLogger.e(tag, "Couldn't save the preferred Anki backend (${error.javaClass.simpleName})", error)
+        false
+    }
 
     /**
      * A bad profiles JSON blob is an optional-cache failure. Defaults are exposed

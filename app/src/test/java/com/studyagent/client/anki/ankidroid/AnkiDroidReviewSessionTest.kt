@@ -105,6 +105,8 @@ class AnkiDroidReviewSessionTest {
         search = CapabilitySupport.SUPPORTED,
         noteTypes = CapabilitySupport.SUPPORTED,
         cardTemplates = CapabilitySupport.SUPPORTED,
+        modelCss = CapabilitySupport.SUPPORTED,
+        modelEnrichedSchema = CapabilitySupport.SUPPORTED,
         specVersion = 2,
         reason = "provider contract"
     )

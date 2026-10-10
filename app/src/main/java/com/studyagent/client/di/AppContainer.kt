@@ -1,7 +1,15 @@
 package com.studyagent.client.di
 
 import android.content.Context
+import com.studyagent.client.core.anki.AnkiBackendPreferenceStore
 import com.studyagent.client.core.anki.AnkiBackendRegistry
+import com.studyagent.client.core.anki.AnkiBackendResolver
+import com.studyagent.client.core.anki.AnkiBackendStatusCenter
+import com.studyagent.client.core.anki.AnkiStudyBackendLockTracker
+import com.studyagent.client.core.anki.AnkiTransactionRecoveryPlanner
+import com.studyagent.client.core.anki.STUDY_SESSION_REQUIREMENTS
+import com.studyagent.client.core.anki.BackendResolutionResult
+import com.studyagent.client.core.anki.AnkiBackendRoutingDiagnostics
 import com.studyagent.client.core.anki.AnkiBackendSelector
 import com.studyagent.client.core.anki.ReviewCommitLedger
 import com.studyagent.client.data.anki.DataStoreReviewCommitStore
@@ -85,6 +93,7 @@ import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidGateway
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidHealthCheck
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidHealthProbe
 import com.studyagent.client.core.anki.AnkiBackend
+import com.studyagent.client.data.preferences.DataStoreAnkiBackendPreferenceStore
 import com.studyagent.client.data.preferences.DefaultProfileRepository
 import com.studyagent.client.data.preferences.PreferencesDataStore
 import com.studyagent.client.data.preferences.ProfileRepository
@@ -181,6 +190,38 @@ interface AppContainer {
     val ankiBackendSelector: AnkiBackendSelector
 
     /**
+     * GATE 21 — the user's persisted *preferred* backend mode (IMPLEMENTATION-21-05).
+     *
+     * A preference only. It answers "what should a new, unbound operation use?" and never routes an
+     * active session, bound editor or durable transaction (DECISION-21-32, INV-21-08).
+     */
+    val ankiBackendPreferenceStore: AnkiBackendPreferenceStore
+
+    /**
+     * GATE 21 — the single pre-binding routing policy (IMPLEMENTATION-21-06, DECISION-21-24).
+     * Deterministic, capability-aware, and never consulted during transaction recovery (INV-21-04).
+     */
+    val ankiBackendResolver: AnkiBackendResolver
+
+    /**
+     * GATE 21 — live per-backend status for Connection/Settings/Diagnostics
+     * (IMPLEMENTATION-21-18/20), plus the pre-binding resolution entry point.
+     */
+    val ankiBackendStatusCenter: AnkiBackendStatusCenter
+
+    /**
+     * GATE 21 — observable projection of every active session's immutable backend lock
+     * (DECISION-21-11/36). Study UI reads the *lock*, never the preference (INV-21-08).
+     */
+    val ankiStudyBackendLocks: AnkiStudyBackendLockTracker
+
+    /**
+     * GATE 21 — groups unresolved durable transactions by their persisted backend identity and routes
+     * each group to that exact backend (DECISION-21-14/30/31, INV-21-03/04).
+     */
+    val ankiTransactionRecoveryPlanner: AnkiTransactionRecoveryPlanner
+
+    /**
      * GATE 13 §28 (STEP 32.2) — the app's session-start site for a *local* Anki review.
      *
      * It is the one production object that turns "the user wants to study this deck" into an
@@ -199,6 +240,12 @@ interface AppContainer {
  */
 class DefaultAppContainer(private val context: Context) : AppContainer {
     private val ankiDroidScope = CoroutineScope(SupervisorJob() + DefaultDispatcherProvider().default)
+
+    /**
+     * GATE 21 — scope for backend *routing observation* only (preference + per-backend status
+     * flows). It owns no scheduler call and no mutation: the resolver itself is synchronous and pure.
+     */
+    private val backendRoutingScope = CoroutineScope(SupervisorJob() + DefaultDispatcherProvider().default)
 
     override val ankiDroidProviderClient: AnkiDroidProviderClient by lazy {
         AndroidAnkiDroidProbe(context)
@@ -446,11 +493,39 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
     }
 
     override val ankiBackendRegistry: AnkiBackendRegistry by lazy {
+        // One application-level source of registered backend instances (DECISION-21-23). A PC agent
+        // backend joins this list when one exists; none is registered today, so PC_AGENT resolves to
+        // an honest "not available" instead of a silent AnkiDroid substitute (DECISION-21-26).
         AnkiBackendRegistry(listOf(ankiDroidBackend))
     }
 
     override val ankiBackendSelector: AnkiBackendSelector by lazy {
         AnkiBackendSelector(ankiBackendRegistry)
+    }
+
+    override val ankiBackendPreferenceStore: AnkiBackendPreferenceStore by lazy {
+        DataStoreAnkiBackendPreferenceStore(preferencesDataStore, backendRoutingScope)
+    }
+
+    override val ankiBackendResolver: AnkiBackendResolver by lazy {
+        AnkiBackendResolver(ankiBackendRegistry)
+    }
+
+    override val ankiBackendStatusCenter: AnkiBackendStatusCenter by lazy {
+        AnkiBackendStatusCenter(
+            registry = ankiBackendRegistry,
+            preferenceStore = ankiBackendPreferenceStore,
+            resolver = ankiBackendResolver,
+            scope = backendRoutingScope
+        )
+    }
+
+    override val ankiStudyBackendLocks: AnkiStudyBackendLockTracker by lazy {
+        AnkiStudyBackendLockTracker()
+    }
+
+    override val ankiTransactionRecoveryPlanner: AnkiTransactionRecoveryPlanner by lazy {
+        AnkiTransactionRecoveryPlanner(ankiBackendRegistry)
     }
 
     override val dispatchers: DispatcherProvider by lazy { DefaultDispatcherProvider() }
@@ -586,7 +661,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             registry = ankiBackendRegistry,
             selector = ankiBackendSelector,
             scope = ankiDroidScope,
-            dispatch = { request -> machineBackedSession?.startAnkiStudy(request) }
+            dispatch = { request -> machineBackedSession?.startAnkiStudy(request) },
+            // GATE 21 — a new session uses the user's preferred backend; from the moment the session
+            // exists, its own locked identity is the only routing input (INV-21-08/09).
+            preferenceProvider = { ankiBackendPreferenceStore.mode.value }
         )
     }
 
@@ -607,6 +685,11 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             ankiEffects = com.studyagent.client.core.study.AnkiStudyEffectExecutor(
                 registry = ankiBackendRegistry,
                 ledger = reviewCommitLedger,
+                // GATE 21 — publish each session's immutable backend lock for Study UI/diagnostics.
+                sessionLocks = ankiStudyBackendLocks,
+                // GATE 21 — one shared recovery router, so commit recovery and the diagnostics
+                // routing snapshot classify "why is this blocked?" identically.
+                transactionRecovery = ankiTransactionRecoveryPlanner,
                 // GATE 13 — the separate reviewer-action ledger. Without it actions are refused
                 // before dispatch (fail closed), so both ledgers are wired together.
                 actionLedger = reviewerActionLedger,
@@ -649,6 +732,41 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         )
     }
 
+    /**
+     * GATE 21 — the routing snapshot Diagnostics renders.
+     *
+     * The locked role comes from the lock tracker, the only authority that knows which backend a
+     * session is locked to (INV-21-05). When more than one session holds a lock the row reports how
+     * many instead of naming one arbitrarily and implying it is "the" active session.
+     *
+     * Availability is the last KNOWN status per backend and resolution is a pure function of the
+     * registry descriptors — nothing here probes or refreshes, so opening Diagnostics can never
+     * change which backend a session resolves to (INV-21-19).
+     *
+     * The transaction role is reported only when a transaction is actually in flight. There is no
+     * ambient "current transaction backend" to sample, so the row is absent rather than guessed.
+     */
+    private fun ankiBackendRoutingDiagnostics(): AnkiBackendRoutingDiagnostics {
+        val snapshot = ankiBackendStatusCenter.snapshotNow()
+        val heldLocks = ankiStudyBackendLocks.locks.value
+        // Exactly one lock: name it. Several: report the count and name none of them.
+        val lockedRow = if (heldLocks.size == 1) heldLocks.values.single().backendId else null
+        val resolution = ankiBackendStatusCenter.resolveFor(
+            requiredCapabilities = STUDY_SESSION_REQUIREMENTS,
+            purpose = "diagnostics"
+        )
+        val resolved = resolution as? BackendResolutionResult.Resolved
+        return AnkiBackendRoutingDiagnostics(
+            preferred = ankiBackendPreferenceStore.mode.value,
+            resolved = resolved?.backendId,
+            resolvedReason = resolved?.reason,
+            lockedSessionBackend = lockedRow,
+            lockedSessionCount = heldLocks.size,
+            transactionBackend = null,
+            availability = snapshot.entries.associate { it.id to it.statusToken }
+        )
+    }
+
     override val diagnosticsRepository: DiagnosticsRepository by lazy {
         DefaultDiagnosticsRepository(
             connectionRepository,
@@ -676,7 +794,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             // GATE 04: gateway + backend for capability matrix (§64/§121)
             ankiDroidGateway = ankiDroidGateway,
             ankiDroidBackend = ankiDroidBackend as? AnkiDroidBackend,
-            reviewCommitLedger = reviewCommitLedger
+            reviewCommitLedger = reviewCommitLedger,
+            // GATE 21 DECISION-21-35: a support report must show preferred / resolved / locked /
+            // transaction as FOUR distinct rows. Sampled on demand so the snapshot is current.
+            ankiBackendRouting = ::ankiBackendRoutingDiagnostics
         )
     }
 
