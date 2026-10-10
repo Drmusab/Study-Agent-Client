@@ -177,7 +177,33 @@ data class AnkiCapabilities(
      * `false` (everywhere at this pin) means an ambiguous creation is shown for user attestation
      * and never auto-resolved — no heuristic search is ever treated as proof (CONTRACT-18-20/21).
      */
-    val authoritativeCreationReconciliation: Boolean = false
+    val authoritativeCreationReconciliation: Boolean = false,
+
+    /**
+     * GATE 19 — can fetch one note type's enriched schema (templates, CSS, LaTeX preamble) through
+     * the backend's public read API. When false, [AnkiBackend.getNoteModel] is refused and only
+     * the lightweight listing is available.
+     */
+    val noteModelSchema: Boolean = false,
+
+    /**
+     * GATE 19 — can read individual card-template metadata (name, qfmt/afmt, deck override) for a
+     * note type. Implied by [noteModelSchema] on the AnkiDroid adapter, but modelled separately so
+     * a future backend can expose CSS without template source or vice-versa.
+     */
+    val noteTemplateListing: Boolean = false,
+
+    /**
+     * GATE 19 — can read raw template source (qfmt/afmt). When false, template metadata still
+     * includes name/ordinal but the source fields stay null (diagnostics say "source unavailable").
+     */
+    val noteTemplateSourceRead: Boolean = false,
+
+    /**
+     * GATE 19 — can read model-level CSS. When false, model CSS is null and compatibility
+     * inspection reports CSS as unavailable.
+     */
+    val noteModelCssRead: Boolean = false
 ) {
     companion object {
         /** Safe default for a backend whose probe has not completed. */

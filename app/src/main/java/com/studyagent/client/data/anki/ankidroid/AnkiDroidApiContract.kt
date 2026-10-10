@@ -523,6 +523,54 @@ object AnkiDroidApiContract {
      */
     const val MODEL_DECK_ID_COLUMN: String = "deck_id"
 
+    /**
+     * `Model.CSS` — model-level stylesheet (`noteType.css`). Read-only inspection data for GATE 19.
+     * The pinned provider's `addNoteTypeToCursor` writes it (C1); it is simply not in the GATE 16/18
+     * projection. GATE 08's renderer does NOT inject this CSS — rendered cards from the provider
+     * already carry the final CSS application inline (or not); this field is diagnostics/source
+     * inspection only.
+     */
+    const val MODEL_CSS_COLUMN: String = "css"
+
+    /** `Model.SORT_FIELD_INDEX` — 0-based index of the sort field, when exposed by the provider. */
+    const val MODEL_SORT_FIELD_INDEX_COLUMN: String = "sort_field_index"
+
+    /** `Model.NOTE_COUNT` — informational note count for this model, when exposed. */
+    const val MODEL_NOTE_COUNT_COLUMN: String = "note_count"
+
+    /** `Model.LATEX_PREAMBLE` — LaTeX preamble, when exposed. */
+    const val MODEL_LATEX_PREAMBLE_COLUMN: String = "latex_preamble"
+
+    /** `Model.LATEX_SVG` — whether to render LaTeX as SVG, when exposed. */
+    const val MODEL_LATEX_SVG_COLUMN: String = "latex_svg"
+
+    /** URI path segment for a model's template collection (`models/<id>/templates`). */
+    const val MODEL_TEMPLATES_PATH_SEGMENT: String = "templates"
+
+    /**
+     * `Model.Template.NAME` (`Model.TEMPLATE_NAME` in some releases) — template display name,
+     * never identity. GATE 07 already reads the equivalent per-card as `card_name`.
+     */
+    const val TEMPLATE_NAME_COLUMN: String = "name"
+
+    /** `Model.Template.ORD` — template ordinal (0-based), present as `_id` or `ord` depending on release. */
+    const val TEMPLATE_ORD_COLUMN: String = "ord"
+
+    /** `Model.Template.QUESTION_FORMAT` — raw qfmt source. */
+    const val TEMPLATE_QFMT_COLUMN: String = "question_format"
+
+    /** `Model.Template.ANSWER_FORMAT` — raw afmt source. */
+    const val TEMPLATE_AFMT_COLUMN: String = "answer_format"
+
+    /** `Model.Template.DECK_ID` — template target deck override, when set; null otherwise. */
+    const val TEMPLATE_DECK_ID_COLUMN: String = "deck_id"
+
+    /** `Model.Template.BROWSER_QUESTION_FORMAT` — browser qfmt; optional (may not exist in all releases). */
+    const val TEMPLATE_BROWSER_QFMT_COLUMN: String = "browser_question_format"
+
+    /** `Model.Template.BROWSER_ANSWER_FORMAT` — browser afmt; optional. */
+    const val TEMPLATE_BROWSER_AFMT_COLUMN: String = "browser_answer_format"
+
     /** GATE 18 creation schema read: the GATE 16 columns plus the display-only default deck. */
     val MODEL_CREATION_PROJECTION: Array<String> = arrayOf(
         MODEL_ID_COLUMN,
@@ -531,6 +579,54 @@ object AnkiDroidApiContract {
         MODEL_TYPE_COLUMN,
         MODEL_NUM_CARDS_COLUMN,
         MODEL_DECK_ID_COLUMN
+    )
+
+    /**
+     * GATE 19 enriched model read: the creation-schema columns plus CSS and optional metadata.
+     * Optional columns (latex_*, note_count, sort_field_index) are queried leniently: the mapper
+     * tolerates their absence because some AnkiDroid builds are known to skip unknown names in
+     * `addNoteTypeToCursor` (GATE 05/07 provenance tables document this skip behaviour).
+     */
+    val MODEL_ENRICHED_PROJECTION: Array<String> = arrayOf(
+        MODEL_ID_COLUMN,
+        MODEL_NAME_COLUMN,
+        MODEL_FIELD_NAMES_COLUMN,
+        MODEL_TYPE_COLUMN,
+        MODEL_NUM_CARDS_COLUMN,
+        MODEL_DECK_ID_COLUMN,
+        MODEL_CSS_COLUMN,
+        MODEL_SORT_FIELD_INDEX_COLUMN,
+        MODEL_NOTE_COUNT_COLUMN,
+        MODEL_LATEX_PREAMBLE_COLUMN,
+        MODEL_LATEX_SVG_COLUMN
+    )
+
+    /**
+     * GATE 19 template listing projection. Columns not present in a given AnkiDroid build cause
+     * the `addNoteTypeToTemplatesCursor` row builder to throw (per the same strictness as
+     * `addCardToCursor` documented at GATE 07) — we defensively catch and degrade the template
+     * load to partial data rather than failing the entire model read.
+     */
+    val TEMPLATE_PROJECTION: Array<String> = arrayOf(
+        TEMPLATE_ORD_COLUMN,
+        TEMPLATE_NAME_COLUMN,
+        TEMPLATE_QFMT_COLUMN,
+        TEMPLATE_AFMT_COLUMN,
+        TEMPLATE_DECK_ID_COLUMN
+    )
+
+    /**
+     * Extended template projection: includes browser format columns. Queried only after the base
+     * projection succeeds (fail-soft fallback).
+     */
+    val TEMPLATE_EXTENDED_PROJECTION: Array<String> = arrayOf(
+        TEMPLATE_ORD_COLUMN,
+        TEMPLATE_NAME_COLUMN,
+        TEMPLATE_QFMT_COLUMN,
+        TEMPLATE_AFMT_COLUMN,
+        TEMPLATE_DECK_ID_COLUMN,
+        TEMPLATE_BROWSER_QFMT_COLUMN,
+        TEMPLATE_BROWSER_AFMT_COLUMN
     )
 
     /**

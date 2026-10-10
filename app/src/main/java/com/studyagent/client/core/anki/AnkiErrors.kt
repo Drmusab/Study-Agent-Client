@@ -200,6 +200,16 @@ sealed interface AnkiError {
     ) : AnkiError
 
     /**
+     * GATE 19 — a requested card template does not exist on the referenced model (deleted/renumbered
+     * between the metadata read and the deep read). The caller must refresh model metadata rather
+     * than guess.
+     */
+    data class TemplateNotFound(
+        val template: AnkiCardTemplateRef? = null,
+        override val message: String = "The requested card template no longer exists on this note type."
+    ) : AnkiError
+
+    /**
      * GATE 18 — the backend (or the pre-boundary media probe) refused one media attachment:
      * unreadable source, unknown MIME, oversize, or a store refusal. [detail] is a small stable
      * token, never provider text or content. Media storage is a separate irreversible operation,
