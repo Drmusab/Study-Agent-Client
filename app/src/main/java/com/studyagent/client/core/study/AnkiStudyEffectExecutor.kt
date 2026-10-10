@@ -60,7 +60,14 @@ class AnkiStudyEffectExecutor(
      * production coordinator over [actionLedger] and this process's commit ledger (the rating
      * side of §23's mutual exclusion); tests may substitute a scripted one.
      */
-    actionCoordinator: ReviewerActionCoordinator? = null
+    actionCoordinator: ReviewerActionCoordinator? = null,
+    /**
+     * GATE 21 — observable projection of each session's immutable backend lock
+     * (DECISION-21-11/36, IMPLEMENTATION-21-19). Written exactly once per successful start and
+     * cleared when the session ends; it can never *change* a lock, and a preference change never
+     * reaches it (INV-21-08). Absent in tests that do not assert on the lock.
+     */
+    private val sessionLocks: AnkiStudyBackendLockTracker? = null
 ) : ReviewCommitCoordinator {
 
     private val reviewerActionCoordinator: ReviewerActionCoordinator? = actionCoordinator
@@ -562,6 +569,9 @@ class AnkiStudyEffectExecutor(
             effect.startedAtMs, backend.capabilities.value, request.studySessionId
         )
         val result = backend.beginReview(BeginReviewRequest(context))
+        // GATE 21 — the lock becomes visible only once the backend actually accepted the session, so
+        // a refused start never advertises a backend it is not bound to.
+        if (result is AnkiResult.Success) sessionLocks?.locked(context)
         val prior = if (result is AnkiResult.Success) priorUnresolved(id) else 0
         return AnkiStudyEvent.Begun(effect.epoch, result, prior)
     }
@@ -769,6 +779,8 @@ class AnkiStudyEffectExecutor(
     }
 
     private suspend fun endReview(effect: AnkiStudyEffect.EndReview) {
+        // Ending the session is the ONLY way to release its backend lock (DECISION-21-11).
+        sessionLocks?.released(effect.session.context.studySessionId)
         try {
             registry.find(effect.session.context.backendId)?.endReview(effect.session)
         } catch (cancelled: CancellationException) {

@@ -2,6 +2,10 @@ package com.studyagent.client.ui.screens.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.studyagent.client.core.anki.AnkiBackendMode
+import com.studyagent.client.core.anki.AnkiBackendPreferenceStore
+import com.studyagent.client.core.anki.AnkiBackendStatusCenter
+import com.studyagent.client.core.anki.AnkiRequiredCapability
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.voice.tts.SegmentLanguage
 import com.studyagent.client.core.voice.stt.RecognitionCapabilities
@@ -14,10 +18,13 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthRepository
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthSnapshot
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidLauncher
 import com.studyagent.client.data.preferences.PreferencesDataStore
+import com.studyagent.client.ui.components.anki.AnkiBackendSelectionUi
+import com.studyagent.client.ui.components.anki.buildAnkiBackendSelectionUi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -26,8 +33,56 @@ class SettingsViewModel(
     private val speechOrchestrator: SpeechOrchestrator,
     private val recognitionOrchestrator: SpeechRecognitionOrchestrator,
     private val ankiDroidHealthRepository: AnkiDroidHealthRepository,
-    private val ankiDroidLauncher: AnkiDroidLauncher
+    private val ankiDroidLauncher: AnkiDroidLauncher,
+    /**
+     * GATE 21 — backend selection (IMPLEMENTATION-21-05/18). Optional so existing call sites and
+     * tests keep compiling; when absent the selector section simply does not render.
+     */
+    private val ankiBackendStatusCenter: AnkiBackendStatusCenter? = null,
+    private val ankiBackendPreferenceStore: AnkiBackendPreferenceStore? = null
 ) : ViewModel() {
+
+    /**
+     * GATE 21 — live backend status + the user's preferred mode, as one selector model.
+     *
+     * `null` when this screen was built without the backend components. The UI must not invent a
+     * backend list, so absent means "section hidden", never "everything available".
+     */
+    val ankiBackendSelection: StateFlow<AnkiBackendSelectionUi?> = run {
+        val center = ankiBackendStatusCenter
+        if (center == null) {
+            MutableStateFlow<AnkiBackendSelectionUi?>(null)
+        } else {
+            center.status.map { snapshot ->
+                // The resolution shown next to "Automatic" is a *pre-binding* preview only; it never
+                // describes an active session, whose backend is its own lock (INV-21-08).
+                buildAnkiBackendSelectionUi(
+                    snapshot = snapshot,
+                    resolution = center.resolveFor(
+                        requiredCapabilities = setOf(AnkiRequiredCapability.REVIEW),
+                        purpose = "settings_preview"
+                    )
+                )
+            }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    /** Content-free token when a preference write failed; null means the last write was accepted. */
+    val ankiBackendPreferenceError: StateFlow<String?> =
+        ankiBackendPreferenceStore?.lastWriteError ?: MutableStateFlow<String?>(null)
+
+    /**
+     * Persist a new preferred backend (DECISION-21-32).
+     *
+     * This changes *future unbound* operations only. An active StudySession keeps its locked backend,
+     * a bound editor keeps the backend it opened against, and every unresolved durable transaction
+     * keeps the backend it was written to — so no re-route happens here and none may be implied by the
+     * UI (INV-21-08/14/15, VER-21-08/15/16).
+     */
+    fun selectAnkiBackend(mode: AnkiBackendMode) {
+        val store = ankiBackendPreferenceStore ?: return
+        viewModelScope.launch { store.setMode(mode) }
+    }
 
     /**
      * GATE 02 — live AnkiDroid integration health.

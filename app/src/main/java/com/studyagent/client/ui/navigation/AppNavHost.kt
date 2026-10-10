@@ -301,7 +301,9 @@ fun AppNavHost(
                     recognitionOrchestrator = container.recognitionOrchestrator,
                     speechOrchestrator = container.speechOrchestrator,
                     preferencesDataStore = container.preferencesDataStore,
-                    studyAudioRouteCoordinator = container.studyAudioRouteCoordinator
+                    studyAudioRouteCoordinator = container.studyAudioRouteCoordinator,
+                    // GATE 21 — Study shows the session's LOCKED backend, never the preference.
+                    ankiSessionLocks = container.ankiStudyBackendLocks
                 )
             }
             val studyScope = rememberCoroutineScope()
@@ -335,7 +337,10 @@ fun AppNavHost(
                     speechOrchestrator = container.speechOrchestrator,
                     recognitionOrchestrator = container.recognitionOrchestrator,
                     ankiDroidHealthRepository = container.ankiDroidHealthRepository,
-                    ankiDroidLauncher = container.ankiDroidLauncher
+                    ankiDroidLauncher = container.ankiDroidLauncher,
+                    // GATE 21 — explicit backend selection with live availability/reason.
+                    ankiBackendStatusCenter = container.ankiBackendStatusCenter,
+                    ankiBackendPreferenceStore = container.ankiBackendPreferenceStore
                 )
             }
             SettingsScreen(

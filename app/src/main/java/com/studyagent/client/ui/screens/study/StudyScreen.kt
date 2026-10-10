@@ -101,6 +101,9 @@ import com.studyagent.client.ui.theme.AppSpacing
  * The RMS level flow is deliberately *not* collected here — the visualizer only needs
  * `isActive`, so a hot microphone never recomposes the screen.
  */
+/** GATE 21 — semantics tag for the locked-backend indicator (IMPLEMENTATION-21-19). */
+const val STUDY_LOCKED_BACKEND_TEST_TAG = "study_locked_anki_backend"
+
 @Composable
 fun StudyScreen(
     viewModel: StudyViewModel,
@@ -118,6 +121,8 @@ fun StudyScreen(
     val isListening by viewModel.isListening.collectAsStateWithLifecycle()
     val isSpeaking by viewModel.isSpeaking.collectAsStateWithLifecycle()
     val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
+    // GATE 21 — the locked Anki backend for this session (null = no local Anki session bound).
+    val lockedAnkiBackend by viewModel.lockedAnkiBackendLabel.collectAsStateWithLifecycle()
     // Route flows are optional (no coordinator in some test/fake wirings): collect safely
     // with lifecycle awareness. The nullable StateFlow is collected only when present;
     // otherwise the value stays null and no recomposition is scheduled.
@@ -214,6 +219,20 @@ fun StudyScreen(
                         remainingCards = session?.remainingCards ?: 0,
                         phase = phase
                     )
+
+                    // GATE 21 — which backend this session is LOCKED to (IMPLEMENTATION-21-19).
+                    // From the session lock, never from the global preference: the two may differ
+                    // while a session runs, and this screen is where that difference matters most
+                    // (INV-21-08, VER-21-08). Absent for the remote study path, which binds nothing
+                    // here — so it renders nothing instead of guessing.
+                    lockedAnkiBackend?.let { label ->
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AppColors.contentMuted,
+                            modifier = Modifier.testTag(STUDY_LOCKED_BACKEND_TEST_TAG)
+                        )
+                    }
 
                     // A better route is waiting for the turn boundary (§41/§42).
                     if (pendingAudioRoute != null) {

@@ -1,6 +1,7 @@
 package com.studyagent.client.ui.screens.settings
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -77,6 +79,9 @@ const val ANKI_REFRESH_TEST_TAG = "settings_anki_refresh"
 /** Semantics tag for the Anki integration "Open AnkiDroid" action (GATE 02 §31). */
 const val ANKI_OPEN_TEST_TAG = "settings_anki_open"
 
+/** GATE 21 — semantics tag prefix for one backend-selection row, suffixed with the mode token. */
+const val ANKI_BACKEND_OPTION_TEST_TAG = "settings_anki_backend_"
+
 private fun testTagSlug(text: String): String {
     val sb = StringBuilder(text.length)
     for (c in text.lowercase()) {
@@ -100,6 +105,8 @@ fun SettingsScreen(
     val recognitionCapabilities by viewModel.recognitionCapabilities.collectAsStateWithLifecycle()
     val persistenceError by viewModel.persistenceError.collectAsStateWithLifecycle()
     val ankiHealth by viewModel.ankiDroidHealth.collectAsStateWithLifecycle()
+    // GATE 21 — null when this screen was built without the backend components; the section hides.
+    val ankiBackendSelection by viewModel.ankiBackendSelection.collectAsStateWithLifecycle()
     var showResetConfirmation by rememberSaveable { mutableStateOf(false) }
     var showAdvanced by rememberSaveable { mutableStateOf(false) }
 
@@ -462,10 +469,65 @@ fun SettingsScreen(
 
             // ------------------------------------------------------------------------------
             // Anki integration (GATE 02). Status only: which Anki sources exist and whether the
-            // local one can be reached. Backend selection is a later gate, and this section never
-            // starts or changes a study session (§39/§78).
+            // local one can be reached. This section never starts or changes a study session
+            // (§39/§78).
             // ------------------------------------------------------------------------------
             item(key = "anki-integration") { SettingsSectionLabel("Anki integration") }
+
+            // GATE 21 — explicit backend selection (IMPLEMENTATION-21-18). Every mode stays pickable
+            // even when nothing answers: choosing an unavailable backend must produce a blocked
+            // operation, never a silent substitute (DECISION-21-26, INV-21-10).
+            ankiBackendSelection?.let { selection ->
+                item(key = "anki-backend-selection") {
+                    SettingsCard {
+                        SectionHeader(
+                            title = "Anki backend",
+                            color = AppColors.actionAccent
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        selection.options.forEach { option ->
+                            val selected = option.mode == selection.selected
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { viewModel.selectAnkiBackend(option.mode) }
+                                    .padding(vertical = 6.dp)
+                                    .testTag("$ANKI_BACKEND_OPTION_TEST_TAG${option.mode.stableId}"),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(selected = selected, onClick = { viewModel.selectAnkiBackend(option.mode) })
+                                Spacer(modifier = Modifier.width(AppSpacing.XS))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = option.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = AppColors.contentPrimary
+                                    )
+                                    Text(
+                                        text = option.statusLabel,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = AppColors.contentMuted
+                                    )
+                                    option.detail?.let { detail ->
+                                        Text(
+                                            text = detail,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = AppColors.contentMuted
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        // DECISION-21-37 — say what a switch does and does not touch.
+                        Text(
+                            text = selection.switchEffectNotice,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppColors.contentMuted
+                        )
+                    }
+                }
+            }
 
             item(key = "anki-integration-status") {
                 SettingsCard {
