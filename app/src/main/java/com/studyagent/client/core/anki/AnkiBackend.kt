@@ -373,9 +373,26 @@ interface AnkiBackend {
      * default deck id (display-only — the pinned provider accepts no deck at creation,
      * CONTRACT-18-05). The creation UI derives every field editor from this read, never from
      * rendered card HTML (INV-18-04).
+     *
+     * GATE 19: this returns a lightweight summary (no template source, no CSS). Callers that need
+     * template metadata or CSS use [getNoteModel] for the enriched read.
      */
     suspend fun getNoteModels(): AnkiResult<List<AnkiNoteModel>> =
         AnkiResult.Failure(AnkiError.UnsupportedAction(action = "note_model_listing"))
+
+    /**
+     * GATE 19 — read-only deep inspection of one note type by stable ref, returning its ordered
+     * card templates (with source when [AnkiCapabilities.noteTemplateSourceRead] is true),
+     * model-level CSS (when [AnkiCapabilities.noteModelCssRead] is true), sort-field index,
+     * note count and LaTeX metadata when exposed.
+     *
+     * This is an inspection read, not a rendering path: rendering remains GATE 07/08/09, which
+     * consumes backend-rendered card HTML. The raw qfmt/afmt/CSS returned here are diagnostic
+     * metadata only (INV-19-12). Default refuses with UnsupportedAction so an adapter that has
+     * not audited its deep-read contract never looks like it supports one.
+     */
+    suspend fun getNoteModel(ref: AnkiNoteModelRef): AnkiResult<AnkiNoteModelEnriched> =
+        AnkiResult.Failure(AnkiError.UnsupportedAction(action = "note_model_schema"))
 
     /**
      * GATE 18 — ONE irreversible media-store operation (CONTRACT-18-09). The adapter must classify

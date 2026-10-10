@@ -43,7 +43,9 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
 import com.studyagent.client.core.anki.AnkiMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCardGateway
+import com.studyagent.client.data.anki.ankidroid.AnkiDroidModelGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteGateway
+import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidModelGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidNoteMutationGateway
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidNoteMutationGateway
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidCreationGateway
@@ -266,6 +268,14 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         DefaultAnkiDroidNoteGateway(providerClient = ankiDroidProviderClient)
     }
 
+    /**
+     * GATE 19 — enriched model-schema gateway (templates, CSS, sort/LaTeX metadata). Read-only;
+     * no write permit needed.
+     */
+    private val ankiDroidModelGateway: AnkiDroidModelGateway by lazy {
+        DefaultAnkiDroidModelGateway(providerClient = ankiDroidProviderClient)
+    }
+
     override val ankiDroidCardBrowserGateway: AnkiDroidCardBrowserGateway by lazy {
         UnsupportedAnkiDroidCardBrowserGateway()
     }
@@ -319,6 +329,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
             // GATE 18 — note/media creation writer and creation read side. Shares the same permit,
             // so creation is serialized against every other mutation family.
             creationGateway = ankiDroidCreationGateway,
+            // GATE 19 — enriched model-schema read (templates, CSS). Read-only; no permit needed.
+            modelGateway = ankiDroidModelGateway,
             // GATE 11 — the single AnkiDroid writer. Its scope outlives callers so an issued
             // provider call is never abandoned mid-flight by a cancelled screen or session.
             ratingGateway = DefaultAnkiDroidRatingGateway(

@@ -56,6 +56,8 @@ object AnkiDroidCompatibilityPolicy {
                 search = CapabilitySupport.UNSUPPORTED,
                 noteTypes = CapabilitySupport.UNSUPPORTED,
                 cardTemplates = CapabilitySupport.UNSUPPORTED,
+                modelCss = CapabilitySupport.UNSUPPORTED,
+                modelEnrichedSchema = CapabilitySupport.UNSUPPORTED,
                 specVersion = spec,
                 reason = "spec $spec below minimum $MIN_SUPPORTED_SPEC",
                 cardBrowser = CapabilitySupport.UNSUPPORTED,
@@ -93,6 +95,10 @@ object AnkiDroidCompatibilityPolicy {
             search = CapabilitySupport.SUPPORTED,
             noteTypes = CapabilitySupport.SUPPORTED,
             cardTemplates = CapabilitySupport.SUPPORTED,
+            // GATE 19 — the pinned `models`/`models/<id>` endpoint exposes a `css` column via
+            // `addNoteTypeToCursor` (C1), and `models/<id>/templates` exposes template source.
+            modelCss = CapabilitySupport.SUPPORTED,
+            modelEnrichedSchema = CapabilitySupport.SUPPORTED,
             specVersion = spec,
             reason = "provider contract supported at spec $spec",
             // The public card URI is an item lookup only; generic note search is not a bounded
@@ -188,7 +194,15 @@ object AnkiDroidCompatibilityPolicy {
             noteModelListing = true,
             createNotes = true,
             storeMedia = true,
-            authoritativeCreationReconciliation = false
+            authoritativeCreationReconciliation = false,
+            // GATE 19 — enriched note-model read (templates, CSS, sort/LaTeX metadata) is implemented
+            // through the audited public `models/<id>` and `models/<id>/templates` reads. The backend
+            // drops these flags when no model gateway is wired. Maturity stays IMPLEMENTED: no
+            // real-device deep-read run has happened. Draft preview stays unsupported (no API).
+            noteModelSchema = true,
+            noteTemplateListing = true,
+            noteTemplateSourceRead = true,
+            noteModelCssRead = true
         )
     }
 }
@@ -236,6 +250,10 @@ data class AnkiDroidApiCapabilityReport(
     val search: CapabilitySupport,
     val noteTypes: CapabilitySupport,
     val cardTemplates: CapabilitySupport,
+    /** GATE 19 — model CSS readable via the `css` column. */
+    val modelCss: CapabilitySupport,
+    /** GATE 19 — enriched model schema (templates + CSS + sort/LaTeX metadata) readable. */
+    val modelEnrichedSchema: CapabilitySupport,
     val specVersion: Int?,
     val reason: String,
     val cardBrowser: CapabilitySupport = CapabilitySupport.UNSUPPORTED,
@@ -261,6 +279,8 @@ data class AnkiDroidApiCapabilityReport(
             search = CapabilitySupport.UNKNOWN,
             noteTypes = CapabilitySupport.UNKNOWN,
             cardTemplates = CapabilitySupport.UNKNOWN,
+            modelCss = CapabilitySupport.UNKNOWN,
+            modelEnrichedSchema = CapabilitySupport.UNKNOWN,
             specVersion = null,
             reason = "spec not known",
             cardBrowser = CapabilitySupport.UNKNOWN,
@@ -296,7 +316,9 @@ data class AnkiDroidApiCapabilityReport(
         AnkiDroidCapabilityDetail("mediaWrite", mediaWrite, maturityFor(mediaWrite, implemented.storeMedia), "GATE 18 — insert(media)"),
         AnkiDroidCapabilityDetail("search", search, maturityFor(search, implemented.search), "provider contract"),
         AnkiDroidCapabilityDetail("noteTypes", noteTypes, maturityFor(noteTypes, implemented.noteModelListing), "GATE 18 — models listing"),
-        AnkiDroidCapabilityDetail("cardTemplates", cardTemplates, maturityFor(cardTemplates, implemented.renderedCards), "provider contract"),
+        AnkiDroidCapabilityDetail("cardTemplates", cardTemplates, maturityFor(cardTemplates, implemented.noteTemplateListing), "GATE 19 — models/<id>/templates"),
+        AnkiDroidCapabilityDetail("modelCss", modelCss, maturityFor(modelCss, implemented.noteModelCssRead), "GATE 19 — css column on models"),
+        AnkiDroidCapabilityDetail("modelEnrichedSchema", modelEnrichedSchema, maturityFor(modelEnrichedSchema, implemented.noteModelSchema), "GATE 19 — enriched model schema deep read"),
         AnkiDroidCapabilityDetail("cardBrowser", cardBrowser, maturityFor(cardBrowser, implemented.cardBrowser.canBrowse), "no public bounded card-list URI in the pinned contract"),
         AnkiDroidCapabilityDetail("cardSearch", cardSearch, maturityFor(cardSearch, implemented.cardBrowser.canSearchText), "known-card hydration is not collection-wide search")
     )

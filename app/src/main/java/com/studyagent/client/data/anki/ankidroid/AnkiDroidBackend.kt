@@ -14,6 +14,7 @@ import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiNoteModel
+import com.studyagent.client.core.anki.AnkiNoteModelEnriched
 import com.studyagent.client.core.anki.AnkiNoteModelRef
 import com.studyagent.client.core.anki.AnkiNoteRef
 import com.studyagent.client.core.anki.create.CreateNoteBackendRequest
@@ -142,7 +143,13 @@ class AnkiDroidBackend(
      * permit as every other mutation family, so a creation insert can never overlap a rating,
      * reviewer action or note edit.
      */
-    private val creationGateway: AnkiDroidCreationGateway? = null
+    private val creationGateway: AnkiDroidCreationGateway? = null,
+    /**
+     * GATE 19 — read-only enriched model gateway (templates, CSS, LaTeX/sort metadata). Absent =
+     * the single-model deep read is refused truthfully and `noteModelSchema` stays false. It is
+     * read-only by construction (no mutation family exists on it).
+     */
+    private val modelGateway: AnkiDroidModelGateway? = null
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
@@ -228,7 +235,14 @@ class AnkiDroidBackend(
         createNotes = capabilities.createNotes && creationGateway != null,
         noteModelListing = capabilities.noteModelListing && creationGateway != null,
         storeMedia = capabilities.storeMedia && creationGateway != null,
-        authoritativeCreationReconciliation = false
+        authoritativeCreationReconciliation = false,
+        // GATE 19 — deep model schema + template source require the model gateway. CSS and template
+        // source are bundled into the same read at the pinned AnkiDroid contract, so the four flags
+        // rise together; a future backend that can read CSS but not qfmt would split them.
+        noteModelSchema = capabilities.noteModelSchema && modelGateway != null,
+        noteTemplateListing = capabilities.noteTemplateListing && modelGateway != null,
+        noteTemplateSourceRead = capabilities.noteTemplateSourceRead && modelGateway != null,
+        noteModelCssRead = capabilities.noteModelCssRead && modelGateway != null
     )
 
     /**
@@ -302,6 +316,39 @@ class AnkiDroidBackend(
             is CreationModelsRead.Failed -> AnkiResult.Failure(
                 AnkiError.QueryFailure(causeCategory = "model_listing_failed")
             )
+        }
+    }
+
+    /**
+     * GATE 19 — read-only deep inspection of one note type by stable ref, returning enriched
+     * metadata (ordered templates with qfmt/afmt when readable, model CSS, sort-field index,
+     * note count, LaTeX metadata). Read-only and idempotent; template-source loads are fail-soft
+     * (model metadata still returns when the templates sub-resource errors on older AnkiDroid
+     * builds). The returned qfmt/afmt/CSS are inspection metadata only (INV-19-12); rendering
+     * remains GATE 07's backend-authoritative output.
+     */
+    override suspend fun getNoteModel(ref: AnkiNoteModelRef): AnkiResult<AnkiNoteModelEnriched> {
+        val reader = modelGateway
+            ?: return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "note_model_schema"))
+        if (ref.backendId != id) {
+            return AnkiResult.Failure(AnkiError.InvalidRequest(detail = "model_ref_foreign_backend"))
+        }
+        if (!capabilities.value.noteModelSchema) {
+            return AnkiResult.Failure(AnkiError.UnsupportedAction(action = "note_model_schema"))
+        }
+        val authority = currentAuthority()
+            ?: return AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "authority-unknown"))
+        return when (val snapshot = reader.queryEnrichedModel(authority, ref)) {
+            is AnkiResult.Failure -> snapshot
+            is AnkiResult.Success -> {
+                val collectionKey = ref.collectionKey
+                when (val mapped = AnkiDroidModelMapper.mapEnrichedModel(id, snapshot.value, collectionKey)) {
+                    is AnkiDroidModelMapper.EnrichedModelOutcome.Malformed ->
+                        AnkiResult.Failure(AnkiError.MalformedResponse(detail = mapped.token))
+                    is AnkiDroidModelMapper.EnrichedModelOutcome.Model ->
+                        AnkiResult.Success(mapped.enriched)
+                }
+            }
         }
     }
 
