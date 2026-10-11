@@ -2,7 +2,9 @@
 
 **Gate:** GATE 21A — Backend Architecture & Contract Discovery
 **Repository:** `Drmusab/Study-Agent-Client`
-**Branch:** `arena/5cef8d58-study-agent-client` (base commit `28eec915cc198dd1a1b24f29dc2790fcd3938616`)
+**Branch:** `arena/47bec43d-study-agent-client`
+**HEAD:** `2d2a0a095ac9b50f10bdf101528491dc6b7e68a4` (2d2a0a0)
+**Date:** 2026-10-11
 **Method:** source read of `app/src/main` + `app/src/test`. No Android device, no Anki instance and no PC
 agent was run, so every statement below is a statement about **this repository's code**, not about a live
 backend.
