@@ -30,8 +30,14 @@ data class AnkiCardTemplateRef(
     }
 
     val backendId: AnkiBackendId get() = modelRef.backendId
-    val stableKey: String get() =
-        "anki:${backendId.stableId}:${collectionKey ?: modelRef.collectionKey ?: "?"}:model:${modelRef.modelId}:template:$ordinal"
+    val stableKey: String get() = identityKey(
+        backendId.stableId,
+        collectionKey ?: modelRef.collectionKey,
+        "model",
+        modelRef.modelId,
+        "template",
+        ordinal.toString()
+    )
 }
 
 /**
