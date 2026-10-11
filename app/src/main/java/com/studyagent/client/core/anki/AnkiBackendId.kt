@@ -64,3 +64,27 @@ internal fun identityKey(vararg parts: String?): String =
 internal fun requireOptionalId(value: String?) {
     require(value == null || value.isNotBlank()) { "An optional identifier must be null or non-blank" }
 }
+
+/**
+ * GATE 21C — allocation rules A3/A5 (BACKEND_IDENTITY_CONTRACT §1.3), checkable by the allocation
+ * authority (owner: 21D) and by any writer that must decide whether an identity is safe to persist.
+ *
+ * True when this identity survives its own [AnkiBackendId.stableId] round trip: decoding the token
+ * yields exactly this instance. An identity that fails this is not persistable — a reader would decode
+ * the token to `null` (unknown owner) or to a *different* configured instance, which is how a durable
+ * record silently changes hands.
+ */
+val AnkiBackendId.roundTripsStableId: Boolean
+    get() = AnkiBackendId.fromStableId(stableId) == this
+
+/**
+ * GATE 21C — allocation rule A5: the discriminator is normalized **once**, at allocation, and never
+ * re-normalized at read time.
+ *
+ * A configuration whose discriminator carries surrounding whitespace would produce a second
+ * configured instance that looks identical in the UI, so the allocation authority must refuse or
+ * normalize it (21D). The identity types themselves must never rewrite a stored value: re-normalizing
+ * on read would change the owner of every record already written under the un-normalized token.
+ */
+val AnkiBackendId.discriminatorIsNormalized: Boolean
+    get() = stableId == stableId.trim()

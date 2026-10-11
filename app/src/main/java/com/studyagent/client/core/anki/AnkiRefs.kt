@@ -2,10 +2,24 @@ package com.studyagent.client.core.anki
 
 import kotlinx.serialization.Serializable
 
-/** Backend-issued collection discriminator. Null means unknown, never an invented default. */
+/**
+ * Backend-issued collection discriminator. Null means unknown, never an invented default.
+ *
+ * GATE 21C — the key is an opaque, non-blank, backend-issued token. The client never interprets its
+ * content (it is not a path, a name or a number), never normalizes it (no trimming, no case folding,
+ * no sentinel substitution) and never back-fills it after the fact: it is compared byte-wise or not
+ * at all. Everything else about continuity is *assurance*, which is contextual and lives in
+ * [AnkiIdentityAssurance].
+ */
 @Serializable
 data class AnkiCollectionIdentity(val backendId: AnkiBackendId, val collectionKey: String?) {
     init { requireOptionalId(collectionKey) }
+
+    /**
+     * True only when the backend actually issued a discriminator. A null key is UNKNOWN: it is never
+     * a wildcard, never a sentinel, and never comparable to another unknown as an equality proof.
+     */
+    val hasAuthoritativeKey: Boolean get() = collectionKey != null
 }
 
 /** Display name/path is never identity. Known collection identity participates in equality. */

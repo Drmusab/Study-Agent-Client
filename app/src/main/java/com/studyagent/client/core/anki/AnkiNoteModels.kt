@@ -34,7 +34,7 @@ data class AnkiNoteModelRef(
         }
     }
 
-    val stableKey: String get() = "anki:${backendId.stableId}:${collectionKey ?: "?"}:model:$modelId"
+    val stableKey: String get() = identityKey(backendId.stableId, collectionKey, "model", modelId)
 }
 
 /**
