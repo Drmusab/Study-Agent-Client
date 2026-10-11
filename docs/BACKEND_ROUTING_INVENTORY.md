@@ -1,7 +1,10 @@
 # Backend Routing Inventory
 
 **Gate:** GATE 21A — Backend Architecture & Contract Discovery
-**Branch:** `arena/5cef8d58-study-agent-client` (base commit `28eec915cc198dd1a1b24f29dc2790fcd3938616`)
+**Repository:** `Drmusab/Study-Agent-Client`
+**Branch:** `arena/47bec43d-study-agent-client`
+**HEAD:** `2d2a0a095ac9b50f10bdf101528491dc6b7e68a4`
+**Date:** 2026-10-11
 **Companion to:** `docs/GATE_21A_DISCOVERY.md`
 
 Every place in `app/src` where a backend is chosen, looked up or pinned, with the mechanism, the identity
