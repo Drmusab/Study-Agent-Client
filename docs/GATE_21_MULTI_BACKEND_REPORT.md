@@ -147,6 +147,7 @@ Start Study (Home / Deck Details / voice)
 | NoteCreation | `NoteCreationRecord.backendId` (persisted) | ledger scoped by `backendId`; coordinator refuses `BackendMismatch` |
 | Custom Study state | **not implemented** (GATE 20 blocked) | n/a — would inherit the session lock |
 | Grouping across families | — | `AnkiTransactionRecoveryPlanner.groupByOwnerBackend(records) { it.backendId }` |
+| Commit dispatch (live path) | `commitId.backendId` | `AnkiStudyEffectExecutor` asks the planner for a route before dispatch, so a record whose backend is absent is refused as `backend_not_registered` / `backend_unreachable` / `collection_mismatch` rather than one flat `backend_missing` |
 
 No row reads the current global preference. `AnkiTransactionRecoveryPlanner` contains no
 reference to `AnkiBackendResolver`, `AnkiBackendPreferenceStore` or `AnkiBackendMode`
@@ -158,7 +159,7 @@ reference to `AnkiBackendResolver`, `AnkiBackendPreferenceStore` or `AnkiBackend
 |---|---|---|
 | Read before binding | AUTO may pick another eligible backend (the only fallback in GATE 21) | `AnkiBackendResolver` |
 | Active Study | **never** switches; blocks on the locked backend | `AnkiStudyEffectExecutor` locked-identity lookups |
-| Rating mutation | stays on `commitId.backendId`; a missing backend → typed failure, no replay | ledger + executor |
+| Rating mutation | stays on `commitId.backendId`; a missing/unreachable backend → typed refusal carrying the planner's reason, no replay | `AnkiTransactionRecoveryPlanner` inside `AnkiStudyEffectExecutor` |
 | Reviewer action | stays on `record.backendId`; missing → `Unresolved(BackendUnavailable)` | `AnkiReviewerActionReconciler` |
 | Edit note | bound at open; `BackendMismatch` refusal rather than a redirect | `NoteMutationCoordinator` |
 | Note creation | bound at open; `BackendMismatch` refusal rather than a redirect | `NoteCreationCoordinator` |
@@ -186,7 +187,7 @@ Encoded as `app/src/test/java/com/studyagent/client/anki/Gate21ArchitectureAudit
 | AUDIT-21-12 custom study binding | N/A | GATE 20 unimplemented — nothing to bind |
 | AUDIT-21-13 capability-based resolution | PASS | `the presentation layer never branches on a backend name` |
 | AUDIT-21-14 source-of-truth separation | PASS | `the four sources of truth are separate components` |
-| AUDIT-21-15 diagnostics accuracy | PASS | `diagnostics keep preferred, resolved, locked and transaction backends apart` |
+| AUDIT-21-15 diagnostics accuracy | PASS | source rule `diagnostics keep preferred, resolved, locked and transaction backends apart`, plus 4 executed `Gate21BackendRoutingDiagnosticsTest` cases over `DefaultDiagnosticsRepository.ankiDroidDiagnosticsRows()` |
 | INV-21-19/20 no migration/merging | PASS | `gate 21 adds no cross-backend migration, mapping or merging` |
 
 ## 9. Verification matrix
@@ -222,7 +223,7 @@ Encoded as `app/src/test/java/com/studyagent/client/anki/Gate21ArchitectureAudit
 | VER-21-27 | PASS | AUDIT-21-09 + `AnkiLibraryRepository.publishFailure` reuses a cache only for the same backend id |
 | VER-21-28 | PASS | `diagnostics keep preferred, resolved, locked and transaction backends apart` |
 | VER-21-29 | PASS | `1000 turns with preference and availability churn never move a session between backends` — asserts 0 mid-session switches, 0 cross-backend commits, 0 wrong-backend next-card reads, 0 cross-backend mutations, against a ready PC backend in the same registry |
-| VER-21-30 | PASS | Full harness suite: `RESULT classes=187 tests=2211 passed=2211 failed=0` (GATE 11–20 regression set included) |
+| VER-21-30 | PASS | Full harness suite: `RESULT classes=188 tests=2217 passed=2217 failed=0` (GATE 11–20 regression set included) |
 
 **Totals: 27 PASS, 2 PARTIAL, 1 BLOCKED.** No FAIL.
 
@@ -245,6 +246,9 @@ Encoded as `app/src/test/java/com/studyagent/client/anki/Gate21ArchitectureAudit
    harness's Compose compile scope, so their GATE 21 additions are verified by the source audit
    and by the pure UI-model tests, not by an executed Compose test. A Gradle
    `assembleDebug`/`connectedDebugAndroidTest` run is still required for those three files.
+   `AppContainer`'s routing-diagnostics *assembly* is likewise compiled but not executed
+   (`di/` is off the harness test classpath); the rows it feeds are executed via
+   `DefaultDiagnosticsRepository` with an injected supplier.
 7. **Gradle was not run in this sandbox** (no JDK/Android SDK available); all evidence comes from
    the repository's own JVM harness, whose deviations are documented in
    `tools/jvm-harness/README.md`.
@@ -286,15 +290,15 @@ from the repository's own Gradle-free harness (`tools/jvm-harness`), which compi
 |---|---|---|
 | Baseline (after fixing the two pre-existing breaks) | `build.sh all` + `run.sh` | `main errors: 0`, `compose errors: 0`, `RESULT classes=182 tests=2161 passed=2161 failed=0` |
 | DI wiring (harness excludes `di/` by default) | `HARNESS_EXTRA_MAIN_SRC="com/studyagent/client/di/AppContainer.kt" build.sh main` | `main errors: 0 (files: 306)` |
-| Final full suite | `build.sh main` + `build.sh test` + `run.sh` | `main errors: 0 (files: 305)`, `test errors: 0 (files: 217)`, `RESULT classes=187 tests=2211 passed=2211 failed=0` |
-| GATE 21 subset | `run.sh "Gate21"` | `RESULT classes=5 tests=50 passed=50 failed=0` |
+| Final full suite | `build.sh main` + `build.sh test` + `run.sh` | `main errors: 0 (files: 306)`, `test errors: 0 (files: 218)`, `RESULT classes=188 tests=2217 passed=2217 failed=0` |
+| GATE 21 subset | `run.sh "Gate21"` | `RESULT classes=6 tests=56 passed=56 failed=0` |
 
 Still outstanding, and required before release: `./gradlew clean testDebugUnitTest lint
 assembleDebug assembleRelease`, and `connectedDebugAndroidTest` on a device with AnkiDroid.
 
 ## Files changed
 
-**New (7 production, 4 test):**
+**New (8 production, 6 test):**
 
 ```text
 app/src/main/java/com/studyagent/client/core/anki/AnkiBackendDescriptor.kt
@@ -310,18 +314,24 @@ app/src/test/java/com/studyagent/client/anki/Gate21TransactionRecoveryRoutingTes
 app/src/test/java/com/studyagent/client/anki/Gate21ArchitectureAuditTest.kt
 app/src/test/java/com/studyagent/client/study/Gate21SessionBackendLockTest.kt
 app/src/test/java/com/studyagent/client/ui/Gate21BackendSelectionUiTest.kt
+app/src/test/java/com/studyagent/client/data/Gate21BackendRoutingDiagnosticsTest.kt
 ```
 
 **Modified:**
 
 ```text
-core/anki/AnkiBackendSelector.kt        registry descriptors + selector delegates to the resolver
+core/anki/AnkiBackendSelector.kt        registry descriptors + selector delegates to the resolver;
+                                        REVIEW_REQUIREMENT aliases STUDY_SESSION_REQUIREMENTS
 core/anki/ReviewCommit.kt               BASELINE FIX — TemplateNotFound branch (build was broken)
-core/study/AnkiStudyEffectExecutor.kt   publishes/releases the session backend lock
+core/study/AnkiStudyEffectExecutor.kt   publishes/releases the session backend lock;
+                                        routes commit dispatch through the recovery planner
+data/repository/DiagnosticsRepository.kt four backend roles as separate rows;
+                                        Backend row no longer claims an unobserved identity
 data/repository/AnkiLocalStudyStarter.kt preferenceProvider; nullable Options.preference
 data/preferences/PreferencesDataStore.kt ankiBackendModeFlow + setAnkiBackendMode
 data/preferences/AppSettingsPreferencesCodec.kt anki_backend_mode key + reset
-di/AppContainer.kt                      6 new components wired; executor + starter wired
+di/AppContainer.kt                      6 new components wired; executor + starter +
+                                        diagnostics routing snapshot wired
 ui/navigation/AppNavHost.kt             Settings + Study get the new components
 ui/screens/settings/SettingsViewModel.kt backend selection state + selectAnkiBackend
 ui/screens/settings/SettingsScreen.kt   backend selector card + switch-effect notice
