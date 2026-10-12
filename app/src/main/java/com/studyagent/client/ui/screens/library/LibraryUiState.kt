@@ -130,6 +130,7 @@ fun AnkiAvailability.displayLabel(): String = when (this) {
     is AnkiAvailability.TemporarilyUnavailable ->
         if (reason == "collection_unavailable") "Collection unavailable" else "Temporarily unavailable"
     AnkiAvailability.AgentDisconnected -> "Agent disconnected"
+    AnkiAvailability.AgentAuthenticationRequired -> "Authentication required"
     AnkiAvailability.AgentAnkiUnavailable -> "Anki unavailable"
     is AnkiAvailability.Unsupported -> "Unsupported backend"
     is AnkiAvailability.Fault -> "Backend check failed"
@@ -148,6 +149,7 @@ fun AnkiAvailability.displayMessage(): String = when (this) {
         "The backend is busy or offline. Try again in a moment."
     }
     AnkiAvailability.AgentDisconnected -> "The selected study agent is offline."
+    AnkiAvailability.AgentAuthenticationRequired -> "The selected study agent needs authentication before its Anki collection can be used."
     AnkiAvailability.AgentAnkiUnavailable -> "The study agent is online, but its Anki collection is unavailable."
     is AnkiAvailability.Unsupported -> "This backend cannot provide the requested library feature."
     is AnkiAvailability.Fault -> "The backend could not be checked. Please retry."

@@ -457,6 +457,7 @@ private fun availabilityLabel(availability: com.studyagent.client.core.anki.Anki
     is com.studyagent.client.core.anki.AnkiAvailability.Ready -> "This backend cannot currently provide card details."
     is com.studyagent.client.core.anki.AnkiAvailability.TemporarilyUnavailable -> "The Anki collection is temporarily unavailable."
     com.studyagent.client.core.anki.AnkiAvailability.AgentDisconnected -> "The PC study agent is disconnected."
+    com.studyagent.client.core.anki.AnkiAvailability.AgentAuthenticationRequired -> "The PC study agent requires authentication."
     com.studyagent.client.core.anki.AnkiAvailability.AgentAnkiUnavailable -> "Anki is unavailable on the PC."
     is com.studyagent.client.core.anki.AnkiAvailability.Unsupported -> "This backend is not supported."
     is com.studyagent.client.core.anki.AnkiAvailability.Fault -> availability.error.message
