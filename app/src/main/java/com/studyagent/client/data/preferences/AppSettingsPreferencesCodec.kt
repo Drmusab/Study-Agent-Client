@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.studyagent.client.core.anki.StudySessionBackendLock
 import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.AppSettingsPolicy
@@ -94,6 +95,13 @@ object AppSettingsPreferencesCodec {
          * credentials and endpoints are never stored (INV-21E-23).
          */
         val ANKI_BACKEND_INSTANCE_PIN = stringPreferencesKey("anki_backend_instance_pin")
+
+        /**
+         * GATE 21G — the active StudySession's immutable backend lock
+         * ([StudySessionBackendLock] JSON). Identity only: session id, backend id, collection
+         * and deck refs. No capabilities, no credentials, no scheduler state.
+         */
+        val STUDY_SESSION_BACKEND_LOCK = stringPreferencesKey("study_session_backend_lock")
 
         val USE_FAKE_AGENT = booleanPreferencesKey("use_fake_agent")
         val DEBUG_LOGGING = booleanPreferencesKey("debug_logging")

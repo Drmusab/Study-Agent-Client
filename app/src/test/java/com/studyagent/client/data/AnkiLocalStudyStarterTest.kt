@@ -76,7 +76,6 @@ class AnkiLocalStudyStarterTest {
         val registry = AnkiBackendRegistry(backends.toList())
         return AnkiLocalStudyStarter(
             registry = registry,
-            selector = AnkiBackendSelector(registry),
             scope = scope,
             dispatch = dispatcher::dispatch,
             studySessionIdFactory = { "session-fixed" }
