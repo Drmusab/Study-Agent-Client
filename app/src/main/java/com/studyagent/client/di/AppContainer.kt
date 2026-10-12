@@ -93,6 +93,7 @@ import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidGateway
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidHealthCheck
 import com.studyagent.client.data.anki.ankidroid.DefaultAnkiDroidHealthProbe
 import com.studyagent.client.core.anki.AnkiBackend
+import com.studyagent.client.data.preferences.BackendPreferenceRepository
 import com.studyagent.client.data.preferences.DataStoreAnkiBackendPreferenceStore
 import com.studyagent.client.data.preferences.DefaultProfileRepository
 import com.studyagent.client.data.preferences.PreferencesDataStore
@@ -196,6 +197,15 @@ interface AppContainer {
      * active session, bound editor or durable transaction (DECISION-21-32, INV-21-08).
      */
     val ankiBackendPreferenceStore: AnkiBackendPreferenceStore
+
+    /**
+     * GATE 21E — the user's persisted backend preference with optional instance-pin support.
+     *
+     * Owns persistent storage of AUTO / explicit-instance / explicit-kind preferences. Backward
+     * compatible with the GATE-21 [ankiBackendPreferenceStore], which stays as the legacy mode-only
+     * view for pre-21E consumers.
+     */
+    val backendPreferenceRepository: BackendPreferenceRepository
 
     /**
      * GATE 21 — the single pre-binding routing policy (IMPLEMENTATION-21-06, DECISION-21-24).
@@ -505,6 +515,10 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
 
     override val ankiBackendPreferenceStore: AnkiBackendPreferenceStore by lazy {
         DataStoreAnkiBackendPreferenceStore(preferencesDataStore, backendRoutingScope)
+    }
+
+    override val backendPreferenceRepository: BackendPreferenceRepository by lazy {
+        BackendPreferenceRepository(preferencesDataStore, backendRoutingScope)
     }
 
     override val ankiBackendResolver: AnkiBackendResolver by lazy {
