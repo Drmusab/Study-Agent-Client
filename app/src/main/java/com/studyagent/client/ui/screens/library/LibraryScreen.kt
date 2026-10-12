@@ -52,6 +52,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyagent.client.core.anki.AnkiAvailability
+import com.studyagent.client.core.anki.AnkiDeckRef
+import com.studyagent.client.core.anki.AnkiReadContext
 import com.studyagent.client.core.anki.isReadyForReview
 import com.studyagent.client.ui.components.BannerTone
 import com.studyagent.client.ui.components.InfoBanner
@@ -69,7 +71,7 @@ const val LIBRARY_ADD_NOTE_TEST_TAG = "library_add_note"
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
-    onOpenDeck: (deckId: String) -> Unit,
+    onOpenDeck: (deckRef: AnkiDeckRef, readContext: AnkiReadContext) -> Unit,
     onOpenAddNote: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -149,7 +151,7 @@ fun LibraryScreen(
                             style = MaterialTheme.typography.bodyMedium,
                             color = AppColors.contentSecondary
                         )
-                        Spacer(Modifier.height(AppSpacing.S))
+                        Spacer(Modifier.height(AppSpacing.MD))
                         // GATE 18 — creation is offered from the library: the note type and the deck
                         // it lands in are collection-level facts, and the Add Note screen states both.
                         SecondaryButton(
@@ -274,7 +276,11 @@ fun LibraryScreen(
                                                 expandedKeys + item.key
                                             }
                                         },
-                                        onOpen = { onOpenDeck(item.item.deck.ref.deckId) }
+                                        onOpen = {
+                                            current.readContext?.let { context ->
+                                                onOpenDeck(item.item.deck.ref, context)
+                                            }
+                                        }
                                     )
                                     is DeckTreeItem.Group -> DeckGroupRow(
                                         item = item,

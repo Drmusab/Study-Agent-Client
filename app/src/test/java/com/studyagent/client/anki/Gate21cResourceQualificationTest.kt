@@ -184,12 +184,20 @@ class Gate21cResourceQualificationTest {
         assertEquals(backendB, decoded!!.backendId)
         assertNull(Screen.CardDetails.decodeCardRef("not-a-token"))
 
-        // The deck-level routes carry a deck id and nothing else: no backend identity can be derived
-        // from them, so an unqualified deck token can only ever be resolved against the backend that
-        // produced it (the interim rule of DECISION-21B-04) — never against the current preference.
-        val deckToken = Screen.DeckDetails.createRoute("10").substringAfter('/')
-        assertEquals("10", Screen.DeckDetails.decodeDeckId(deckToken))
-        assertEquals("10", Screen.CardBrowser.decodeDeckId(Screen.CardBrowser.createRoute("10").substringAfter("deckId=")))
+        // GATE 21F closes the interim raw-deck-ID route: backend and collection identity travel
+        // independently from the read-context generation and are never decoded against preference.
+        val deckRef = AnkiDeckRef(backendA, "10", "collection-a")
+        val context = AnkiReadContext.create(
+            AnkiBackendContext(backendA, AnkiCollectionIdentity(backendA, "collection-a"))
+        )
+        val detailsRoute = Screen.DeckDetails.createRoute(deckRef, context)
+        val deckToken = detailsRoute.substringAfter('/').substringBefore('?')
+        assertEquals(deckRef, Screen.DeckDetails.decodeDeckRef(deckToken))
+        val browserRoute = Screen.CardBrowser.createRoute(deckRef, context)
+        val browserToken = browserRoute.substringAfter("deckRef=").substringBefore('&')
+        assertEquals(deckRef, Screen.CardBrowser.decodeDeckRef(browserToken))
+        val ownerToken = detailsRoute.substringAfter("readContext=")
+        assertEquals(context, Screen.DeckDetails.decodeReadContext(ownerToken))
     }
 
     // ----------------------------------------------------------------------------- VER-21C-17

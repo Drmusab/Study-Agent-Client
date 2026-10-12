@@ -183,10 +183,10 @@ class Gate21ArchitectureAuditTest {
             .filter { it.code().let { c -> c.contains(".resolve(") && c.contains("BackendResolutionRequest") } }
             .map { it.name }
             .sorted()
-        // Only the GATE 01 selector adapter (which delegates to the resolver) and the status center
-        // that exposes pre-binding resolution call into the policy — nothing else in the app.
+        // The GATE 01 selector adapter, the status center, and GATE 21F's new-read binding boundary
+        // are the only policy callers. Reference/continued reads and the study runtime never resolve.
         assertEquals(
-            listOf("AnkiBackendSelector.kt", "AnkiBackendStatus.kt"),
+            listOf("AnkiBackendSelector.kt", "AnkiBackendStatus.kt", "AnkiReadContextController.kt"),
             callers
         )
         // The resolver itself is the only definition of the policy.
@@ -314,10 +314,12 @@ class Gate21ArchitectureAuditTest {
     @Test
     fun `bound editors and drafts resolve their backend from the route, not the preference`() {
         val nav = main("ui/navigation/AppNavHost.kt").code()
-        // Card details / edit / add-note all look the backend up by the identity carried in the route.
-        assertTrue(nav.contains("container.ankiBackendRegistry.find(cardRef.backendId)"))
+        // Read contexts bind card details by the exact route backend; Edit Note and Add Note keep
+        // their existing exact registry lookups rather than consulting the new-read preference.
+        assertTrue(nav.contains("backendId = cardRef.backendId"))
         assertTrue(nav.contains("container.ankiBackendRegistry.find(editCardRef.backendId)"))
-        assertTrue(nav.contains("container.ankiBackendRegistry.find(addNoteBackendId)"))
+        assertTrue(nav.contains("addNoteBackendId?.let(container.ankiBackendRegistry::find)"))
+        assertTrue(nav.contains("container.ankiReadContextController"))
         assertFalse(
             "navigation must not resolve a bound screen through the AUTO policy",
             nav.contains("BackendResolutionRequest")

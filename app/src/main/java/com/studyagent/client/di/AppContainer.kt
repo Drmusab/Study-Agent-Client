@@ -47,6 +47,8 @@ import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidLauncher
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidPermissionManager
 import com.studyagent.client.data.anki.ankidroid.AndroidAnkiDroidProbe
 import com.studyagent.client.data.anki.AnkiLibraryRepository
+import com.studyagent.client.data.anki.context.AnkiReadContextBinding
+import com.studyagent.client.data.anki.context.AnkiReadContextController
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidBackend
 import com.studyagent.client.core.anki.AnkiMediaResolver
 import com.studyagent.client.data.anki.ankidroid.AnkiDroidMediaResolver
@@ -183,8 +185,11 @@ interface AppContainer {
     /** GATE 09 — read-only public-contract resolver; never a filesystem accessor. */
     val ankiMediaResolver: AnkiMediaResolver
 
-    /** GATE 05 — Library-ready deck snapshot. Observes [ankiDroidBackend]; no Compose. */
-    val ankiLibraryRepository: AnkiLibraryRepository
+    /** Create a read repository scoped to exactly one bound backend/collection/generation. */
+    fun createAnkiLibraryRepository(binding: AnkiReadContextBinding): AnkiLibraryRepository
+
+    /** GATE 21F — binds new reads through the existing GATE 21E preference + resolver contract. */
+    val ankiReadContextController: AnkiReadContextController
 
     /** GATE 03 + GATE 04 — registry now includes real AnkiDroid backend */
     val ankiBackendRegistry: AnkiBackendRegistry
@@ -240,6 +245,11 @@ interface AppContainer {
      * start; they never assemble a request or a capability set themselves.
      */
     val ankiLocalStudyStarter: AnkiLocalStudyStarter
+
+    /** Existing GATE 17/18 route dependencies; exposing them does not change their ownership. */
+    val noteMutationCoordinator: NoteMutationCoordinator
+    val noteCreationCoordinator: NoteCreationCoordinator
+    val addNoteMediaProbe: MediaSourceProbe
 }
 
 /**
@@ -445,7 +455,7 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
      * GATE 17 — the only writer of note edits. Study overlap is checked against the same two ledgers
      * the review path writes, plus the presented-but-unresolved turn.
      */
-    val noteMutationCoordinator: NoteMutationCoordinator by lazy {
+    override val noteMutationCoordinator: NoteMutationCoordinator by lazy {
         DefaultNoteMutationCoordinator(
             backend = ankiDroidBackend,
             ledger = noteMutationLedger,
@@ -476,7 +486,7 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
      * GATE 18 — the only component that creates notes or stores creation media. Validation, the
      * durable ordering, the boundaries and the post-create hydration all live here, never in the UI.
      */
-    val noteCreationCoordinator: NoteCreationCoordinator by lazy {
+    override val noteCreationCoordinator: NoteCreationCoordinator by lazy {
         DefaultNoteCreationCoordinator(
             backend = ankiDroidBackend,
             ledger = noteCreationLedger,
@@ -488,7 +498,7 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
      * GATE 18 — local media preparation. The only component allowed to read a user-picked media URI
      * before creation; it never touches the AnkiDroid provider or Anki's media directories.
      */
-    val addNoteMediaProbe: MediaSourceProbe by lazy {
+    override val addNoteMediaProbe: MediaSourceProbe by lazy {
         AndroidAnkiDroidMediaProbe(context = context)
     }
 
@@ -498,8 +508,15 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         ankiDroidScope.launch { reviewerActionLedger.health() }
     }
 
-    override val ankiLibraryRepository: AnkiLibraryRepository by lazy {
-        AnkiLibraryRepository(backend = ankiDroidBackend)
+    override fun createAnkiLibraryRepository(binding: AnkiReadContextBinding): AnkiLibraryRepository =
+        AnkiLibraryRepository(binding = binding)
+
+    override val ankiReadContextController: AnkiReadContextController by lazy {
+        AnkiReadContextController(
+            registry = ankiBackendRegistry,
+            // 21F consumes the same instance-pinnable GATE 21E preference as every new operation.
+            preference = backendPreferenceRepository.preference
+        )
     }
 
     override val ankiBackendRegistry: AnkiBackendRegistry by lazy {

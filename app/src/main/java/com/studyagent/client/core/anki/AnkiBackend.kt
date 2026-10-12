@@ -24,6 +24,19 @@ interface AnkiBackend {
     val capabilities: StateFlow<AnkiCapabilities>
 
     /**
+     * Current backend-issued collection identity, or `null` when this backend has no authoritative
+     * collection discriminator. This is an observation, not continuity proof: read-context owners
+     * capture it at bind time and compare it again around protected reads using DECISION-21B-03.
+     *
+     * Implementations must never synthesize a value from a collection name/path or the numeric
+     * resource IDs. AnkiDroid's public provider exposes no such discriminator, so its implementation
+     * correctly leaves this unknown. A backend whose identity cannot currently be checked should
+     * return `null`; if a key was previously bound, the read-context policy treats that as degraded
+     * and blocks continuation.
+     */
+    val currentCollectionIdentity: AnkiCollectionIdentity? get() = null
+
+    /**
      * GATE 21D — what this *wired adapter* implements, whether or not the backend answers right now
      * (BACKEND_SELECTION_POLICY §2.1: "implements" is a static claim about the wired object graph,
      * "ready" is a runtime fact, "permitted" is a policy decision — three different questions).

@@ -14,6 +14,10 @@ import androidx.navigation.NavType
 import androidx.navigation.navArgument
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.studyagent.client.core.anki.AnkiRequiredCapability
+import com.studyagent.client.data.anki.context.AnkiReadContextRequest
+import com.studyagent.client.data.anki.context.AnkiReadContextUiState
+import com.studyagent.client.data.anki.context.AnkiReadContextViewModel
 import com.studyagent.client.di.AppContainer
 import com.studyagent.client.ui.screens.connection.ConnectionScreen
 import com.studyagent.client.ui.screens.connection.ConnectionViewModel
@@ -76,123 +80,292 @@ fun AppNavHost(
         }
 
         composable(Screen.Library.route) {
-            val libraryViewModel: LibraryViewModel = viewModel {
-                LibraryViewModel(
-                    backend = container.ankiDroidBackend,
-                    libraryRepository = container.ankiLibraryRepository
+            val contextOwner: AnkiReadContextViewModel = viewModel(
+                key = "library-read-context"
+            ) {
+                AnkiReadContextViewModel(
+                    controller = container.ankiReadContextController,
+                    request = AnkiReadContextRequest.New(
+                        requiredCapabilities = setOf(AnkiRequiredCapability.DECKS),
+                        purpose = "library"
+                    )
                 )
             }
-            LibraryScreen(
-                viewModel = libraryViewModel,
-                onOpenDeck = { deckId ->
-                    navController.navigate(Screen.DeckDetails.createRoute(deckId))
-                },
-                // GATE 18 — creation is opened against the backend this library is showing. The
-                // Add Note screen states the model and deck facts itself; nothing travels in the route.
-                onOpenAddNote = {
-                    navController.navigate(
-                        Screen.AddNote.createRoute(container.ankiDroidBackend.id)
+            val contextState by contextOwner.uiState.collectAsStateWithLifecycle()
+            when (val routeState = contextState) {
+                AnkiReadContextUiState.Binding -> ReadContextBindingPlaceholder(
+                    title = "Library", message = null, onNavigateBack = { navController.popBackStack() }
+                )
+                is AnkiReadContextUiState.Failed -> ReadContextBindingPlaceholder(
+                    title = "Library", message = routeState.failure.safeMessage(),
+                    onNavigateBack = { navController.popBackStack() }
+                )
+                is AnkiReadContextUiState.Bound -> {
+                    val binding = routeState.binding
+                    val libraryViewModel: LibraryViewModel = viewModel(
+                        key = "library:${binding.context.generation.value}"
+                    ) {
+                        LibraryViewModel(
+                            binding = binding,
+                            libraryRepository = container.createAnkiLibraryRepository(binding)
+                        )
+                    }
+                    LibraryScreen(
+                        viewModel = libraryViewModel,
+                        onOpenDeck = { deckRef, readContext ->
+                            navController.navigate(Screen.DeckDetails.createRoute(deckRef, readContext))
+                        },
+                        // The existing creation destination stays explicitly AnkiDroid; the read
+                        // context below only scopes its model/deck seed reads, never creation.
+                        onOpenAddNote = {
+                            navController.navigate(Screen.AddNote.createRoute(container.ankiDroidBackend.id))
+                        }
                     )
                 }
-            )
+            }
         }
 
         composable(
             route = Screen.DeckDetails.route,
-            arguments = listOf(navArgument(Screen.DeckDetails.ARG_DECK_ID) { type = NavType.StringType })
-        ) { backStackEntry ->
-            val deckId = Screen.DeckDetails.decodeDeckId(
-                backStackEntry.arguments?.getString(Screen.DeckDetails.ARG_DECK_ID)
-            ) ?: "invalid-deck-id"
-            val detailsViewModel: DeckDetailsViewModel = viewModel(key = "deck-details:$deckId") {
-                DeckDetailsViewModel(
-                    deckId = deckId,
-                    backend = container.ankiDroidBackend,
-                    libraryRepository = container.ankiLibraryRepository,
-                    studyStarter = container.ankiLocalStudyStarter,
-                    studyState = container.studySessionRepository.studyState
-                )
-            }
-            DeckDetailsScreen(
-                viewModel = detailsViewModel,
-                onNavigateBack = { navController.popBackStack() },
-                onNavigateToStudy = {
-                    navController.navigate(Screen.Study.route) { launchSingleTop = true }
-                },
-                onNavigateToCardBrowser = { stableDeckId ->
-                    navController.navigate(Screen.CardBrowser.createRoute(stableDeckId))
-                }
-            )
-        }
-
-        composable(
-            route = Screen.CardBrowser.route,
             arguments = listOf(
-                navArgument(Screen.CardBrowser.ARG_DECK_ID) {
+                navArgument(Screen.DeckDetails.ARG_DECK_REF) { type = NavType.StringType },
+                navArgument(Screen.DeckDetails.ARG_READ_CONTEXT) {
                     type = NavType.StringType
                     nullable = true
                     defaultValue = null
                 }
             )
         ) { backStackEntry ->
-            val deckId = Screen.CardBrowser.decodeDeckId(
-                backStackEntry.arguments?.getString(Screen.CardBrowser.ARG_DECK_ID)
-            )
-            val browserViewModel: CardBrowserViewModel = viewModel(
-                key = "card-browser:${container.ankiDroidBackend.id.stableId}:${deckId ?: "all"}"
-            ) {
-                CardBrowserViewModel(initialBackend = container.ankiDroidBackend, deckId = deckId)
+            val deckRefToken = backStackEntry.arguments?.getString(Screen.DeckDetails.ARG_DECK_REF)
+            val deckRef = Screen.DeckDetails.decodeDeckRef(deckRefToken)
+            val readContextToken = backStackEntry.arguments?.getString(Screen.DeckDetails.ARG_READ_CONTEXT)
+            val readContext = Screen.DeckDetails.decodeReadContext(readContextToken)
+            if (deckRef == null || readContextToken != null && readContext == null) {
+                ReadContextBindingPlaceholder(
+                    title = "Deck details",
+                    message = "The backend-qualified deck reference is invalid. Return to the Library and try again.",
+                    onNavigateBack = { navController.popBackStack() }
+                )
+            } else {
+                val bindingRequest = if (readContext != null) {
+                    AnkiReadContextRequest.Continue(
+                        sourceContext = readContext,
+                        resourceBackendId = deckRef.backendId,
+                        resourceCollectionKey = deckRef.collectionKey,
+                        purpose = "deck_details",
+                        requiredCapabilities = setOf(AnkiRequiredCapability.DECKS)
+                    )
+                } else {
+                    AnkiReadContextRequest.Reference(
+                        backendId = deckRef.backendId,
+                        collectionKey = deckRef.collectionKey,
+                        purpose = "deck_details",
+                        requiredCapabilities = setOf(AnkiRequiredCapability.DECKS)
+                    )
+                }
+                val contextOwner: AnkiReadContextViewModel = viewModel(
+                    key = "deck-read-context:${deckRef.stableKey}:${readContext?.generation?.value ?: "restored"}"
+                ) {
+                    AnkiReadContextViewModel(container.ankiReadContextController, bindingRequest)
+                }
+                val contextState by contextOwner.uiState.collectAsStateWithLifecycle()
+                when (val routeState = contextState) {
+                    AnkiReadContextUiState.Binding -> ReadContextBindingPlaceholder(
+                        title = "Deck details", message = null,
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                    is AnkiReadContextUiState.Failed -> ReadContextBindingPlaceholder(
+                        title = "Deck details", message = routeState.failure.safeMessage(),
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                    is AnkiReadContextUiState.Bound -> {
+                        val binding = routeState.binding
+                        val detailsViewModel: DeckDetailsViewModel = viewModel(
+                            key = "deck-details:${deckRef.stableKey}:${binding.context.generation.value}"
+                        ) {
+                            DeckDetailsViewModel(
+                                deckRef = deckRef,
+                                binding = binding,
+                                libraryRepository = container.createAnkiLibraryRepository(binding),
+                                studyStarter = container.ankiLocalStudyStarter,
+                                studyState = container.studySessionRepository.studyState
+                            )
+                        }
+                        DeckDetailsScreen(
+                            viewModel = detailsViewModel,
+                            onNavigateBack = { navController.popBackStack() },
+                            onNavigateToStudy = {
+                                navController.navigate(Screen.Study.route) { launchSingleTop = true }
+                            },
+                            onNavigateToCardBrowser = { ref, readContext ->
+                                navController.navigate(Screen.CardBrowser.createRoute(ref, readContext))
+                            }
+                        )
+                    }
+                }
             }
-            CardBrowserScreen(
-                viewModel = browserViewModel,
-                onNavigateBack = { navController.popBackStack() },
-                onOpenCardDetails = { cardRef ->
-                    navController.navigate(Screen.CardDetails.createRoute(cardRef))
+        }
+
+        composable(
+            route = Screen.CardBrowser.route,
+            arguments = listOf(
+                navArgument(Screen.CardBrowser.ARG_DECK_REF) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument(Screen.CardBrowser.ARG_READ_CONTEXT) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
                 }
             )
+        ) { backStackEntry ->
+            val deckRefToken = backStackEntry.arguments?.getString(Screen.CardBrowser.ARG_DECK_REF)
+            val deckRef = Screen.CardBrowser.decodeDeckRef(deckRefToken)
+            val readContextToken = backStackEntry.arguments?.getString(Screen.CardBrowser.ARG_READ_CONTEXT)
+            val readContext = Screen.CardBrowser.decodeReadContext(readContextToken)
+            if ((deckRefToken != null && deckRef == null) ||
+                (readContextToken != null && readContext == null) ||
+                (deckRef == null && readContext != null)
+            ) {
+                ReadContextBindingPlaceholder(
+                    title = "Card browser",
+                    message = "The backend-qualified deck reference is invalid. Return to Deck Details and try again.",
+                    onNavigateBack = { navController.popBackStack() }
+                )
+            } else {
+                val bindingRequest = when {
+                    deckRef == null -> AnkiReadContextRequest.New(
+                        requiredCapabilities = setOf(AnkiRequiredCapability.CARD_BROWSER),
+                        purpose = "card_browser_all"
+                    )
+                    readContext != null -> AnkiReadContextRequest.Continue(
+                        sourceContext = readContext,
+                        resourceBackendId = deckRef.backendId,
+                        resourceCollectionKey = deckRef.collectionKey,
+                        purpose = "card_browser_deck",
+                        requiredCapabilities = setOf(AnkiRequiredCapability.CARD_BROWSER)
+                    )
+                    else -> AnkiReadContextRequest.Reference(
+                        backendId = deckRef.backendId,
+                        collectionKey = deckRef.collectionKey,
+                        purpose = "card_browser_deck",
+                        requiredCapabilities = setOf(AnkiRequiredCapability.CARD_BROWSER)
+                    )
+                }
+                val ownerKey = "card-browser-read-context:${deckRef?.stableKey ?: "all"}:${readContext?.generation?.value ?: "new"}"
+                val contextOwner: AnkiReadContextViewModel = viewModel(key = ownerKey) {
+                    AnkiReadContextViewModel(container.ankiReadContextController, bindingRequest)
+                }
+                val contextState by contextOwner.uiState.collectAsStateWithLifecycle()
+                when (val routeState = contextState) {
+                    AnkiReadContextUiState.Binding -> ReadContextBindingPlaceholder(
+                        title = "Card browser", message = null,
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                    is AnkiReadContextUiState.Failed -> ReadContextBindingPlaceholder(
+                        title = "Card browser", message = routeState.failure.safeMessage(),
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                    is AnkiReadContextUiState.Bound -> {
+                        val binding = routeState.binding
+                        val browserViewModel: CardBrowserViewModel = viewModel(
+                            key = "card-browser:${binding.context.generation.value}:${deckRef?.stableKey ?: "all"}"
+                        ) {
+                            CardBrowserViewModel(initialBinding = binding, deckRef = deckRef)
+                        }
+                        CardBrowserScreen(
+                            viewModel = browserViewModel,
+                            onNavigateBack = { navController.popBackStack() },
+                            onOpenCardDetails = { cardRef, readContext ->
+                                navController.navigate(Screen.CardDetails.createRoute(cardRef, readContext))
+                            }
+                        )
+                    }
+                }
+            }
         }
 
         composable(
             route = Screen.CardDetails.route,
-            arguments = listOf(navArgument(Screen.CardDetails.ARG_CARD_REF) { type = NavType.StringType })
+            arguments = listOf(
+                navArgument(Screen.CardDetails.ARG_CARD_REF) { type = NavType.StringType },
+                navArgument(Screen.CardDetails.ARG_READ_CONTEXT) {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
+            )
         ) { backStackEntry ->
             val cardRef = Screen.CardDetails.decodeCardRef(
                 backStackEntry.arguments?.getString(Screen.CardDetails.ARG_CARD_REF)
             )
-            when {
-                cardRef == null -> CardDetailsRouteErrorScreen(
+            val readContextToken = backStackEntry.arguments?.getString(Screen.CardDetails.ARG_READ_CONTEXT)
+            val readContext = Screen.CardDetails.decodeReadContext(readContextToken)
+            if (cardRef == null || readContextToken != null && readContext == null) {
+                CardDetailsRouteErrorScreen(
                     message = "The stable card reference is invalid. Return to the browser and open the card again.",
                     onNavigateBack = { navController.popBackStack() }
                 )
-                container.ankiBackendRegistry.find(cardRef.backendId) == null -> CardDetailsRouteErrorScreen(
-                    message = "The backend that owns this card reference is not registered. The reference was not opened against another backend.",
-                    onNavigateBack = { navController.popBackStack() }
-                )
-                else -> {
-                    val detailsBackend = checkNotNull(container.ankiBackendRegistry.find(cardRef.backendId))
-                    val detailsViewModel: CardDetailsViewModel = viewModel(
-                        key = "card-details:${cardRef.stableKey}"
-                    ) {
-                        CardDetailsViewModel(initialBackend = detailsBackend, initialCardRef = cardRef)
-                    }
-                    // GATE 17 — a saved edit makes the details screen re-read the note: post-write
-                    // truth comes from the backend, never from the editor's draft (INV-17-14).
-                    val noteSaved by backStackEntry.savedStateHandle
-                        .getStateFlow(NOTE_EDIT_SAVED_KEY, false)
-                        .collectAsStateWithLifecycle()
-                    LaunchedEffect(noteSaved) {
-                        if (noteSaved) {
-                            backStackEntry.savedStateHandle[NOTE_EDIT_SAVED_KEY] = false
-                            detailsViewModel.refresh()
-                        }
-                    }
-                    CardDetailsScreen(
-                        viewModel = detailsViewModel,
-                        onNavigateBack = { navController.popBackStack() },
-                        onOpenNoteEditor = { ref ->
-                            navController.navigate(Screen.EditNote.createRoute(ref))
-                        }
+            } else {
+                val bindingRequest = if (readContext != null) {
+                    AnkiReadContextRequest.Continue(
+                        sourceContext = readContext,
+                        resourceBackendId = cardRef.backendId,
+                        resourceCollectionKey = cardRef.collectionKey,
+                        purpose = "card_details",
+                        requiredCapabilities = setOf(AnkiRequiredCapability.CARD_DETAILS)
                     )
+                } else {
+                    AnkiReadContextRequest.Reference(
+                        backendId = cardRef.backendId,
+                        collectionKey = cardRef.collectionKey,
+                        purpose = "card_details",
+                        requiredCapabilities = setOf(AnkiRequiredCapability.CARD_DETAILS)
+                    )
+                }
+                val contextOwner: AnkiReadContextViewModel = viewModel(
+                    key = "card-details-read-context:${cardRef.stableKey}:${readContext?.generation?.value ?: "restored"}"
+                ) {
+                    AnkiReadContextViewModel(container.ankiReadContextController, bindingRequest)
+                }
+                val contextState by contextOwner.uiState.collectAsStateWithLifecycle()
+                when (val routeState = contextState) {
+                    AnkiReadContextUiState.Binding -> ReadContextBindingPlaceholder(
+                        title = "Card details", message = null,
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                    is AnkiReadContextUiState.Failed -> ReadContextBindingPlaceholder(
+                        title = "Card details", message = routeState.failure.safeMessage(),
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                    is AnkiReadContextUiState.Bound -> {
+                        val binding = routeState.binding
+                        val detailsViewModel: CardDetailsViewModel = viewModel(
+                            key = "card-details:${cardRef.stableKey}:${binding.context.generation.value}"
+                        ) {
+                            CardDetailsViewModel(binding = binding, initialCardRef = cardRef)
+                        }
+                        // A saved edit still requests an authoritative read through this same exact
+                        // card/context owner; this changes no mutation, scheduler or session path.
+                        val noteSaved by backStackEntry.savedStateHandle
+                            .getStateFlow(NOTE_EDIT_SAVED_KEY, false)
+                            .collectAsStateWithLifecycle()
+                        LaunchedEffect(noteSaved) {
+                            if (noteSaved) {
+                                backStackEntry.savedStateHandle[NOTE_EDIT_SAVED_KEY] = false
+                                detailsViewModel.refresh()
+                            }
+                        }
+                        CardDetailsScreen(
+                            viewModel = detailsViewModel,
+                            onNavigateBack = { navController.popBackStack() },
+                            onOpenNoteEditor = { ref ->
+                                navController.navigate(Screen.EditNote.createRoute(ref))
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -204,31 +377,57 @@ fun AppNavHost(
             val addNoteBackendId = Screen.AddNote.decodeBackendId(
                 backStackEntry.arguments?.getString(Screen.AddNote.ARG_BACKEND_ID)
             )
-            when {
-                addNoteBackendId == null -> CardDetailsRouteErrorScreen(
-                    message = "The backend for creating a note could not be read from the route. Return to the library and try again.",
+            val addNoteBackend = addNoteBackendId?.let(container.ankiBackendRegistry::find)
+            if (addNoteBackend == null || addNoteBackend !== container.ankiDroidBackend) {
+                ReadContextBindingPlaceholder(
+                    title = "New note",
+                    message = "The existing note-creation target is not registered as the exact AnkiDroid backend.",
                     onNavigateBack = { navController.popBackStack() }
                 )
-                container.ankiBackendRegistry.find(addNoteBackendId) == null -> CardDetailsRouteErrorScreen(
-                    message = "The backend that should create this note is not registered.",
-                    onNavigateBack = { navController.popBackStack() }
+            } else {
+                val bindingRequest = AnkiReadContextRequest.Reference(
+                    backendId = addNoteBackend.id,
+                    collectionKey = addNoteBackend.currentCollectionIdentity
+                        ?.takeIf { it.backendId == addNoteBackend.id }
+                        ?.collectionKey,
+                    purpose = "add_note_model_reads",
+                    requiredCapabilities = setOf(
+                        AnkiRequiredCapability.DECKS,
+                        AnkiRequiredCapability.NOTE_MODEL_LISTING
+                    )
                 )
-                else -> {
-                    val addNoteBackend = checkNotNull(container.ankiBackendRegistry.find(addNoteBackendId))
-                    val addNoteViewModel: AddNoteViewModel = viewModel(
-                        key = "add-note:${addNoteBackendId.stableId}"
-                    ) {
-                        AddNoteViewModel(
-                            backend = addNoteBackend,
-                            // The only creation path the screen has: the creation coordinator.
-                            coordinator = container.noteCreationCoordinator,
-                            mediaProbe = container.addNoteMediaProbe
+                val contextOwner: AnkiReadContextViewModel = viewModel(
+                    key = "add-note-read-context:${addNoteBackend.id.stableId}"
+                ) {
+                    AnkiReadContextViewModel(container.ankiReadContextController, bindingRequest)
+                }
+                val contextState by contextOwner.uiState.collectAsStateWithLifecycle()
+                when (val routeState = contextState) {
+                    AnkiReadContextUiState.Binding -> ReadContextBindingPlaceholder(
+                        title = "New note", message = null,
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                    is AnkiReadContextUiState.Failed -> ReadContextBindingPlaceholder(
+                        title = "New note", message = routeState.failure.safeMessage(),
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                    is AnkiReadContextUiState.Bound -> {
+                        val binding = routeState.binding
+                        val addNoteViewModel: AddNoteViewModel = viewModel(
+                            key = "add-note:${binding.context.generation.value}"
+                        ) {
+                            AddNoteViewModel(
+                                binding = binding,
+                                // All writes remain owned by the existing AnkiDroid creation coordinator.
+                                coordinator = container.noteCreationCoordinator,
+                                mediaProbe = container.addNoteMediaProbe
+                            )
+                        }
+                        AddNoteScreen(
+                            viewModel = addNoteViewModel,
+                            onBack = { navController.popBackStack() }
                         )
                     }
-                    AddNoteScreen(
-                        viewModel = addNoteViewModel,
-                        onBack = { navController.popBackStack() }
-                    )
                 }
             }
         }

@@ -31,12 +31,16 @@ data class LibrarySnapshot(
     val refreshedAtMs: Long,
     val freshness: LibraryFreshness,
     val lastRefreshError: AnkiError? = null,
-    val lastRefreshLatencyMs: Long? = null
+    val lastRefreshLatencyMs: Long? = null,
+    /** Exact read-context owner, including its process-local generation; null for legacy fixtures. */
+    val readContext: AnkiReadContext? = null
 ) {
     init {
         require(refreshedAtMs >= 0L)
         require(lastRefreshLatencyMs == null || lastRefreshLatencyMs >= 0L)
         require(collection == null || collection.backendId == backendId)
+        require(readContext == null || readContext.backendId == backendId)
+        require(readContext == null || readContext.collectionKey == collection?.collectionKey)
         require(selectedDeck == null || selectedDeck.backendId == backendId)
         require(decks.all { it.ref.backendId == backendId }) { "Snapshot decks must belong to $backendId" }
         require(decks.size == tree.deckCount) { "Tree must be derived from this snapshot's deck list" }

@@ -5,6 +5,7 @@ import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiDeckSummary
 import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.AnkiReadContext
 
 sealed interface DeckDetailsUiState {
     data object Loading : DeckDetailsUiState
@@ -20,7 +21,8 @@ sealed interface DeckDetailsUiState {
         val isRefreshing: Boolean = false,
         val isStartingStudy: Boolean = false,
         val readError: AnkiError? = null,
-        val studyStartError: AnkiError? = null
+        val studyStartError: AnkiError? = null,
+        val readContext: AnkiReadContext? = null
     ) : DeckDetailsUiState
 
     data class Unavailable(

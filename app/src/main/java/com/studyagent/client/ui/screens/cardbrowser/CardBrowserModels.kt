@@ -11,6 +11,7 @@ import com.studyagent.client.core.anki.AnkiCardSort
 import com.studyagent.client.core.anki.AnkiCardSortCapability
 import com.studyagent.client.core.anki.AnkiCardType
 import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.AnkiReadContext
 import com.studyagent.client.core.anki.AnkiFlag
 import com.studyagent.client.core.anki.AnkiSchedulingInfo
 import com.studyagent.client.core.anki.BurialFilter
@@ -135,10 +136,12 @@ data class SortOptionModel(
 sealed interface CardBrowserUiState {
     val query: CardBrowserQueryUi
     val capabilities: AnkiCardBrowserCapabilities
+    val readContext: AnkiReadContext? get() = null
 
     data class Loading(
         override val query: CardBrowserQueryUi,
-        override val capabilities: AnkiCardBrowserCapabilities
+        override val capabilities: AnkiCardBrowserCapabilities,
+        override val readContext: AnkiReadContext? = null
     ) : CardBrowserUiState
 
     data class Ready(
@@ -148,14 +151,16 @@ sealed interface CardBrowserUiState {
         val hasMore: Boolean,
         val isLoadingMore: Boolean,
         val totalCount: Int?,
-        val appendError: AnkiError? = null
+        val appendError: AnkiError? = null,
+        override val readContext: AnkiReadContext? = null
     ) : CardBrowserUiState
 
     data class Empty(
         override val query: CardBrowserQueryUi,
         val reason: Reason,
         override val capabilities: AnkiCardBrowserCapabilities,
-        val totalCount: Int? = null
+        val totalCount: Int? = null,
+        override val readContext: AnkiReadContext? = null
     ) : CardBrowserUiState {
         enum class Reason { NO_CARDS_IN_SCOPE, NO_MATCHES }
     }
@@ -166,14 +171,16 @@ sealed interface CardBrowserUiState {
         val availability: AnkiAvailability,
         override val capabilities: AnkiCardBrowserCapabilities,
         /** Non-null for a Ready backend that does not advertise the requested browse capability. */
-        val unsupportedFeature: String? = null
+        val unsupportedFeature: String? = null,
+        override val readContext: AnkiReadContext? = null
     ) : CardBrowserUiState
 
     data class Error(
         override val query: CardBrowserQueryUi,
         val backendId: AnkiBackendId,
         val error: AnkiError,
-        override val capabilities: AnkiCardBrowserCapabilities
+        override val capabilities: AnkiCardBrowserCapabilities,
+        override val readContext: AnkiReadContext? = null
     ) : CardBrowserUiState
 }
 

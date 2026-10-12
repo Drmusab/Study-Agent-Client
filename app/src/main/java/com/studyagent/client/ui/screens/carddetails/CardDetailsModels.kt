@@ -7,21 +7,25 @@ import com.studyagent.client.core.anki.AnkiCardType
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiFlag
 import com.studyagent.client.core.anki.AnkiRenderedCard
+import com.studyagent.client.core.anki.AnkiReadContext
 
 /** Canonical, read-only details screen state (GATE 16 CHECKPOINT 12). */
 sealed interface CardDetailsUiState {
     data object Loading : CardDetailsUiState
 
     data class Ready(
-        val details: CardDetailsPresentation
+        val details: CardDetailsPresentation,
+        val readContext: AnkiReadContext? = null
     ) : CardDetailsUiState
 
     data class Unavailable(
-        val reason: AnkiAvailability
+        val reason: AnkiAvailability,
+        val readContext: AnkiReadContext? = null
     ) : CardDetailsUiState
 
     data class Error(
-        val error: AnkiError
+        val error: AnkiError,
+        val readContext: AnkiReadContext? = null
     ) : CardDetailsUiState
 }
 
