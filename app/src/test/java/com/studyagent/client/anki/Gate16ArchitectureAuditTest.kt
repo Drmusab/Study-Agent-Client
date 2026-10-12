@@ -62,8 +62,15 @@ class Gate16ArchitectureAuditTest {
         ).joinToString("\n")
         val mutations = Regex("\\b(commitRating|answerCard|setFlag|buryCard|suspendCard|updateNote|editNote|deleteNote|nextCard)\\s*\\(")
         assertFalse(mutations.containsMatchIn(ui))
-        assertFalse(Regex("ContentResolver|FlashCardsContract|android\\.database\\.Cursor|AnkiConnect|com\\.studyagent\\.client\\.data\\.")
-            .containsMatchIn(ui))
+        val forbiddenProvidersOrDataAdapters = Regex(
+            "ContentResolver|FlashCardsContract|android\\.database\\.Cursor|AnkiConnect|" +
+                "com\\.studyagent\\.client\\.data\\.(?!anki\\.context\\.AnkiReadContext(?:Binding|Access)\\b)"
+        )
+        assertFalse(forbiddenProvidersOrDataAdapters.containsMatchIn(ui))
+        // GATE 21F adds only the lease/access contract needed to scope reads; it does not expose
+        // an adapter, repository, or mutation owner to the details UI.
+        assertTrue(ui.contains("com.studyagent.client.data.anki.context.AnkiReadContextBinding"))
+        assertTrue(ui.contains("com.studyagent.client.data.anki.context.AnkiReadContextAccess"))
         assertTrue(source("ui/screens/carddetails/CardDetailsViewModel.kt").contains("getCardDetails(token.cardRef)"))
     }
 
@@ -122,8 +129,12 @@ class Gate16ArchitectureAuditTest {
         assertTrue(fields.contains("SelectionContainer"))
         assertFalse(fields.contains("WebView"))
         assertTrue(routes.contains("fun createRoute(cardRef: AnkiCardRef)"))
-        assertTrue(nav.contains("ankiBackendRegistry.find(cardRef.backendId)"))
-        assertTrue(nav.contains("CardDetailsViewModel(initialBackend = detailsBackend, initialCardRef = cardRef)"))
+        assertTrue(nav.contains("AnkiReadContextRequest.Reference("))
+        assertTrue(nav.contains("backendId = cardRef.backendId"))
+        assertTrue(nav.contains("collectionKey = cardRef.collectionKey"))
+        assertTrue(nav.contains("container.ankiReadContextController"))
+        assertTrue(nav.contains("CardDetailsViewModel(binding = binding, initialCardRef = cardRef)"))
+        assertFalse(nav.contains("ankiBackendRegistry.find(cardRef.backendId)"))
         assertFalse(nav.contains("AnkiRenderedCard"))
     }
 }

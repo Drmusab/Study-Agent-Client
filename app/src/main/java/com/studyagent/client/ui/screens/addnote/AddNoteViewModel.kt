@@ -6,6 +6,10 @@ import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiNoteModel
 import com.studyagent.client.core.anki.AnkiResult
+import com.studyagent.client.core.anki.AnkiRequiredCapability
+import com.studyagent.client.core.anki.AnkiReadRequestIdentity
+import com.studyagent.client.data.anki.context.AnkiReadContextAccess
+import com.studyagent.client.data.anki.context.AnkiReadContextBinding
 import com.studyagent.client.core.anki.create.AddNoteDraft
 import com.studyagent.client.core.anki.create.MediaSourceProbe
 import com.studyagent.client.core.anki.create.MediaSourceProbeResult
@@ -40,10 +44,19 @@ import kotlinx.coroutines.launch
  * they are not schema-bound.
  */
 class AddNoteViewModel(
-    val backend: AnkiBackend,
+    private val binding: AnkiReadContextBinding,
     private val coordinator: NoteCreationCoordinator,
     private val mediaProbe: MediaSourceProbe
 ) : ViewModel() {
+    /** Compatibility for tests that supply an already-selected backend instance. */
+    constructor(
+        backend: AnkiBackend,
+        coordinator: NoteCreationCoordinator,
+        mediaProbe: MediaSourceProbe
+    ) : this(AnkiReadContextBinding.forLegacyBackend(backend), coordinator, mediaProbe)
+
+    val backend: AnkiBackend get() = binding.backend
+    private val readAccess = AnkiReadContextAccess()
 
     val backendLabel: String
         get() = AddNoteMapper.backendLabel(backend.id.stableId)
@@ -75,6 +88,9 @@ class AddNoteViewModel(
     private var modelsLoading = false
     private var modelsError: AnkiError? = null
     private var loadJob: Job? = null
+    private var modelRequestGeneration: Long = 0L
+    private var modelRequestIdentity: AnkiReadRequestIdentity? = null
+    private var deckRequestGeneration: Long = 0L
     private var saveJob: Job? = null
     private var lastOutcomeCreationId: NoteCreationId? = null
 
@@ -100,41 +116,75 @@ class AddNoteViewModel(
 
     fun reloadModels() {
         loadJob?.cancel()
+        val requestIdentity = AnkiReadRequestIdentity(
+            context = binding.context,
+            queryGeneration = 0L,
+            requestGeneration = ++modelRequestGeneration
+        )
+        modelRequestIdentity = requestIdentity
         loadJob = viewModelScope.launch {
             modelsLoading = true
             modelsError = null
-            val result = try {
-                backend.getNoteModels()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "model_listing_threw"))
-            }
+            val result = readAccess.read(
+                binding = binding,
+                requiredCapabilities = setOf(AnkiRequiredCapability.NOTE_MODEL_LISTING),
+                operation = { it.getNoteModels() },
+                validateResult = { models ->
+                    models.firstNotNullOfOrNull { model ->
+                        readAccess.validateResource(binding, model.ref.backendId, model.ref.collectionKey)
+                    }
+                }
+            )
+            if (modelRequestIdentity != requestIdentity || requestIdentity.context != binding.context) return@launch
             modelsLoading = false
             when (result) {
                 is AnkiResult.Success -> {
                     editor = editor.copy(models = result.value, selectedModelId = null)
                 }
-                is AnkiResult.Failure -> modelsError = result.error
+                is AnkiResult.Failure -> {
+                    modelsError = result.error
+                    if (AnkiReadContextAccess.isContextSafetyFailure(result.error)) {
+                        editor = editor.copy(models = emptyList(), selectedModelId = null, fieldValues = emptyMap())
+                    }
+                }
             }
             publish()
         }
     }
 
     private fun loadDeckNames() {
+        val requestIdentity = AnkiReadRequestIdentity(
+            context = binding.context,
+            queryGeneration = 0L,
+            requestGeneration = ++deckRequestGeneration
+        )
         viewModelScope.launch {
-            val decks = try {
-                backend.getDecks()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Throwable) {
-                AnkiResult.Failure(AnkiError.QueryFailure(causeCategory = "deck_listing_threw"))
+            val decks = readAccess.read(
+                binding = binding,
+                requiredCapabilities = setOf(AnkiRequiredCapability.DECKS),
+                operation = { it.getDecks() },
+                validateResult = { values ->
+                    values.firstNotNullOfOrNull { deck ->
+                        listOfNotNull(deck.ref, deck.parentRef).firstNotNullOfOrNull { ref ->
+                            readAccess.validateResource(binding, ref.backendId, ref.collectionKey)
+                        }
+                    }
+                }
+            )
+            if (requestIdentity.context != binding.context ||
+                requestIdentity.requestGeneration != deckRequestGeneration
+            ) return@launch
+            when (decks) {
+                is AnkiResult.Success -> {
+                    editor = editor.copy(deckNames = decks.value.associate { deck -> deck.ref.deckId to deck.name })
+                    publish()
+                }
+                is AnkiResult.Failure -> if (AnkiReadContextAccess.isContextSafetyFailure(decks.error)) {
+                    editor = editor.copy(deckNames = emptyMap())
+                    publish()
+                }
             }
-            if (decks is AnkiResult.Success) {
-                editor = editor.copy(deckNames = decks.value.associate { deck -> deck.ref.deckId to deck.name })
-                publish()
-            }
-            // A failed deck listing is non-fatal: the notice degrades to "not resolvable".
+            // Ordinary deck-list failure is non-fatal: the notice degrades to "not resolvable".
         }
     }
 

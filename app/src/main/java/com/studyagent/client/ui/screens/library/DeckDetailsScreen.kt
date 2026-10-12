@@ -35,6 +35,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.anki.AnkiDeckCounts
+import com.studyagent.client.core.anki.AnkiDeckRef
+import com.studyagent.client.core.anki.AnkiReadContext
 import com.studyagent.client.ui.components.BannerTone
 import com.studyagent.client.ui.components.InfoBanner
 import com.studyagent.client.ui.components.PrimaryButton
@@ -51,7 +53,7 @@ fun DeckDetailsScreen(
     viewModel: DeckDetailsViewModel,
     onNavigateBack: () -> Unit,
     onNavigateToStudy: () -> Unit,
-    onNavigateToCardBrowser: (String) -> Unit = {},
+    onNavigateToCardBrowser: (AnkiDeckRef, AnkiReadContext) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -62,6 +64,7 @@ fun DeckDetailsScreen(
         is DeckDetailsUiState.Ready -> current.isRefreshing
     }
     LaunchedEffect(viewModel) {
+        viewModel.onScreenActive()
         viewModel.events.collect { event ->
             when (event) {
                 DeckDetailsEvent.StudyStarted -> onNavigateToStudy()
@@ -189,7 +192,11 @@ fun DeckDetailsScreen(
                             item(key = "browse-cards") {
                                 SecondaryButton(
                                     text = "Browse cards",
-                                    onClick = { onNavigateToCardBrowser(current.summary.deck.ref.deckId) },
+                                    onClick = {
+                                        current.readContext?.let { context ->
+                                            onNavigateToCardBrowser(current.summary.deck.ref, context)
+                                        }
+                                    },
                                     modifier = Modifier.fillMaxWidth()
                                 )
                             }

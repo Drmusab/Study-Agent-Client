@@ -249,7 +249,7 @@ private fun installMain(dispatcher: TestDispatcher) = Dispatchers.setMain(dispat
     }
 
     @Test
-    fun `a snapshot from a different backend identity is never rendered`() = runTest {
+    fun `a library view refuses a repository from a different backend identity`() = runTest {
         installMain(UnconfinedTestDispatcher(testScheduler))
         try {
             val foreignId = AnkiBackendId.Fake("foreign-backend")
@@ -269,21 +269,18 @@ private fun installMain(dispatcher: TestDispatcher) = Dispatchers.setMain(dispat
                 initialCapabilities = capabilities(),
                 initialAvailability = AnkiAvailability.Ready(capabilities())
             )
-            val viewModel = track(LibraryViewModel(ownBackend, repository))
-            val observed = mutableListOf<LibraryUiState>()
-            backgroundScope.launch { viewModel.uiState.collect { observed += it } }
-            advanceUntilIdle()
+            val refused = try {
+                LibraryViewModel(ownBackend, repository)
+                false
+            } catch (_: IllegalArgumentException) {
+                true
+            }
 
-            // No emitted state may ever present foreign data as this backend's library; the
-            // identity guard fails closed instead of mixing backends (INV-14-12 / audit 7).
-            assertTrue(observed.none {
-                it is LibraryUiState.Ready && it.decks.any { deck -> deck.deck.ref.backendId == foreignId }
-            })
-            val finalState = viewModel.uiState.value
-            assertTrue(finalState is LibraryUiState.Error)
-            assertTrue((finalState as LibraryUiState.Error).error is AnkiError.BackendUnavailable)
-            assertEquals(backendId, finalState.backend)
-            assertEquals(0, ownBackend.getDecksCalls) // the mismatch is caught before any read
+            // The immutable owner is enforced at construction: a foreign repository cannot reach
+            // this backend's presentation layer or trigger a read through it.
+            assertTrue(refused)
+            assertEquals(foreignId, repository.binding.context.backendId)
+            assertEquals(0, ownBackend.getDecksCalls)
         } finally {
             clearViewModels()
             Dispatchers.resetMain()

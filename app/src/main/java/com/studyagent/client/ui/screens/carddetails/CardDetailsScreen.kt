@@ -41,6 +41,7 @@ import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.ui.components.anki.displayLabel
 import com.studyagent.client.core.render.AnkiCardSide
 import com.studyagent.client.core.anki.ReviewTurnId
 import com.studyagent.client.core.render.AnkiCardRenderConfig
@@ -98,13 +99,22 @@ fun CardDetailsScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val ready = (state as? CardDetailsUiState.Ready)?.details
+    val contextBackendId = when (val current = state) {
+        is CardDetailsUiState.Ready -> current.readContext?.backendId
+        is CardDetailsUiState.Unavailable -> current.readContext?.backendId
+        is CardDetailsUiState.Error -> current.readContext?.backendId
+        CardDetailsUiState.Loading -> null
+    }
     Scaffold(
         containerColor = AppColors.appBackground,
         topBar = {
             StudyAgentTopBar(
                 title = "Card details",
                 onBack = onNavigateBack,
-                subtitle = ready?.deckName,
+                subtitle = listOfNotNull(
+                    ready?.deckName,
+                    contextBackendId?.displayLabel()
+                ).joinToString(" • ").ifBlank { null },
                 trailing = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         // The affordance is absent, not disabled-looking, when no edit capability exists

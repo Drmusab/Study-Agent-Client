@@ -15,6 +15,7 @@ import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiCardScope
 import com.studyagent.client.core.anki.AnkiCardSort
 import com.studyagent.client.core.anki.AnkiCardType
+import com.studyagent.client.core.anki.AnkiCollectionIdentity
 import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
@@ -248,45 +249,49 @@ class CardBrowserViewModelTest {
     }
 
     @Test
-    fun `backend switch discards old identity and loads only the newly bound backend`() = runBrowserTest(
+    fun `opening another backend creates a distinct browser context`() = runBrowserTest(
         backend = backend(id, listOf(deckA), listOf(card(id, deckA, "Old backend", "old")))
-    ) { viewModel, _ ->
-        viewModel.awaitReady()
+    ) { oldViewModel, _ ->
+        val oldState = oldViewModel.awaitReady()
         val newId = AnkiBackendId.Fake("new-browser")
         val newDeck = AnkiDeckRef(newId, "deck-a", "collection-b")
         val next = backend(newId, listOf(newDeck), listOf(card(newId, newDeck, "New backend", "new")))
+        val newViewModel = CardBrowserViewModel(initialBackend = next, deckId = newDeck.deckId)
+        val newState = newViewModel.awaitReady()
 
-        viewModel.switchBackend(next)
-        val state = viewModel.awaitState {
-            it is CardBrowserUiState.Ready && it.rows.singleOrNull()?.cardRef?.backendId == newId
-        } as CardBrowserUiState.Ready
-        assertEquals(newId, state.rows.single().cardRef.backendId)
-        assertEquals("New backend", state.rows.single().questionPreview)
+        assertEquals(id, oldState.rows.single().cardRef.backendId)
+        assertEquals("Old backend", oldState.rows.single().questionPreview)
+        assertEquals(newId, newState.rows.single().cardRef.backendId)
+        assertEquals("New backend", newState.rows.single().questionPreview)
+        assertTrue(oldState.readContext != newState.readContext)
         assertEquals(1, next.browseCalls)
     }
 
     @Test
-    fun `late response from the previous backend cannot publish after a backend switch`() = runBrowserTest(
+    fun `late response remains confined to its old context`() = runBrowserTest(
         backend = backend(id, listOf(deckA), listOf(card(id, deckA, "Old response", "old")))
-    ) { viewModel, sourceBackend ->
+    ) { oldViewModel, sourceBackend ->
         val oldBackend = sourceBackend as FakeAnkiBackend
-        viewModel.awaitReady()
+        oldViewModel.awaitReady()
         val gate = CompletableDeferred<Unit>()
         oldBackend.browseGate = gate
         oldBackend.ignoreBrowseCancellation = true
-        viewModel.refresh()
+        oldViewModel.refresh()
         assertEquals(2, oldBackend.browseCalls)
 
         val newId = AnkiBackendId.Fake("switched-browser")
         val newDeck = AnkiDeckRef(newId, "deck-a", "collection-new")
         val newBackend = backend(newId, listOf(newDeck), listOf(card(newId, newDeck, "New response", "new")))
-        viewModel.switchBackend(newBackend)
+        val newViewModel = CardBrowserViewModel(initialBackend = newBackend, deckId = newDeck.deckId)
+        val newState = newViewModel.awaitReady()
         gate.complete(Unit)
 
-        val state = viewModel.awaitState {
-            it is CardBrowserUiState.Ready && it.rows.singleOrNull()?.cardRef?.backendId == newId
+        val oldState = oldViewModel.awaitState {
+            it is CardBrowserUiState.Ready && it.rows.singleOrNull()?.questionPreview == "Old response"
         } as CardBrowserUiState.Ready
-        assertEquals("New response", state.rows.single().questionPreview)
+        assertEquals("New response", newState.rows.single().questionPreview)
+        assertEquals(newState, newViewModel.uiState.value)
+        assertTrue(oldState.readContext != newState.readContext)
         assertEquals(1, newBackend.browseCalls)
         assertEquals(0, oldBackend.commitInvocations)
     }
@@ -390,7 +395,7 @@ class CardBrowserViewModelTest {
         val cardRef = state.rows.single().cardRef
         viewModel.openCardDetails(cardRef)
         val event = withTimeout(TIMEOUT_MS) { viewModel.events.first() }
-        assertEquals(CardBrowserEvent.OpenCardDetails(cardRef), event)
+        assertEquals(CardBrowserEvent.OpenCardDetails(cardRef, state.readContext!!), event)
     }
 
     private fun runBrowserTest(
@@ -427,7 +432,11 @@ class CardBrowserViewModelTest {
         cards = cards,
         initialCapabilities = capabilities,
         initialAvailability = AnkiAvailability.Ready(capabilities)
-    )
+    ).apply {
+        val keys = deckRefs.mapNotNull { it.collectionKey }.distinct()
+        require(keys.size <= 1) { "One fake backend fixture cannot span collections" }
+        currentCollectionIdentity = keys.singleOrNull()?.let { AnkiCollectionIdentity(backendId, it) }
+    }
 
     private fun card(
         backendId: AnkiBackendId,

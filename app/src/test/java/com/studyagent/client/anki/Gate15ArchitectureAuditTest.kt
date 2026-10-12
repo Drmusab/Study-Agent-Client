@@ -281,7 +281,10 @@ class Gate15ArchitectureAuditTest {
             "browser UI actions"
         )
         val viewModel = source("ui/screens/cardbrowser/CardBrowserViewModel.kt")
-        assertTrue(viewModel.contains("targetBackend.browseCards(request)"))
+        assertTrue(viewModel.contains("readAccess.read("))
+        assertTrue(viewModel.contains("requiredCapabilities = setOf(AnkiRequiredCapability.CARD_BROWSER)"))
+        assertTrue(viewModel.contains("operation = { it.browseCards(request) }"))
+        assertTrue(viewModel.contains("validateResult = ::validatePageContext"))
         assertTrue(viewModel.contains("catch (cancellation: CancellationException)"))
         assertTrue(viewModel.contains("throw cancellation"))
         val errors = source("core/anki/AnkiErrors.kt")
@@ -396,7 +399,8 @@ class Gate15ArchitectureAuditTest {
         val navHost = source("ui/navigation/AppNavHost.kt")
         val placeholder = source("ui/screens/cardbrowser/CardDetailsPlaceholderScreen.kt")
         assertTrue(routes.contains("fun createRoute(cardRef: AnkiCardRef)"))
-        assertTrue(navHost.contains("CardBrowserViewModel(initialBackend = container.ankiDroidBackend"))
+        assertTrue(navHost.contains("CardBrowserViewModel(initialBinding = binding, deckRef = deckRef)"))
+        assertTrue(navHost.contains("Screen.CardDetails.createRoute(cardRef, readContext)"))
         noForbidden(routes, Regex("AnkiRenderedCard|questionHtml"), "the details route payload")
         assertTrue(placeholder.contains("GATE 16 owns one-card hydration"))
         noForbidden(

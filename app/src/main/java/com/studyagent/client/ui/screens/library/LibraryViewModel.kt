@@ -6,9 +6,12 @@ import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.AnkiReadContext
 import com.studyagent.client.core.anki.LibraryDataState
 import com.studyagent.client.core.anki.LibraryFreshness
 import com.studyagent.client.data.anki.AnkiLibraryRepository
+import com.studyagent.client.data.anki.context.AnkiReadContextAccess
+import com.studyagent.client.data.anki.context.AnkiReadContextBinding
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
@@ -22,9 +25,20 @@ import kotlinx.coroutines.sync.Mutex
  * [AnkiLibraryRepository]; row rendering and search are entirely in-memory.
  */
 class LibraryViewModel(
-    private val backend: AnkiBackend,
+    private val binding: AnkiReadContextBinding,
     private val libraryRepository: AnkiLibraryRepository
 ) : ViewModel() {
+    /** Compatibility for isolated tests with a backend already selected by the test. */
+    constructor(backend: AnkiBackend, libraryRepository: AnkiLibraryRepository) :
+        this(libraryRepository.binding, libraryRepository) {
+        require(backend === libraryRepository.binding.backend)
+    }
+
+    private val backend: AnkiBackend get() = binding.backend
+    private val readAccess = AnkiReadContextAccess()
+    val readContext: AnkiReadContext get() = binding.context
+
+    init { require(libraryRepository.binding.context == binding.context) }
     private var availability: AnkiAvailability = backend.availability.value
     private var capabilities: AnkiCapabilities = backend.capabilities.value
     private var dataState: LibraryDataState = libraryRepository.state.value
@@ -88,6 +102,13 @@ class LibraryViewModel(
      * and stale snapshots may be retried safely because the operation is read-only.
      */
     fun onScreenActive() {
+        val identityError = readAccess.validateBinding(binding)
+        if (identityError != null && AnkiReadContextAccess.isContextSafetyFailure(identityError)) {
+            operationError = identityError
+            dataState = LibraryDataState.Failed(identityError, failedAtMs = 0L)
+            publish()
+            return
+        }
         if (availability !is AnkiAvailability.Ready) return
         val snapshot = dataState.snapshot
         if (snapshot == null || snapshot.freshness != LibraryFreshness.FRESH) refresh()
@@ -153,6 +174,8 @@ class LibraryViewModel(
     private fun publish() {
         _uiState.value = projectState(
             backendId = backend.id,
+            readContext = binding.context,
+            contextValid = binding.isValid,
             availability = availability,
             capabilities = capabilities,
             dataState = dataState,
@@ -164,6 +187,8 @@ class LibraryViewModel(
 
     private fun projectState(
         backendId: com.studyagent.client.core.anki.AnkiBackendId,
+        readContext: AnkiReadContext,
+        contextValid: Boolean,
         availability: AnkiAvailability,
         capabilities: AnkiCapabilities,
         dataState: LibraryDataState,
@@ -171,6 +196,12 @@ class LibraryViewModel(
         isRefreshing: Boolean,
         operationError: AnkiError?
     ): LibraryUiState {
+        if (!contextValid) {
+            return LibraryUiState.Error(
+                backendId,
+                AnkiError.InvalidRequest("read_context_invalidated")
+            )
+        }
         if (availability == AnkiAvailability.Checking) {
             return operationError?.let { LibraryUiState.Error(backendId, it, isRetrying = isRefreshing) }
                 ?: LibraryUiState.Loading
@@ -187,9 +218,12 @@ class LibraryViewModel(
         }
 
         val snapshot = dataState.snapshot
-        if (snapshot != null && snapshot.backendId != backendId) {
-            // Never display a cache whose backend identity does not match the currently observed one.
-            return LibraryUiState.Error(backendId, AnkiError.BackendUnavailable())
+        if (snapshot != null && (snapshot.backendId != backendId || snapshot.readContext != readContext)) {
+            // Never display a cache whose backend, collection or context generation differs.
+            return LibraryUiState.Error(
+                backendId,
+                AnkiError.InvalidRequest("read_context_cache_identity_mismatch")
+            )
         }
         if (snapshot != null) {
             val summaries = snapshot.summaries()
@@ -207,6 +241,7 @@ class LibraryViewModel(
                 decks = items,
                 tree = DeckTreeUiMapper.build(items, query),
                 backend = backendId,
+                readContext = readContext,
                 availability = availability,
                 capabilities = capabilities,
                 isRefreshing = isRefreshing || dataState.isRefreshing,

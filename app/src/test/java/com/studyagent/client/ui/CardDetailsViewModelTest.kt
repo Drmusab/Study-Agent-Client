@@ -59,7 +59,16 @@ class CardDetailsViewModelTest {
         noteModifiedEpochSeconds = null
     )
 
-    private fun vm(backend: AnkiBackend, ref: AnkiCardRef): CardDetailsViewModel {
+    private fun vm(
+        backend: AnkiBackend,
+        ref: AnkiCardRef,
+        collectionIdentity: String? = ref.collectionKey
+    ): CardDetailsViewModel {
+        when (backend) {
+            is FakeAnkiBackend -> backend.currentCollectionIdentity = collectionIdentity
+                ?.let { AnkiCollectionIdentity(backend.id, it) }
+            is ControlledBackend -> backend.setCollectionIdentity(collectionIdentity)
+        }
         Dispatchers.setMain(UnconfinedTestDispatcher(null))
         return CardDetailsViewModel(backend, ref).also { model ->
             ViewModelStore().also { store ->
@@ -139,15 +148,16 @@ class CardDetailsViewModelTest {
     }
 
     @Test
-    fun `backend switch cannot reinterpret the old card reference`() = runTest {
+    fun `a different collection cannot reinterpret an existing card reference`() = runTest {
         val original = FakeAnkiBackend(id = backendId, cardDetails = listOf(details(cardA)))
-        val otherId = AnkiBackendId.Fake("other-backend")
-        val other = FakeAnkiBackend(id = otherId, cardDetails = listOf(detailsFor(otherId)))
-        val viewModel = vm(original, cardA)
-        viewModel.switchBackend(other)
-        val error = (viewModel.uiState.value as CardDetailsUiState.Error).error
-        assertTrue(error is AnkiError.InvalidRequest)
-        assertEquals(0, other.cardDetailsCalls)
+        val replacement = FakeAnkiBackend(id = backendId, cardDetails = listOf(details(cardA)))
+        replacement.currentCollectionIdentity = AnkiCollectionIdentity(backendId, "collection-B")
+        vm(original, cardA)
+
+        val replacementViewModel = vm(replacement, cardA, collectionIdentity = "collection-B")
+        val error = (replacementViewModel.uiState.value as CardDetailsUiState.Error).error
+        assertEquals("read_context_collection_identity_mismatch", (error as AnkiError.InvalidRequest).detail)
+        assertEquals(0, replacement.cardDetailsCalls)
     }
 
     @Test
@@ -168,12 +178,10 @@ class CardDetailsViewModelTest {
         val oldRef = AnkiCardRef(backendId, cardId = "card-A", noteId = noteRef.noteId, cardOrd = 0)
         val oldDetails = details(cardA).copy(cardRef = oldRef)
         val original = FakeAnkiBackend(id = backendId, cardDetails = listOf(oldDetails))
-        val replacement = FakeAnkiBackend(id = backendId, cardDetails = listOf(oldDetails))
-        val viewModel = vm(original, oldRef)
-        viewModel.switchBackend(replacement)
+        val viewModel = vm(original, oldRef, collectionIdentity = "collection-A")
         val error = (viewModel.uiState.value as CardDetailsUiState.Error).error
-        assertEquals("card_details_collection_identity_unavailable", (error as AnkiError.InvalidRequest).detail)
-        assertEquals(0, replacement.cardDetailsCalls)
+        assertEquals("read_context_collection_identity_unverifiable", (error as AnkiError.InvalidRequest).detail)
+        assertEquals(0, original.cardDetailsCalls)
     }
 
     @Test
@@ -234,6 +242,11 @@ class CardDetailsViewModelTest {
     /** Deliberately non-cancellable transport seam: stale-response guard, not cancellation, must win. */
     private class ControlledBackend(private val delegate: AnkiBackend) : AnkiBackend by delegate {
         val pending = linkedMapOf<AnkiCardRef, Continuation<AnkiResult<AnkiCardDetails>>>()
+
+        fun setCollectionIdentity(collectionKey: String?) {
+            (delegate as? FakeAnkiBackend)?.currentCollectionIdentity = collectionKey
+                ?.let { AnkiCollectionIdentity(delegate.id, it) }
+        }
 
         override suspend fun getCardDetails(cardRef: AnkiCardRef): AnkiResult<AnkiCardDetails> =
             suspendCoroutine { continuation -> pending[cardRef] = continuation }

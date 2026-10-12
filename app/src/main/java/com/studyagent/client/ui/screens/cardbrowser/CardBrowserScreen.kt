@@ -41,6 +41,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiReadContext
+import com.studyagent.client.ui.components.anki.displayLabel
 import com.studyagent.client.ui.components.StudyAgentTopBar
 import com.studyagent.client.ui.components.anki.CardBrowserFilters
 import com.studyagent.client.ui.components.anki.CardBrowserRow as CardBrowserRowView
@@ -57,16 +60,17 @@ const val CARD_BROWSER_SEARCH_TEST_TAG = "card_browser_search"
 fun CardBrowserScreen(
     viewModel: CardBrowserViewModel,
     onNavigateBack: () -> Unit,
-    onOpenCardDetails: (com.studyagent.client.core.anki.AnkiCardRef) -> Unit,
+    onOpenCardDetails: (AnkiCardRef, AnkiReadContext) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val isLoading = state is CardBrowserUiState.Loading
 
     LaunchedEffect(viewModel) {
+        viewModel.onScreenActive()
         viewModel.events.collect { event ->
             when (event) {
-                is CardBrowserEvent.OpenCardDetails -> onOpenCardDetails(event.cardRef)
+                is CardBrowserEvent.OpenCardDetails -> onOpenCardDetails(event.cardRef, event.readContext)
             }
         }
     }
@@ -77,7 +81,10 @@ fun CardBrowserScreen(
             StudyAgentTopBar(
                 title = "Card browser",
                 onBack = onNavigateBack,
-                subtitle = if (state.query.deckId == null) "All cards" else "Deck-scoped",
+                subtitle = buildString {
+                    state.readContext?.backendId?.displayLabel()?.let { append(it).append(" • ") }
+                    append(if (state.query.deckId == null) "All cards" else "Deck-scoped")
+                },
                 trailing = {
                     IconButton(
                         onClick = viewModel::refresh,

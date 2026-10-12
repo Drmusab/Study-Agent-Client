@@ -6,6 +6,7 @@ import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckSummary
 import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.AnkiReadContext
 
 /** One real deck row. [deck.ref] is the only navigation identity; the name is display-only. */
 data class DeckListItem(
@@ -56,7 +57,9 @@ sealed interface LibraryUiState {
         val availability: AnkiAvailability.Ready,
         val capabilities: AnkiCapabilities,
         val isRefreshing: Boolean,
-        val staleError: AnkiError? = null
+        val staleError: AnkiError? = null,
+        /** Bound backend/collection/generation carried into deck navigation. */
+        val readContext: AnkiReadContext? = null
     ) : LibraryUiState
 
     data class Empty(

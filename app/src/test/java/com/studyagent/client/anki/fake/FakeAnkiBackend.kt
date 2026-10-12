@@ -104,6 +104,13 @@ class FakeAnkiBackend(
     private val mutableCapabilities = MutableStateFlow(initialCapabilities)
     override val availability = mutableAvailability.asStateFlow()
     override val capabilities = mutableCapabilities.asStateFlow()
+    /** Test fixture identity is supplied explicitly; it is never inferred from resource IDs. */
+    @Volatile override var currentCollectionIdentity: AnkiCollectionIdentity? = null
+
+    @Volatile var refreshAvailabilityCalls: Int = 0
+        private set
+    @Volatile var refreshAvailabilityAction: suspend FakeAnkiBackend.() -> Unit = {}
+    @Volatile var decksGate: CompletableDeferred<Unit>? = null
 
     private var serial = 0L
     private var session: AnkiReviewSession? = null
@@ -306,7 +313,11 @@ class FakeAnkiBackend(
         hydrationMemo = null
     }
 
-    override suspend fun refreshAvailability() { delay(latencyMs) }
+    override suspend fun refreshAvailability() {
+        refreshAvailabilityCalls += 1
+        refreshAvailabilityAction()
+        delay(latencyMs)
+    }
 
     suspend fun replaceDecks(decks: List<AnkiDeck>) = mutex.withLock {
         require(decks.all { it.ref.backendId == id })
@@ -318,6 +329,7 @@ class FakeAnkiBackend(
 
     override suspend fun getDecks(): AnkiResult<List<AnkiDeck>> {
         delay(latencyMs)
+        decksGate?.await()
         return mutex.withLock {
             getDecksCalls += 1
             usabilityError()?.let { return@withLock AnkiResult.Failure(it) }

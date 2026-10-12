@@ -7,8 +7,13 @@ import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCardHydration
 import com.studyagent.client.core.anki.AnkiCardRef
+import com.studyagent.client.core.anki.AnkiReadContext
+import com.studyagent.client.core.anki.AnkiReadRequestIdentity
+import com.studyagent.client.core.anki.AnkiRequiredCapability
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiResult
+import com.studyagent.client.data.anki.context.AnkiReadContextAccess
+import com.studyagent.client.data.anki.context.AnkiReadContextBinding
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,9 +39,14 @@ import kotlinx.coroutines.launch
  * took ownership.
  */
 class CardDetailsViewModel(
-    initialBackend: AnkiBackend,
+    private val binding: AnkiReadContextBinding,
     initialCardRef: AnkiCardRef
 ) : ViewModel() {
+    /** Compatibility for isolated tests that provide an exact backend-qualified reference. */
+    constructor(initialBackend: AnkiBackend, initialCardRef: AnkiCardRef) : this(
+        AnkiReadContextBinding.forRouteReference(initialBackend, initialCardRef.collectionKey),
+        initialCardRef
+    ) { require(initialBackend.id == initialCardRef.backendId) }
     private data class BackendSnapshot(
         val availability: AnkiAvailability,
         val cardDetailsSupported: Boolean,
@@ -49,16 +59,20 @@ class CardDetailsViewModel(
     )
 
     private data class RequestToken(
-        val backend: AnkiBackend,
-        val backendId: AnkiBackendId,
-        val collectionKey: String?,
+        val binding: AnkiReadContextBinding,
+        val identity: AnkiReadRequestIdentity,
         val cardRef: AnkiCardRef,
-        val generation: Long,
         val noteEditingOffered: Boolean
-    )
+    ) {
+        val backend: AnkiBackend get() = binding.backend
+        val backendId: AnkiBackendId get() = identity.context.backendId
+        val collectionKey: String? get() = identity.context.collectionKey
+        val generation: Long get() = identity.requestGeneration
+    }
 
-    private var backend: AnkiBackend = initialBackend
+    private val backend: AnkiBackend = binding.backend
     private var cardRef: AnkiCardRef = initialCardRef
+    private val readAccess = AnkiReadContextAccess()
     private var backendSnapshot = snapshot(backend)
     private var generation = 0L
     private var backendObservation: Job? = null
@@ -68,7 +82,8 @@ class CardDetailsViewModel(
     val uiState: StateFlow<CardDetailsUiState> = _uiState.asStateFlow()
 
     init {
-        observeBackend(initialBackend)
+        require(binding.context.backendId == initialCardRef.backendId)
+        observeBackend(backend)
         reload()
     }
 
@@ -87,33 +102,6 @@ class CardDetailsViewModel(
         }
         cardRef = nextCardRef
         reload()
-    }
-
-    /**
-     * Backend changes never reinterpret an old reference. A different [AnkiBackendId] is refused
-     * before any read; the new backend can serve details only after navigation supplies a
-     * reference qualified for its identity (INV-16-15).
-     */
-    fun switchBackend(next: AnkiBackend) {
-        if (next === backend) return
-        cancelRequest()
-        backendObservation?.cancel()
-        backend = next
-        backendSnapshot = snapshot(next)
-        generation += 1
-        observeBackend(next)
-        when {
-            next.id != cardRef.backendId -> _uiState.value = CardDetailsUiState.Error(
-                AnkiError.InvalidRequest(detail = "card_ref_foreign_backend")
-            )
-            // An unknown collection key is not a wildcard. If the backend instance/context was
-            // replaced and this public backend cannot identify its collection, close the old
-            // details context rather than reinterpret a possibly-colliding numeric card ID.
-            cardRef.collectionKey == null -> _uiState.value = CardDetailsUiState.Error(
-                AnkiError.InvalidRequest(detail = "card_details_collection_identity_unavailable")
-            )
-            else -> reload()
-        }
     }
 
     private fun observeBackend(observed: AnkiBackend) {
@@ -138,13 +126,12 @@ class CardDetailsViewModel(
         generation += 1L
         cancelRequest()
 
-        if (cardRef.backendId != backend.id) {
+        if (cardRef.backendId != binding.context.backendId || cardRef.backendId != backend.id) {
             _uiState.value = CardDetailsUiState.Error(
-                AnkiError.InvalidRequest(detail = "card_ref_foreign_backend")
+                AnkiError.InvalidRequest(detail = "read_context_backend_mismatch"), binding.context
             )
             return
         }
-
         when (val availability = backendSnapshot.availability) {
             AnkiAvailability.Checking -> {
                 _uiState.value = CardDetailsUiState.Loading
@@ -152,39 +139,66 @@ class CardDetailsViewModel(
             }
             is AnkiAvailability.Ready -> Unit
             else -> {
-                _uiState.value = CardDetailsUiState.Unavailable(availability)
+                _uiState.value = CardDetailsUiState.Unavailable(availability, binding.context)
                 return
             }
         }
 
+        val bindingError = readAccess.validateBinding(binding)
+        if (bindingError != null) {
+            _uiState.value = CardDetailsUiState.Error(bindingError, binding.context)
+            return
+        }
+        val resourceError = readAccess.validateResource(binding, cardRef.backendId, cardRef.collectionKey)
+        if (resourceError != null) {
+            _uiState.value = CardDetailsUiState.Error(resourceError, binding.context)
+            return
+        }
+
         if (!backendSnapshot.cardDetailsSupported) {
             _uiState.value = CardDetailsUiState.Error(
-                AnkiError.UnsupportedAction(action = "card_details")
+                AnkiError.UnsupportedAction(action = "card_details"), binding.context
             )
             return
         }
 
         _uiState.value = CardDetailsUiState.Loading
         val token = RequestToken(
-            backend = backend,
-            backendId = backend.id,
-            collectionKey = cardRef.collectionKey,
+            binding = binding,
+            identity = AnkiReadRequestIdentity(
+                context = binding.context,
+                queryGeneration = 0L,
+                requestGeneration = generation
+            ),
             cardRef = cardRef,
-            generation = generation,
             noteEditingOffered = backendSnapshot.noteEditingOffered
         )
         requestJob = viewModelScope.launch {
-            val result = try {
-                token.backend.getCardDetails(token.cardRef)
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (failure: Throwable) {
-                AnkiResult.Failure(AnkiError.Unknown(cause = failure::class.java.simpleName))
-            }
+            val result = readAccess.read(
+                binding = token.binding,
+                requiredCapabilities = setOf(AnkiRequiredCapability.CARD_DETAILS),
+                operation = { it.getCardDetails(token.cardRef) },
+                validateResult = { details ->
+                    listOfNotNull(
+                        details.cardRef.let { it.backendId to it.collectionKey },
+                        details.noteRef?.let { it.backendId to it.collectionKey },
+                        details.deckRef?.let { it.backendId to it.collectionKey },
+                        details.originalDeckRef?.let { it.backendId to it.collectionKey }
+                    ).firstNotNullOfOrNull { (backendId, collectionKey) ->
+                        readAccess.validateResource(token.binding, backendId, collectionKey)
+                    }
+                }
+            )
             if (!isCurrent(token)) return@launch
             when (result) {
-                is AnkiResult.Failure -> _uiState.value = CardDetailsUiState.Error(result.error)
+                is AnkiResult.Failure -> _uiState.value = CardDetailsUiState.Error(result.error, binding.context)
                 is AnkiResult.Success -> {
+                    if (!binding.isValid) {
+                        _uiState.value = CardDetailsUiState.Error(
+                            AnkiError.InvalidRequest("read_context_invalidated"), binding.context
+                        )
+                        return@launch
+                    }
                     if (result.value.cardRef.backendId != token.backendId ||
                         result.value.cardRef.collectionKey != token.collectionKey ||
                         !AnkiCardHydration.identityMatches(token.cardRef, result.value.cardRef)
@@ -193,15 +207,16 @@ class CardDetailsViewModel(
                             AnkiError.StaleCardReference(
                                 card = token.cardRef,
                                 detail = "card_details_identity_mismatch"
-                            )
+                            ), binding.context
                         )
                         return@launch
                     }
                     _uiState.value = CardDetailsUiState.Ready(
-                        CardDetailsMapper.map(
+                        details = CardDetailsMapper.map(
                             details = result.value,
                             canOpenNoteEditor = token.noteEditingOffered
-                        )
+                        ),
+                        readContext = binding.context
                     )
                 }
             }
@@ -209,8 +224,10 @@ class CardDetailsViewModel(
     }
 
     private fun isCurrent(token: RequestToken): Boolean =
-        generation == token.generation && backend === token.backend && backend.id == token.backendId &&
-            cardRef == token.cardRef && cardRef.collectionKey == token.collectionKey
+        generation == token.generation && binding === token.binding &&
+            token.identity.context == binding.context && backend === token.backend &&
+            backend.id == token.backendId && cardRef == token.cardRef &&
+            cardRef.collectionKey == token.collectionKey
 
     private fun cancelRequest() {
         requestJob?.cancel()

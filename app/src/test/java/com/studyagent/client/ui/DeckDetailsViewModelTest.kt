@@ -240,7 +240,7 @@ class DeckDetailsViewModelTest {
     }
 
     @Test
-    fun `details refuse a snapshot from a different backend identity`() = runTest {
+    fun `details refuses a repository from a different backend before constructing a view`() = runTest {
         Dispatchers.setMain(UnconfinedTestDispatcher(testScheduler))
         try {
             val backendAId = AnkiBackendId.Fake("source-a")
@@ -261,10 +261,15 @@ class DeckDetailsViewModelTest {
             )
             val repositoryA = AnkiLibraryRepository(backendA)
             repositoryA.refresh()
-            val (details) = detailsViewModel(backendB, repositoryA, "1", backgroundScope)
-            val state = details.uiState.value as DeckDetailsUiState.Error
-            assertTrue(state.error is com.studyagent.client.core.anki.AnkiError.DeckNotFound)
-            assertEquals(backendBId, (state.error as com.studyagent.client.core.anki.AnkiError.DeckNotFound).deck?.backendId)
+            val refused = try {
+                detailsViewModel(backendB, repositoryA, "1", backgroundScope)
+                false
+            } catch (_: IllegalArgumentException) {
+                true
+            }
+            assertTrue(refused)
+            assertEquals(1, backendA.getDecksCalls)
+            assertEquals(0, backendB.getDecksCalls)
         } finally {
             clearViewModels()
             Dispatchers.resetMain()

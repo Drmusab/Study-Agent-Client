@@ -8,11 +8,14 @@ import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiDeckSummary
+import com.studyagent.client.core.anki.AnkiReadContext
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.LibraryDataState
 import com.studyagent.client.core.anki.LibraryFreshness
 import com.studyagent.client.core.models.StudyState
 import com.studyagent.client.data.anki.AnkiLibraryRepository
+import com.studyagent.client.data.anki.context.AnkiReadContextAccess
+import com.studyagent.client.data.anki.context.AnkiReadContextBinding
 import com.studyagent.client.data.repository.AnkiLocalStudyStarter
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.CancellationException
@@ -31,12 +34,37 @@ import kotlinx.coroutines.sync.Mutex
  * selected deck with a similarly named deck.
  */
 class DeckDetailsViewModel(
-    private val deckId: String,
-    private val backend: AnkiBackend,
+    private val deckRef: AnkiDeckRef,
+    private val binding: AnkiReadContextBinding,
     private val libraryRepository: AnkiLibraryRepository,
     private val studyStarter: AnkiLocalStudyStarter,
     private val studyState: StateFlow<StudyState>
 ) : ViewModel() {
+    /** Legacy fixture seam; production routes pass the fully-qualified deck reference. */
+    constructor(
+        deckId: String,
+        backend: AnkiBackend,
+        libraryRepository: AnkiLibraryRepository,
+        studyStarter: AnkiLocalStudyStarter,
+        studyState: StateFlow<StudyState>
+    ) : this(
+        deckRef = AnkiDeckRef(backend.id, deckId, libraryRepository.binding.context.collectionKey),
+        binding = libraryRepository.binding,
+        libraryRepository = libraryRepository,
+        studyStarter = studyStarter,
+        studyState = studyState
+    ) {
+        require(backend === libraryRepository.binding.backend)
+    }
+
+    private val deckId: String get() = deckRef.deckId
+    private val backend: AnkiBackend get() = binding.backend
+    private val readAccess = AnkiReadContextAccess()
+    private val deckIdentityError = readAccess.validateResource(
+        binding = binding,
+        backendId = deckRef.backendId,
+        collectionKey = deckRef.collectionKey
+    )
     private data class Inputs(
         val availability: AnkiAvailability,
         val capabilities: AnkiCapabilities,
@@ -66,6 +94,7 @@ class DeckDetailsViewModel(
 
     init {
         require(deckId.isNotBlank()) { "Deck details require a stable deck ID" }
+        require(libraryRepository.binding.context == binding.context)
         publish()
         viewModelScope.launch {
             combine(
@@ -95,6 +124,20 @@ class DeckDetailsViewModel(
             }
         }
         if (libraryRepository.state.value !is LibraryDataState.Ready) refresh()
+    }
+
+    /** Revalidate the immutable owner when returning from a nested route; never re-resolve. */
+    fun onScreenActive() {
+        val identityError = readAccess.validateBinding(binding)
+        if (identityError != null && AnkiReadContextAccess.isContextSafetyFailure(identityError)) {
+            operationError = identityError
+            publish()
+            return
+        }
+        val snapshot = libraryRepository.state.value.snapshot
+        if (inputs.availability is AnkiAvailability.Ready &&
+            (snapshot == null || snapshot.freshness != LibraryFreshness.FRESH)
+        ) refresh()
     }
 
     /** Safe read retry. Summary reads are batched with the Library deck listing. */
@@ -151,7 +194,7 @@ class DeckDetailsViewModel(
                         isStartingStudy = false
                         studyStartError = result.error ?: when (result.reason) {
                             AnkiLocalStudyStarter.REASON_DECK_NOT_FOUND ->
-                                AnkiError.DeckNotFound(AnkiDeckRef(backend.id, deckId))
+                                AnkiError.DeckNotFound(deckRef)
                             AnkiLocalStudyStarter.REASON_NO_READY_BACKEND,
                             AnkiLocalStudyStarter.REASON_BACKEND_NOT_READY -> AnkiError.BackendUnavailable()
                             else -> AnkiError.Unknown(cause = result.reason)
@@ -192,6 +235,13 @@ class DeckDetailsViewModel(
         isStartingStudy: Boolean,
         studyStartError: AnkiError?
     ): DeckDetailsUiState {
+        if (!binding.isValid) {
+            return DeckDetailsUiState.Error(
+                backendId,
+                AnkiError.InvalidRequest("read_context_invalidated")
+            )
+        }
+        deckIdentityError?.let { return DeckDetailsUiState.Error(backendId, it) }
         if (inputs.availability is AnkiAvailability.Ready && !inputs.capabilities.deckListing) {
             return DeckDetailsUiState.Error(
                 backendId,
@@ -199,10 +249,15 @@ class DeckDetailsViewModel(
                 isRetrying = isRefreshing
             )
         }
-        val snapshot = inputs.dataState.snapshot?.takeIf { it.backendId == backendId }
-        val selectedDeck = snapshot?.decks?.firstOrNull { deck ->
-            deck.ref.backendId == backendId && deck.ref.deckId == deckId
+        val rawSnapshot = inputs.dataState.snapshot
+        if (rawSnapshot != null && rawSnapshot.readContext != binding.context) {
+            return DeckDetailsUiState.Error(
+                backendId,
+                AnkiError.InvalidRequest("read_context_cache_identity_mismatch")
+            )
         }
+        val snapshot = rawSnapshot?.takeIf { it.backendId == backendId && it.readContext == binding.context }
+        val selectedDeck = snapshot?.deck(deckRef)
         if (selectedDeck != null && snapshot != null) {
             val summary = AnkiDeckSummary(
                 deck = selectedDeck,
@@ -230,7 +285,8 @@ class DeckDetailsViewModel(
                 isRefreshing = isRefreshing || inputs.dataState.isRefreshing,
                 isStartingStudy = isStartingStudy,
                 readError = operationError,
-                studyStartError = studyStartError
+                studyStartError = studyStartError,
+                readContext = binding.context
             )
         }
 
@@ -256,7 +312,7 @@ class DeckDetailsViewModel(
                 } else {
                     DeckDetailsUiState.Error(
                         backendId,
-                        AnkiError.DeckNotFound(AnkiDeckRef(backendId, deckId)),
+                        AnkiError.DeckNotFound(deckRef),
                         isRetrying = isRefreshing
                     )
                 }
