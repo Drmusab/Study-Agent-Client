@@ -122,14 +122,39 @@ class PreferencesDataStore(
         .distinctUntilChanged()
 
     /**
+     * GATE 21E — the optional instance-pin stableId, or null when there is no pin.
+     *
+     * The stableId identifies a configured instance (e.g. `pc_agent:<profileId>`) and is content
+     * free; no credentials or endpoints are stored. An unparsable token is kept as-is so resolution
+     * surfaces a typed failure rather than silently rewriting the preference to AUTO.
+     */
+    val ankiBackendPinFlow: Flow<String?> = preferencesFlow
+        .map { prefs -> prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_INSTANCE_PIN] }
+        .distinctUntilChanged()
+
+    /**
      * Persist the preferred backend mode. `false` means storage refused and the flow still holds the
      * previous value, so the UI must not claim the switch happened. A preference change reaches only
      * *future unbound* operations — never an active session, bound editor or durable transaction
      * (DECISION-21-32).
      */
-    suspend fun setAnkiBackendMode(mode: AnkiBackendMode): Boolean = try {
+    suspend fun setAnkiBackendMode(mode: AnkiBackendMode): Boolean =
+        setAnkiBackendPreference(mode, pin = null)
+
+    /**
+     * GATE 21E — atomically persist the preferred mode and an optional instance pin.
+     *
+     * Passing `pin = null` removes any existing pin (used when switching to AUTO / ANKIDROID_LOCAL
+     * or when selecting PC_AGENT without an explicit instance).
+     */
+    suspend fun setAnkiBackendPreference(mode: AnkiBackendMode, pin: String?): Boolean = try {
         context.dataStore.edit { prefs ->
             prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_MODE] = mode.stableId
+            if (pin != null) {
+                prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_INSTANCE_PIN] = pin
+            } else {
+                prefs.remove(AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_INSTANCE_PIN)
+            }
         }
         true
     } catch (error: IOException) {

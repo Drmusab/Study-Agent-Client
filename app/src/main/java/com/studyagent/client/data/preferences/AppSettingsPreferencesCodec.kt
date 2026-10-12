@@ -89,6 +89,12 @@ object AppSettingsPreferencesCodec {
          */
         val ANKI_BACKEND_MODE = stringPreferencesKey("anki_backend_mode")
 
+        /**
+         * GATE 21E — optional explicit instance pin ([AnkiBackendId.stableId]). Content-free token;
+         * credentials and endpoints are never stored (INV-21E-23).
+         */
+        val ANKI_BACKEND_INSTANCE_PIN = stringPreferencesKey("anki_backend_instance_pin")
+
         val USE_FAKE_AGENT = booleanPreferencesKey("use_fake_agent")
         val DEBUG_LOGGING = booleanPreferencesKey("debug_logging")
         val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
@@ -307,6 +313,7 @@ object AppSettingsPreferencesCodec {
         // AUTO. It cannot affect anything already bound — active sessions and durable transactions
         // carry their own backend identity (DECISION-21-32).
         prefs.remove(Keys.ANKI_BACKEND_MODE)
+        prefs.remove(Keys.ANKI_BACKEND_INSTANCE_PIN)
         prefs.remove(Keys.USE_FAKE_AGENT)
         prefs.remove(Keys.DEBUG_LOGGING)
         prefs.remove(Keys.AUTO_RECONNECT)
