@@ -42,6 +42,12 @@ class AnkiCommitHarness(
      * availability change never rewrites it (INV-21-02/08).
      */
     val sessionLocks: AnkiStudyBackendLockTracker? = null,
+    /**
+     * GATE 21G — optional durable owner store. When present, a start persists the session's
+     * immutable lock and ending the session clears it, so a test can observe the persisted
+     * ownership (and simulate process death) without building its own executor.
+     */
+    val sessionLockStore: com.studyagent.client.core.anki.StudySessionLockStore? = null,
     /** GATE 11 checkpoint 4 — deterministic scheduler failure mode for the fake backend. */
     fakeMode: FakeCommitMode = FakeCommitMode.SUCCESS,
     /** LOCAL_DEDUP_ONLY makes the fake re-apply any repeated id that already had an effect. */
@@ -58,7 +64,7 @@ class AnkiCommitHarness(
         private set
     var executor = AnkiStudyEffectExecutor(
         AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults,
-        sessionLocks = sessionLocks)
+        sessionLocks = sessionLocks, sessionLockStore = sessionLockStore)
         private set
 
     var state = SessionMachineState.initial()
@@ -69,7 +75,7 @@ class AnkiCommitHarness(
         ledger = store.restart(clock)
         executor = AnkiStudyEffectExecutor(
             AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults,
-            sessionLocks = sessionLocks)
+            sessionLocks = sessionLocks, sessionLockStore = sessionLockStore)
     }
 
     /**
