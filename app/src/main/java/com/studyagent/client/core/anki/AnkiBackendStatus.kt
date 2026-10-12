@@ -1,11 +1,15 @@
 package com.studyagent.client.core.anki
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 
@@ -52,7 +56,25 @@ data class AnkiBackendStatusSnapshot(
  *
  * Resolution here is only valid **before** a context binds (DECISION-21-07/INV-21-09). A caller that
  * already holds a session, editor or transaction must not call [resolveFor] to re-route it.
+ *
+ * ## GATE 21D — [states] is the observable registry snapshot
+ *
+ * Observing is separate from owning: the registry owns *membership*, each backend owns its own
+ * readiness, and this class only watches both. [states] therefore
+ *
+ * - **follows membership** — a registration or removal rebuilds the observation, and the observation
+ *   of a removed backend is cancelled with it (nothing keeps collecting a backend nobody holds);
+ * - **never probes, refreshes or writes** — it reads two `StateFlow`s per backend, so watching a
+ *   state can never change one (INV-21D-16);
+ * - **isolates backends** — a change to one backend produces a new state for that backend only; the
+ *   others keep their existing, equal state (VER-21D-17);
+ * - **cannot outrun a newer state** — `StateFlow` is latest-value, and each backend orders its own
+ *   publications, so an older probe's result is never shown over a newer one (VER-21D-18).
+ *
+ * [status] is derived from [states] plus the user's preference; the two views cannot disagree
+ * because there is only one observation.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class AnkiBackendStatusCenter(
     private val registry: AnkiBackendRegistry,
     private val preferenceStore: AnkiBackendPreferenceStore,
@@ -60,34 +82,21 @@ class AnkiBackendStatusCenter(
     scope: CoroutineScope
 ) {
 
-    /** One live descriptor per registered backend, in a deterministic (identity-sorted) order. */
-    private val observations: List<StateFlow<AnkiBackendDescriptor>> =
-        registry.registered.sortedBy { it.id.stableId }.map { backend ->
-            combine(backend.availability, backend.capabilities) { availability, capabilities ->
-                AnkiBackendDescriptor(backend.id, availability, capabilities)
-            }.stateIn(
-                scope = scope,
-                started = SharingStarted.Eagerly,
-                initialValue = AnkiBackendDescriptor.of(backend)
-            )
-        }
+    /**
+     * One live [AnkiBackendState] per registered backend, in identity-sorted order — a deterministic
+     * display order that carries no priority. Each backend's two projections are read together in one
+     * `combine`, so a state is never assembled from fields of different emissions of the *same*
+     * pair; the two flows themselves cannot be read atomically, which is why a state is fail-closed
+     * (both capability projections must agree before anything is READY).
+     */
+    val states: StateFlow<List<AnkiBackendState>> = registry.members
+        .flatMapLatest { membership -> observe(membership.backends) }
+        .stateIn(scope = scope, started = SharingStarted.Eagerly, initialValue = registry.states())
 
-    val status: StateFlow<AnkiBackendStatusSnapshot> = run {
-        if (observations.isEmpty()) {
-            MutableStateFlow(AnkiBackendStatusSnapshot.EMPTY)
-        } else {
-            combine(preferenceStore.mode, combine(observations) { it.toList() }) { preferred, descriptors ->
-                AnkiBackendStatusSnapshot(
-                    preferred = preferred,
-                    entries = descriptors.map { it.toEntry() }
-                )
-            }
-        }
-    }.stateIn(
-        scope = scope,
-        started = SharingStarted.Eagerly,
-        initialValue = snapshotNow()
-    )
+    val status: StateFlow<AnkiBackendStatusSnapshot> =
+        combine(preferenceStore.mode, states) { preferred, current ->
+            AnkiBackendStatusSnapshot(preferred = preferred, entries = current.map { it.toEntry() })
+        }.stateIn(scope = scope, started = SharingStarted.Eagerly, initialValue = snapshotNow())
 
     /**
      * Resolve one backend for an operation that has **not bound yet**. Deterministic for identical
@@ -111,13 +120,30 @@ class AnkiBackendStatusCenter(
     /** Synchronous snapshot for diagnostics and first frames (no suspension, no probing). */
     fun snapshotNow(): AnkiBackendStatusSnapshot = AnkiBackendStatusSnapshot(
         preferred = preferenceStore.mode.value,
-        entries = registry.descriptors()
-            .sortedBy { it.id.stableId }
-            .map { it.toEntry() }
+        entries = registry.states().map { it.toEntry() }
     )
 
-    private fun AnkiBackendDescriptor.toEntry(): AnkiBackendStatusEntry = AnkiBackendStatusEntry(
-        descriptor = this,
+    /**
+     * Cold on purpose: it lives exactly as long as the membership it was built for, so
+     * `flatMapLatest` cancels it on every membership change and a removed backend is never observed
+     * again. (A per-backend eager `stateIn` here would leak one collector per removed backend.)
+     */
+    private fun observe(backends: List<AnkiBackend>): Flow<List<AnkiBackendState>> {
+        if (backends.isEmpty()) return flowOf(emptyList())
+        return combine(
+            backends.sortedBy { it.id.stableId }.map { backend ->
+                combine(backend.availability, backend.capabilities) { availability, capabilities ->
+                    AnkiBackendState(
+                        descriptor = AnkiBackendDescriptor(backend.id, availability, capabilities),
+                        implementedClaim = backend.implementedCapabilities
+                    )
+                }
+            }
+        ) { it.toList() }
+    }
+
+    private fun AnkiBackendState.toEntry(): AnkiBackendStatusEntry = AnkiBackendStatusEntry(
+        descriptor = descriptor,
         statusToken = availability.statusCode,
         unavailabilityToken = availability.unavailabilityToken()
     )

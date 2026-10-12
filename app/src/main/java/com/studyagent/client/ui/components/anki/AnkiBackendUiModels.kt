@@ -153,6 +153,7 @@ fun AnkiAvailability.statusText(): String? = when (this) {
     AnkiAvailability.CollectionNotInitialized -> "No Anki collection is open yet."
     is AnkiAvailability.TemporarilyUnavailable -> "Temporarily busy; it should recover on its own."
     AnkiAvailability.AgentDisconnected -> "The PC agent is not reachable."
+    AnkiAvailability.AgentAuthenticationRequired -> "The PC agent is up, but it has not accepted this app yet."
     AnkiAvailability.AgentAnkiUnavailable -> "The PC agent is up, but Anki on that PC is not ready."
     is AnkiAvailability.Unsupported -> "This Anki version is not supported."
     is AnkiAvailability.Fault -> "The availability check failed."

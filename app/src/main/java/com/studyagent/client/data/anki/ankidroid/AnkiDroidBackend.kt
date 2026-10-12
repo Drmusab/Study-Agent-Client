@@ -182,10 +182,8 @@ class AnkiDroidBackend(
     // Single source of truth (§45): integration state internally, derived flows externally (§44)
     private val _integrationState = MutableStateFlow(gateway.currentState())
 
-    // Derived flows — never three unrelated mutable stores
-    override val availability: StateFlow<AnkiAvailability> = _integrationState
-        .map { it.availability }
-        .stateIn(scope, SharingStarted.Eagerly, _integrationState.value.availability)
+    // Derived flows — never three unrelated mutable stores. `availability` is declared below
+    // `capabilities` on purpose: both are derived from the same state through the same wiring gates.
 
     private val committer: AnkiDroidRatingCommitter? = ratingGateway?.let { AnkiDroidRatingCommitter(it, clock) }
 
@@ -201,6 +199,57 @@ class AnkiDroidBackend(
     override val capabilities: StateFlow<AnkiCapabilities> = _integrationState
         .map { withWriteSupport(it.capabilities) }
         .stateIn(scope, SharingStarted.Eagerly, withWriteSupport(_integrationState.value.capabilities))
+
+    /**
+     * Availability, with a `Ready` snapshot that agrees with [capabilities] (GATE 21D, CHECKPOINT
+     * 21D-10).
+     *
+     * The detector proves *reachability only* and says so by publishing `Ready(NONE)` (GATE 02: "proves
+     * reachability, not review"). The capability probe then fills [capabilities] — but until now
+     * nothing completed the `Ready` snapshot, so this backend published `Ready(<nothing>)` next to
+     * `review = true`. [AnkiBackendDescriptor.supports] deliberately requires **both** projections to
+     * agree (DECISION-21B-06, fail-closed), so a fully ready, fully wired AnkiDroid could never satisfy
+     * any requirement: driving the real adapter chain (only the Android surface faked) into the
+     * resolver produced `RequiredCapabilityUnavailable(REVIEW)` for a `Ready` backend whose live
+     * projection said `review = true`. The Library's "Study" label reads this same snapshot.
+     *
+     * The fix is the narrowest one that keeps the locked rule: derive the snapshot from the **same
+     * state** and the **same wiring gates** as the live projection, so a ready backend's two
+     * projections are equal by construction. Nothing is widened — a capability is in the snapshot only
+     * if it is in [capabilities], which already drops every claim whose writer is not wired — and every
+     * non-`Ready` state is passed through untouched.
+     */
+    override val availability: StateFlow<AnkiAvailability> = _integrationState
+        .map { coherentAvailability(it) }
+        .stateIn(scope, SharingStarted.Eagerly, coherentAvailability(_integrationState.value))
+
+    private fun coherentAvailability(state: AnkiDroidIntegrationState): AnkiAvailability =
+        if (state.availability is AnkiAvailability.Ready) {
+            AnkiAvailability.Ready(withWriteSupport(state.capabilities))
+        } else {
+            state.availability
+        }
+
+    /**
+     * GATE 21D — the static claim: what this *wired* adapter implements for the provider contract it
+     * was audited against, independent of whether AnkiDroid answers right now.
+     *
+     * [capabilities] is `NONE` whenever AnkiDroid is not ready (that is a probe result, not an
+     * implementation fact), so it cannot tell "not implemented" from "not verified yet". This claim
+     * can: it is the **same** policy function and the **same** wiring gates as the live projection,
+     * evaluated as if the pinned contract were ready — which means it can never exceed what a ready
+     * backend would report, drops every claim whose writer is not wired, and never includes a
+     * capability merely because the public API could offer it (`flags`, `media`, `deckCounts` and the
+     * card browser stay off; INV-21D-10). Computed on read so it cannot be initialized before the
+     * gateways it depends on.
+     */
+    override val implementedCapabilities: AnkiCapabilities
+        get() = withWriteSupport(
+            AnkiDroidCompatibilityPolicy.implementedCapabilitiesFor(
+                spec = AnkiDroidCompatibilityPolicy.MAX_VALIDATED_SPEC,
+                isReady = true
+            )
+        )
 
     /**
      * A capability is only claimed when the writer that honours it is actually wired:

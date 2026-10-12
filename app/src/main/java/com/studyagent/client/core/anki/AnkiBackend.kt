@@ -23,9 +23,38 @@ interface AnkiBackend {
     val availability: StateFlow<AnkiAvailability>
     val capabilities: StateFlow<AnkiCapabilities>
 
+    /**
+     * GATE 21D — what this *wired adapter* implements, whether or not the backend answers right now
+     * (BACKEND_SELECTION_POLICY §2.1: "implements" is a static claim about the wired object graph,
+     * "ready" is a runtime fact, "permitted" is a policy decision — three different questions).
+     *
+     * **Non-null** — a static claim, fixed for the lifetime of this instance. It must drop every
+     * capability whose writer is not wired and must never include one merely because the third-party
+     * API this adapter wraps *could* support it (INV-21D-10). It can only describe the application's
+     * implementation: it says nothing about readiness (that is [availability] × [capabilities]) and
+     * nothing about authorization (that belongs to the binding that owns an operation).
+     *
+     * **`null`** (the default) — this backend states no static claim: its capabilities are known only
+     * from runtime evidence (a probe, a protocol negotiation). The registry then treats them as
+     * UNKNOWN whenever the backend is not [AnkiAvailability.Ready], so negotiated evidence is never
+     * silently retained across a disconnect, a reconnect or a version change.
+     */
+    val implementedCapabilities: AnkiCapabilities? get() = null
+
     /** Effect semantics, not UI capability. Unverified adapters cannot claim safe replay. */
     val commitSemantics: CommitSemantics get() = CommitSemantics.UNVERIFIED
 
+    /**
+     * Re-probe this backend's own availability and publish the outcome through [availability] and
+     * [capabilities]. The backend — never the registry — owns its readiness truth.
+     *
+     * GATE 21D contract:
+     * - **Read-only.** A probe must never rate, bury, suspend, edit, create or otherwise mutate a
+     *   collection, and must never use such an operation to "test" readiness (INV-21D-16).
+     * - **Ordered.** Outcomes are published in *request order*: the result of an older probe must
+     *   never replace the result of a newer one (INV-21D-13).
+     * - **Cancellable.** Cancellation propagates to the caller; it is never converted into a state.
+     */
     suspend fun refreshAvailability()
 
     /**

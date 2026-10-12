@@ -811,6 +811,7 @@ private fun ankiDroidStatusLabel(health: AnkiDroidHealthSnapshot): String = when
     is AnkiAvailability.Unsupported -> "Unsupported version"
     is AnkiAvailability.Fault -> "Check failed"
     AnkiAvailability.AgentDisconnected,
+    AnkiAvailability.AgentAuthenticationRequired,
     AnkiAvailability.AgentAnkiUnavailable -> "Not checked"
 }
 

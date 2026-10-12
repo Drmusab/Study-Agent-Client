@@ -13,8 +13,9 @@ package com.studyagent.client.core.anki
  *  - AnkiDroid-local: [NotInstalled], [ProviderUnavailable],
  *    [PermissionRequired], [CollectionNotInitialized],
  *    [TemporarilyUnavailable], [Ready].
- *  - PC path: [AgentDisconnected] (no PC agent), [AgentAnkiUnavailable]
- *    (agent up, Anki beneath it down), [Ready].
+ *  - PC path: [AgentDisconnected] (no PC agent), [AgentAuthenticationRequired]
+ *    (agent up, this client not accepted — GATE 21D), [AgentAnkiUnavailable]
+ *    (agent up and authenticated, Anki beneath it down), [Ready].
  *
  * UI renders from this state plus [AnkiCapabilities]; it never re-derives
  * "available" from connection state or package names itself. `ready` is NOT
@@ -58,6 +59,20 @@ sealed interface AnkiAvailability {
     /** PC path: the agent itself is unreachable (mirrors connection lifecycle). */
     data object AgentDisconnected : AnkiAvailability
 
+    /**
+     * PC path: the agent is reachable but has not accepted this client (no, expired or rejected
+     * credential), so no Anki operation may be attempted (GATE 21D, BACKEND_FAILURE_MATRIX §10:
+     * "a transport that is up but unauthenticated is at R0/R1 and is therefore ineligible for every
+     * operation").
+     *
+     * Deliberately carries **no detail**: a credential, a token or the peer's rejection text must
+     * never reach availability, diagnostics or logs (DECISION-21B-27, INV-21D-19). It is distinct
+     * from [PermissionRequired], which is the *Android* integration permission of the local
+     * provider — the remediation differs (re-pair or re-enter credentials versus an install-time
+     * permission), so one state must not stand in for the other.
+     */
+    data object AgentAuthenticationRequired : AnkiAvailability
+
     /** PC path: agent reachable, but it reports Anki/AnkiConnect not ready. */
     data object AgentAnkiUnavailable : AnkiAvailability
 
@@ -92,6 +107,7 @@ val AnkiAvailability.statusCode: String
         is AnkiAvailability.Ready -> "READY"
         is AnkiAvailability.TemporarilyUnavailable -> "TEMPORARILY_UNAVAILABLE"
         AnkiAvailability.AgentDisconnected -> "AGENT_DISCONNECTED"
+        AnkiAvailability.AgentAuthenticationRequired -> "AGENT_AUTHENTICATION_REQUIRED"
         AnkiAvailability.AgentAnkiUnavailable -> "AGENT_ANKI_UNAVAILABLE"
         is AnkiAvailability.Unsupported -> "UNSUPPORTED"
         is AnkiAvailability.Fault -> "FAULT"

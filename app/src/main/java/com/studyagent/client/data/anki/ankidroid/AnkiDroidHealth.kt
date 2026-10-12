@@ -235,6 +235,7 @@ object AnkiDroidGuidance {
         // PC-path states are not AnkiDroid states; the AnkiDroid section renders them as
         // "not applicable" rather than borrowing a local failure message (§38).
         AnkiAvailability.AgentDisconnected,
+        AnkiAvailability.AgentAuthenticationRequired,
         AnkiAvailability.AgentAnkiUnavailable -> AnkiDroidHealthGuidance(
             headline = "Not checked (PC Agent state).",
             action = null
