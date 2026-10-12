@@ -4,12 +4,16 @@ import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiBackendMode
 import com.studyagent.client.core.anki.AnkiBackendRegistry
-import com.studyagent.client.core.anki.AnkiBackendSelector
+import com.studyagent.client.core.anki.AnkiBackendResolver2
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiResult
+import com.studyagent.client.core.anki.BackendResolutionRequest2
+import com.studyagent.client.core.anki.BackendResolutionResult2
 import com.studyagent.client.core.anki.ReviewerActionCapabilities
+import com.studyagent.client.core.anki.STUDY_SESSION_REQUIREMENTS
 import com.studyagent.client.core.anki.reviewerActionCapabilities
+import com.studyagent.client.core.anki.toPreference
 import com.studyagent.client.core.study.AnkiStudyRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -24,12 +28,16 @@ import java.util.UUID
  * GATE 13 §17/§28 (STEP 32.2) — the app's **session-start site** for a backend-local Anki review.
  *
  * ```text
- * resolve the one ready backend   (AnkiBackendSelector — never list order, never a fake)
+ * resolve the one ready backend   (GATE 21E AnkiBackendResolver2 — never list order, never a fake)
  *   ↓ read its live capabilities  (read-only refresh)
  *   ↓ resolve the deck the user named against the *live* collection
  *   ↓ freeze the reviewer-action capability set   ← the one call that must not have a second home
  *   ↓ hand one AnkiStudyRequest to the state machine
  * ```
+ *
+ * GATE 21G — this is a *pre-binding* site only: it resolves once per start attempt against a fresh
+ * snapshot and hands the request to the machine. The executor re-resolves and admits again at the
+ * binding moment, and from then on the session's own lock is the only routing input.
  *
  * Freezing matters because a session is a long-lived decision: if the capability set were re-read
  * per turn, a later preference change or a transient provider outage could silently enable or
@@ -44,7 +52,6 @@ import java.util.UUID
  */
 class AnkiLocalStudyStarter(
     private val registry: AnkiBackendRegistry,
-    private val selector: AnkiBackendSelector,
     private val scope: CoroutineScope,
     /** The machine dispatch. A lambda so this class never depends on the repository implementation. */
     private val dispatch: (AnkiStudyRequest) -> Unit,
@@ -132,23 +139,25 @@ class AnkiLocalStudyStarter(
         // The preference is sampled exactly once. Re-reading it mid-start could resolve one backend
         // for the capability freeze and another for the dispatch.
         val preference = options.preference ?: preferenceProvider()
-        val backendId = when (val resolution = selector.resolve(preference)) {
-            is AnkiBackendSelector.Resolution.Resolved -> resolution.backendId
-            is AnkiBackendSelector.Resolution.Unavailable ->
-                return Result.Refused(REASON_NO_READY_BACKEND, resolution.error)
-            is AnkiBackendSelector.Resolution.Ambiguous ->
-                return Result.Refused(REASON_AMBIGUOUS_BACKEND, null)
+        val backendId = when (val resolution = resolve(preference)) {
+            is BackendResolutionResult2.Resolved -> resolution.backendId
+            is BackendResolutionResult2.Failed -> return refusedFor(resolution)
         }
         val backend = registry.find(backendId)
             ?: return Result.Refused(REASON_BACKEND_NOT_REGISTERED, null)
 
-        // A read-only freshness check: the selector reads availability *values*, so a stale
+        // A read-only freshness check: resolution reads availability *values*, so a stale
         // "unavailable" from a previous foreground must not block a session the user just asked for.
         backend.refreshAvailability()
 
-        // Fail closed if the refresh changed the answer: resolution is re-run, never remembered.
-        if (selector.resolve(preference) !is AnkiBackendSelector.Resolution.Resolved) {
-            return Result.Refused(REASON_BACKEND_NOT_READY, null)
+        // Fail closed if the refresh changed the answer: resolution is re-run, never remembered —
+        // and it must answer the *same* backend, or the start is not one coherent binding.
+        val fresh = resolve(preference)
+        if (fresh !is BackendResolutionResult2.Resolved || fresh.backendId != backendId) {
+            return Result.Refused(
+                REASON_BACKEND_NOT_READY,
+                (fresh as? BackendResolutionResult2.Failed)?.error
+            )
         }
 
         val deck = resolveDeck(backend, options.deckName, options.deckId)
@@ -216,8 +225,37 @@ class AnkiLocalStudyStarter(
             )
     }
 
+    /**
+     * GATE 21G — the one pre-binding resolution for a start attempt: the sampled legacy mode as a
+     * GATE 21E preference, the locked study requirements, and a fresh registry snapshot. Pure
+     * policy ([AnkiBackendResolver2]); no probing, no preference write, no lock.
+     */
+    private fun resolve(preference: AnkiBackendMode): BackendResolutionResult2 =
+        AnkiBackendResolver2.resolve(
+            BackendResolutionRequest2(
+                preference = preference.toPreference(),
+                requiredCapabilities = STUDY_SESSION_REQUIREMENTS,
+                purpose = "session_start"
+            ),
+            registry.descriptors()
+        )
+
+    /**
+     * Fold the typed resolution failure into the starter's stable refusal tokens. The refusal
+     * carries the resolver's own typed error, so the *reason* a start did not happen stays
+     * explainable instead of collapsing to a bare "no backend".
+     */
+    private fun refusedFor(failure: BackendResolutionResult2.Failed): Result.Refused =
+        when (failure) {
+            is BackendResolutionResult2.Ambiguous ->
+                Result.Refused(REASON_AMBIGUOUS_BACKEND, failure.error)
+            is BackendResolutionResult2.ExplicitBackendMissing ->
+                Result.Refused(REASON_BACKEND_NOT_REGISTERED, failure.error)
+            else -> Result.Refused(REASON_NO_READY_BACKEND, failure.error)
+        }
+
     private fun resolveReadyBackendId(): AnkiBackendId? =
-        (selector.resolve(LOCAL_PREFERENCE) as? AnkiBackendSelector.Resolution.Resolved)?.backendId
+        (resolve(LOCAL_PREFERENCE) as? BackendResolutionResult2.Resolved)?.backendId
 
     companion object {
         /** "Study on this phone": the device's own Anki collection, never a remote agent. */

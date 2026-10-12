@@ -237,6 +237,13 @@ interface AppContainer {
     val ankiTransactionRecoveryPlanner: AnkiTransactionRecoveryPlanner
 
     /**
+     * GATE 21G — durable ownership of the active StudySession (CHECKPOINT 21G-06). The executor
+     * persists the session's immutable lock here on a successful start and clears it on end; a
+     * start whose lock cannot be persisted is refused instead of becoming ownerless.
+     */
+    val studySessionLockStore: com.studyagent.client.core.anki.StudySessionLockStore
+
+    /**
      * GATE 13 §28 (STEP 32.2) — the app's session-start site for a *local* Anki review.
      *
      * It is the one production object that turns "the user wants to study this deck" into an
@@ -559,6 +566,12 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         AnkiTransactionRecoveryPlanner(ankiBackendRegistry)
     }
 
+    override val studySessionLockStore: com.studyagent.client.core.anki.StudySessionLockStore by lazy {
+        com.studyagent.client.data.preferences.StudySessionLockDataStore.fromPreferences(
+            preferencesDataStore
+        )
+    }
+
     override val dispatchers: DispatcherProvider by lazy { DefaultDispatcherProvider() }
 
     /** Heap + PSS. PSS is reported only when the platform actually provides it (§65). */
@@ -690,7 +703,6 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
     override val ankiLocalStudyStarter: AnkiLocalStudyStarter by lazy {
         AnkiLocalStudyStarter(
             registry = ankiBackendRegistry,
-            selector = ankiBackendSelector,
             scope = ankiDroidScope,
             dispatch = { request -> machineBackedSession?.startAnkiStudy(request) },
             // GATE 21 — a new session uses the user's preferred backend; from the moment the session
@@ -724,6 +736,9 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
                 // GATE 13 — the separate reviewer-action ledger. Without it actions are refused
                 // before dispatch (fail closed), so both ledgers are wired together.
                 actionLedger = reviewerActionLedger,
+                // GATE 21G — durable session ownership: a successful start persists its lock,
+                // ending clears it, and an unpersistable start is refused, not half-bound.
+                sessionLockStore = studySessionLockStore,
                 phases = com.studyagent.client.core.anki.CommitPhaseSink { phase, attempt, commitId ->
                     // Correlation only: identity hash, backend, rating names and attempt count.
                     AppDiagnostics.timeline.record(

@@ -78,7 +78,16 @@ class AnkiStudyEffectExecutor(
      * simply never in this build. Defaults to the production planner over [registry].
      */
     private val transactionRecovery: AnkiTransactionRecoveryPlanner =
-        AnkiTransactionRecoveryPlanner(registry)
+        AnkiTransactionRecoveryPlanner(registry),
+    /**
+     * GATE 21G — durable ownership of the active StudySession (CHECKPOINT 21G-06).
+     *
+     * When present, a successful start persists the session's immutable lock and ending the
+     * session clears it. A start whose lock cannot be persisted is refused instead of becoming an
+     * apparently-active session without an owner. Absent (the historical default), the lock lives
+     * in [sessionLocks] process memory only.
+     */
+    private val sessionLockStore: StudySessionLockStore? = null
 ) : ReviewCommitCoordinator {
 
     private val reviewerActionCoordinator: ReviewerActionCoordinator? = actionCoordinator
@@ -145,6 +154,14 @@ class AnkiStudyEffectExecutor(
     ): AnkiStudyEvent? {
         val actionId = ReviewerActionId.of(
             effect.cardRef.backendId, effect.sessionId, effect.turnId, effect.action)
+        // GATE 21G — a reviewer action serves the session's locked backend only. A stale effect
+        // from another session is refused before anything durable exists (NotRecorded), never
+        // dispatched to whatever backend the card ref happens to name.
+        if (!sessionLockConsistent(effect.sessionId, effect.cardRef.backendId)) {
+            return AnkiStudyEvent.ReviewerActionResolved(
+                effect.epoch, actionId,
+                AnkiReviewerActionOutcome.NotRecorded(SESSION_BACKEND_MISMATCH))
+        }
         val coordinator = reviewerActionCoordinator
             ?: return AnkiStudyEvent.ReviewerActionResolved(
                 effect.epoch, actionId,
@@ -499,20 +516,54 @@ class AnkiStudyEffectExecutor(
 
     // ---------------------------------------------------------------- reads (GATE 10, unchanged)
 
+    /**
+     * GATE 21G — the session lock is the routing authority for bound work (CHECKPOINT 21G-08).
+     *
+     * When a lock was published for [studySessionId], only [backendId] may serve it; anything
+     * else is refused without touching a backend. A missing tracker or a missing lock entry keeps
+     * the historical behavior — the reducer's epoch/turn guards remain the primary stale-event
+     * boundary, and this check is the executor-side backstop for effects that outlive their
+     * session (a stale Next/Hydrate/commit/action must never reach a backend, let alone the wrong
+     * one).
+     */
+    private fun sessionLockConsistent(studySessionId: String, backendId: AnkiBackendId): Boolean {
+        val tracker = sessionLocks ?: return true
+        val locked = tracker.locks.value[studySessionId] ?: return true
+        return locked.backendId == backendId
+    }
+
     private suspend fun read(effect: AnkiStudyEffect): AnkiStudyEvent? {
         return try {
             when (effect) {
                 is AnkiStudyEffect.Begin -> begin(effect)
-                is AnkiStudyEffect.Next -> AnkiStudyEvent.Scheduled(
-                    effect.epoch,
-                    registry.find(effect.session.context.backendId)?.nextCard(effect.session)
-                        ?: NextCardResult.BackendUnavailable(AnkiError.BackendUnavailable())
-                )
-                is AnkiStudyEffect.Hydrate -> AnkiStudyEvent.Hydrated(
-                    effect.epoch, effect.turn.turnId,
-                    registry.find(effect.turn.backendId)?.hydrateCardContent(effect.turn.cardRef)
-                        ?: AnkiResult.Failure(AnkiError.BackendUnavailable())
-                )
+                is AnkiStudyEffect.Next -> {
+                    if (!sessionLockConsistent(
+                            effect.session.context.studySessionId,
+                            effect.session.context.backendId
+                        )
+                    ) {
+                        AnkiStudyEvent.Scheduled(
+                            effect.epoch,
+                            NextCardResult.Failure(AnkiError.InvalidRequest(SESSION_BACKEND_MISMATCH))
+                        )
+                    } else AnkiStudyEvent.Scheduled(
+                        effect.epoch,
+                        registry.find(effect.session.context.backendId)?.nextCard(effect.session)
+                            ?: NextCardResult.BackendUnavailable(AnkiError.BackendUnavailable())
+                    )
+                }
+                is AnkiStudyEffect.Hydrate -> {
+                    if (!sessionLockConsistent(effect.turn.studySessionId, effect.turn.backendId)) {
+                        AnkiStudyEvent.Hydrated(
+                            effect.epoch, effect.turn.turnId,
+                            AnkiResult.Failure(AnkiError.InvalidRequest(SESSION_BACKEND_MISMATCH))
+                        )
+                    } else AnkiStudyEvent.Hydrated(
+                        effect.epoch, effect.turn.turnId,
+                        registry.find(effect.turn.backendId)?.hydrateCardContent(effect.turn.cardRef)
+                            ?: AnkiResult.Failure(AnkiError.BackendUnavailable())
+                    )
+                }
                 else -> null
             }
         } catch (cancelled: CancellationException) {
@@ -542,13 +593,33 @@ class AnkiStudyEffectExecutor(
         fun failed(error: AnkiError) = AnkiStudyEvent.Begun(effect.epoch, AnkiResult.Failure(error))
         // Only startup probes candidates. No scheduler query is issued before the recovery scan.
         registry.ids.filter(request.preference::accepts).forEach { registry.find(it)?.refreshAvailability() }
-        val resolution = AnkiBackendSelector(registry).resolve(request.preference)
-        val id = when (resolution) {
-            is AnkiBackendSelector.Resolution.Resolved -> resolution.backendId
-            is AnkiBackendSelector.Resolution.Unavailable -> return failed(resolution.error)
-            is AnkiBackendSelector.Resolution.Ambiguous -> return failed(AnkiError.InvalidRequest("ambiguous_backend"))
+        // GATE 21G — one GATE 21E resolution, immediately before binding, against a fresh snapshot.
+        // It is never cached and never re-invoked for this session afterwards (INV-21G-03): from
+        // here on the session's own lock is the only routing input.
+        val resolution = AnkiBackendResolver2.resolve(
+            BackendResolutionRequest2(
+                preference = request.preference.toPreference(),
+                requiredCapabilities = STUDY_SESSION_REQUIREMENTS,
+                purpose = "session_start"
+            ),
+            registry.descriptors()
+        )
+        val resolvedId = (resolution as? BackendResolutionResult2.Resolved)?.backendId
+            ?: return failed((resolution as BackendResolutionResult2.Failed).error)
+        // GATE 21G — atomic admission (CHECKPOINT 21G-03/21G-04): exact registration, operational
+        // readiness, required capability, deck ownership and the OP-S1 collection verdict, in
+        // order, before any scheduler traffic. Any refusal ends the start with no lock published.
+        val admitted = when (val admission = StudySessionAdmissionPolicy.admit(
+            resolution = resolution,
+            backend = registry.find(resolvedId),
+            deck = request.deck,
+            studySessionId = request.studySessionId,
+            startedAtEpochMs = effect.startedAtMs
+        )) {
+            is StudySessionAdmission.Admitted -> admission.lock
+            is StudySessionAdmission.Refused -> return failed(admission.error)
         }
-        if (request.deck.backendId != id) return failed(AnkiError.InvalidRequest("foreign_deck"))
+        val id = admitted.backendId
         val backend = registry.find(id) ?: return failed(AnkiError.BackendUnavailable())
         if (ledger != null) {
             if (ledger.health() !is ReviewCommitLedger.Health.Ready) {
@@ -575,14 +646,38 @@ class AnkiStudyEffectExecutor(
                 return failed(AnkiError.DeckNotFound(request.deck))
             }
         }
-        val context = AnkiSessionContext(
-            id, request.deck.collectionKey?.let { AnkiCollectionIdentity(id, it) }, request.deck,
-            effect.startedAtMs, backend.capabilities.value, request.studySessionId
-        )
+        // The admitted lock is rebuilt with the backend's live capabilities (an observation, never
+        // a persisted or frozen snapshot): same identity the admission policy approved.
+        val context = admitted.toSessionContext(backend.capabilities.value)
         val result = backend.beginReview(BeginReviewRequest(context))
         // GATE 21 — the lock becomes visible only once the backend actually accepted the session, so
         // a refused start never advertises a backend it is not bound to.
-        if (result is AnkiResult.Success) sessionLocks?.locked(context)
+        // GATE 21G — the same acceptance durably owns the session when a lock store is wired: a
+        // start whose ownership cannot be persisted is refused instead of becoming an
+        // apparently-active session, and the backend handle is released again.
+        if (result is AnkiResult.Success) {
+            sessionLocks?.locked(context)
+            if (sessionLockStore != null) {
+                val saved = withContext(NonCancellable) {
+                    try {
+                        sessionLockStore.save(StudySessionBackendLock.from(context))
+                    } catch (_: Exception) {
+                        false
+                    }
+                }
+                if (!saved) {
+                    sessionLocks?.released(context.studySessionId)
+                    try {
+                        registry.find(id)?.endReview(result.value)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        // Best effort, like every other handle release.
+                    }
+                    return failed(AnkiError.Unknown(SESSION_LOCK_PERSISTENCE_FAILURE))
+                }
+            }
+        }
         val prior = if (result is AnkiResult.Success) priorUnresolved(id) else 0
         return AnkiStudyEvent.Begun(effect.epoch, result, prior)
     }
@@ -604,6 +699,14 @@ class AnkiStudyEffectExecutor(
 
         val ledger = this.ledger ?: return AnkiCommitOutcome.PersistenceFailure("ledger_unavailable")
         fun storageFault(category: String) = AnkiCommitOutcome.PersistenceFailure(category)
+
+        // GATE 21G — the rating serves the session's locked backend only. A stale commit effect
+        // from another session is refused before the ledger is even touched (no durable intent is
+        // created for a backend the session does not own), so it can neither dispatch nor advance
+        // a session it does not belong to.
+        if (!sessionLockConsistent(commitId.studySessionId, commitId.backendId)) {
+            return refused(SESSION_BACKEND_MISMATCH)
+        }
 
 
         // GATE 13 §25 — mutual exclusion below the UI: while this turn has an unresolved reviewer
@@ -800,6 +903,20 @@ class AnkiStudyEffectExecutor(
     private suspend fun endReview(effect: AnkiStudyEffect.EndReview) {
         // Ending the session is the ONLY way to release its backend lock (DECISION-21-11).
         sessionLocks?.released(effect.session.context.studySessionId)
+        // GATE 21G — ending drops the durable owner too, but only for this session. Outstanding
+        // durable transaction records stay in their ledgers for their own owners (INV-21G-24):
+        // ending a session never deletes or resolves an ambiguous rating.
+        if (sessionLockStore != null) {
+            try {
+                withContext(NonCancellable) {
+                    sessionLockStore.clear(effect.session.context.studySessionId)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Best effort, like every other handle release.
+            }
+        }
         try {
             registry.find(effect.session.context.backendId)?.endReview(effect.session)
         } catch (cancelled: CancellationException) {
@@ -839,6 +956,19 @@ class AnkiStudyEffectExecutor(
     companion object {
         const val DEFAULT_RECONCILE_TIMEOUT_MS: Long = 10_000L
         const val RECONCILE_TIMEOUT: String = "reconcile_timeout"
+
+        /**
+         * GATE 21G — a bound-session effect named a backend the session's lock does not own.
+         * Refused without a backend call, without a ledger write, and without advancing state.
+         */
+        const val SESSION_BACKEND_MISMATCH: String = "session_backend_mismatch"
+
+        /**
+         * GATE 21G — the backend accepted the session but its ownership could not be persisted.
+         * The start is refused and the backend handle released, so no apparently-active session
+         * exists without an owner.
+         */
+        const val SESSION_LOCK_PERSISTENCE_FAILURE: String = "session_lock_persistence_failure"
 
         /** Durable phase markers, named after the canonical [ReviewCommitPhase] they persist. */
         const val DURABLE_CREATED: String = "CREATED"

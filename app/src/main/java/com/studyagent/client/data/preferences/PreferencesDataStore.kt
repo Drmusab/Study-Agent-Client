@@ -11,6 +11,8 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.studyagent.client.core.anki.AnkiBackendMode
+import com.studyagent.client.core.anki.DecodedSessionLock
+import com.studyagent.client.core.anki.StudySessionLockCodec
 import com.studyagent.client.core.common.AppLogger
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.ServerProfile
@@ -159,6 +161,49 @@ class PreferencesDataStore(
         true
     } catch (error: IOException) {
         AppLogger.e(tag, "Couldn't save the preferred Anki backend (${error.javaClass.simpleName})", error)
+        false
+    }
+
+    /**
+     * GATE 21G — the persisted StudySession backend lock, raw JSON. `null` = no session was
+     * persisted. Decoding and validation belong to [StudySessionLockCodec], never to this store.
+     */
+    val studySessionBackendLockFlow: Flow<String?> = preferencesFlow
+        .map { prefs -> prefs[AppSettingsPreferencesCodec.Keys.STUDY_SESSION_BACKEND_LOCK] }
+        .distinctUntilChanged()
+
+    /**
+     * GATE 21G — persist the active session's lock bytes. `false` means storage refused and the
+     * start that requested the save must be refused with it (no ownerless active session).
+     */
+    suspend fun saveStudySessionBackendLock(raw: String): Boolean = try {
+        context.dataStore.edit { prefs ->
+            prefs[AppSettingsPreferencesCodec.Keys.STUDY_SESSION_BACKEND_LOCK] = raw
+        }
+        true
+    } catch (error: IOException) {
+        AppLogger.e(tag, "Couldn't save the study session lock (${error.javaClass.simpleName})", error)
+        false
+    }
+
+    /**
+     * GATE 21G — drop the persisted lock, but only when it names [studySessionId]. Ending one
+     * session never deletes another session's ownership; `false` means storage refused.
+     */
+    suspend fun clearStudySessionBackendLock(studySessionId: String): Boolean = try {
+        context.dataStore.edit { prefs ->
+            val key = AppSettingsPreferencesCodec.Keys.STUDY_SESSION_BACKEND_LOCK
+            val stored = prefs[key]?.let(StudySessionLockCodec::decode)
+            val storedId = (stored as? DecodedSessionLock.Valid)?.lock?.studySessionId
+            // Another session's lock is not ours to delete, but the named session holds no lock
+            // here either way, so a foreign id is still a success — only storage failure is not.
+            if (storedId == null || storedId == studySessionId) {
+                prefs.remove(key)
+            }
+        }
+        true
+    } catch (error: IOException) {
+        AppLogger.e(tag, "Couldn't clear the study session lock (${error.javaClass.simpleName})", error)
         false
     }
 

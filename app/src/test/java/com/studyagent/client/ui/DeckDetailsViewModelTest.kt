@@ -215,7 +215,6 @@ class DeckDetailsViewModelTest {
             val registry = AnkiBackendRegistry(listOf(localBackend))
             val starter = AnkiLocalStudyStarter(
                 registry = registry,
-                selector = AnkiBackendSelector(registry),
                 scope = backgroundScope,
                 dispatch = {}
             )
@@ -316,7 +315,6 @@ class DeckDetailsViewModelTest {
         val registry = AnkiBackendRegistry(listOf(backend))
         val starter = AnkiLocalStudyStarter(
             registry = registry,
-            selector = AnkiBackendSelector(registry),
             scope = scope,
             dispatch = { request -> requests.add(request) },
             studySessionIdFactory = { "library-test-session" }

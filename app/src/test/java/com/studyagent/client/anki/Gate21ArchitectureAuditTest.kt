@@ -67,9 +67,16 @@ class Gate21ArchitectureAuditTest {
             executor.contains("registry.find(commitId.backendId)")
         )
         // No scheduler call may resolve through the global preference or the AUTO policy.
+        // GATE 21G: the executor holds exactly one resolution — the pre-binding decision inside
+        // begin() — and everything after begin() routes via locked or persisted identity only.
+        val beginBody = executor.substringAfter("private suspend fun begin(")
+            .substringBefore("private suspend fun commitTransaction(")
+        val outsideBegin = executor.substringBefore("private suspend fun begin(") +
+            executor.substringAfter("private suspend fun commitTransaction(")
         assertFalse(
-            "runtime study code must not consult the AUTO resolver",
-            executor.contains("AnkiBackendResolver")
+            "study code outside begin() must not consult any resolver",
+            outsideBegin.contains("AnkiBackendResolver") ||
+                outsideBegin.contains("AnkiBackendSelector(registry).resolve(")
         )
         assertFalse(
             "runtime study code must not read a backend preference",
@@ -81,20 +88,37 @@ class Gate21ArchitectureAuditTest {
     fun `the only backend selection in study runtime happens at session begin`() {
         val executor = main("core/study/AnkiStudyEffectExecutor.kt").code()
         // Exactly one resolution site, inside begin(): the pre-binding decision.
+        // GATE 21G: the site migrated from the GATE 01 selector adapter to the GATE 21E pure
+        // policy (AnkiBackendResolver2), per the 21E handoff. The rule is unchanged: one site,
+        // inside begin(), never after binding.
         assertEquals(
             "exactly one backend resolution may exist in study runtime",
             1,
+            Regex("""AnkiBackendResolver2\.resolve\(""").findAll(executor).count()
+        )
+        assertEquals(
+            "the legacy selector adapter must no longer resolve inside study runtime",
+            0,
             Regex("""AnkiBackendSelector\(registry\)\.resolve\(""").findAll(executor).count()
         )
         val beginBody = executor.substringAfter("private suspend fun begin(")
             .substringBefore("private suspend fun commitTransaction(")
         assertTrue(
             "the single resolution must live inside begin()",
-            beginBody.contains("AnkiBackendSelector(registry).resolve(")
+            beginBody.contains("AnkiBackendResolver2.resolve(")
         )
         // The locked identity is captured in the session context, and only a successful start
-        // publishes it.
-        assertTrue(executor.contains("if (result is AnkiResult.Success) sessionLocks?.locked(context)"))
+        // publishes it. GATE 21G: the same acceptance durably owns the session when a lock store
+        // is wired, and an unpersistable start is refused rather than half-bound.
+        assertTrue(
+            "the lock is published only after the backend accepted the session",
+            beginBody.contains("if (result is AnkiResult.Success)") &&
+                beginBody.contains("sessionLocks?.locked(context)")
+        )
+        assertTrue(
+            "a successful start persists its lock when a store is wired",
+            beginBody.contains("sessionLockStore")
+        )
     }
 
     // ----------------------------------------------------------------------- AUDIT-21-03
@@ -183,10 +207,18 @@ class Gate21ArchitectureAuditTest {
             .filter { it.code().let { c -> c.contains(".resolve(") && c.contains("BackendResolutionRequest") } }
             .map { it.name }
             .sorted()
-        // The GATE 01 selector adapter, the status center, and GATE 21F's new-read binding boundary
-        // are the only policy callers. Reference/continued reads and the study runtime never resolve.
+        // The GATE 01 selector adapter, the status center, GATE 21F's new-read binding boundary,
+        // and — since GATE 21G — the two session-start pre-binding sites (the starter resolves for
+        // the request, the executor resolves inside begin()) are the only policy callers.
+        // Reference/continued reads never resolve; bound study work never resolves.
         assertEquals(
-            listOf("AnkiBackendSelector.kt", "AnkiBackendStatus.kt", "AnkiReadContextController.kt"),
+            listOf(
+                "AnkiBackendSelector.kt",
+                "AnkiBackendStatus.kt",
+                "AnkiLocalStudyStarter.kt",
+                "AnkiReadContextController.kt",
+                "AnkiStudyEffectExecutor.kt"
+            ),
             callers
         )
         // The resolver itself is the only definition of the policy.
@@ -196,12 +228,28 @@ class Gate21ArchitectureAuditTest {
                 main("core/anki/AnkiBackendResolver.kt").code()
                 .contains("request: BackendResolutionRequest")
         )
-        // The study runtime and every coordinator are deliberately absent from that list.
+        // The study runtime and every coordinator are deliberately absent from that list,
+        // except the executor's single pre-binding site inside begin() (see the test above).
         studySources().forEach { file ->
-            assertFalse(
-                "${file.name} must not build a BackendResolutionRequest",
-                file.code().contains("BackendResolutionRequest")
-            )
+            val code = file.code()
+            if (file.name == "AnkiStudyEffectExecutor.kt") {
+                assertEquals(
+                    "the executor builds exactly one pre-binding request",
+                    1,
+                    Regex("""BackendResolutionRequest2\(""").findAll(code).count()
+                )
+                val beginBody = code.substringAfter("private suspend fun begin(")
+                    .substringBefore("private suspend fun commitTransaction(")
+                assertTrue(
+                    "the executor's single request must live inside begin()",
+                    beginBody.contains("BackendResolutionRequest2(")
+                )
+            } else {
+                assertFalse(
+                    "${file.name} must not build a BackendResolutionRequest",
+                    code.contains("BackendResolutionRequest")
+                )
+            }
         }
     }
 
