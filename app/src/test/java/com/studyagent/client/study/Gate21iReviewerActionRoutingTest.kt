@@ -41,7 +41,7 @@ class Gate21iReviewerActionRoutingTest {
         liveCollectionKey = ReviewerActionHarness.COLLECTION_KEY
     )
 
-    // ------------------------------------------------------------------- VER-21I-01  bury on A
+    // ------------------------------------------------- VER-21I-03  bury on AnkiDroid (backend A)
 
     @Test
     fun `a bury bound to A executes on A only, with every B counter at zero`() = runTest {
@@ -98,6 +98,69 @@ class Gate21iReviewerActionRoutingTest {
         assertEquals(0, b.nextCardCount)
     }
 
+    // ------------------------------------------------------------------- VER-21I-04  bury on PC
+
+    /**
+     * A *keyed* PC-owned session: unlike the keyless AnkiDroid binding, this backend can present a
+     * collection key, so the durable record carries real binding evidence and the identity contract
+     * answers with an authoritative match. The routing conclusion must be identical anyway — the
+     * action goes to the backend it was admitted on, and nowhere else.
+     */
+    @Test
+    fun `a bury bound to a keyed PC backend executes on that backend only`() = runTest {
+        val pcA = AnkiBackendId.PcAgent("gate21i-pca")
+        // The substitute is *not* a second PC profile: two `PcAgent` instances would make the
+        // pre-binding session-start resolution ambiguous, which is not what this case is about.
+        val bId = AnkiBackendId.Fake("gate21i-pcb")
+        val b = FakeAnkiBackend(
+            id = bId,
+            decks = listOf(AnkiDeck(ReviewerActionHarness.deckFor(bId), "B Deck")),
+            cards = listOf(ReviewerActionHarness.card("123", bId)),
+            initialCapabilities = FakeAnkiBackend.REVIEW_ACTION_CAPABILITIES,
+            instanceId = "gate21i-pcb"
+        ).apply {
+            currentCollectionIdentity = AnkiCollectionIdentity(bId, ReviewerActionHarness.COLLECTION_KEY)
+        }
+        val h = ReviewerActionHarness(
+            backendId = pcA,
+            mode = AnkiBackendMode.PC_AGENT,
+            extraBackends = listOf(b)
+        )
+        h.loadToRating()
+        assertEquals(pcA, h.state.anki!!.reviewSession!!.context.backendId)
+        val nextCardsBefore = h.fake.nextCardCount
+
+        h.requestAction(ReviewerAction.BuryCard)
+        h.drain()
+
+        val record = h.store.durableRecords().single()
+        assertEquals("the durable owner is the PC instance the session locked", pcA, record.backendId)
+        assertEquals(ReviewerAction.BuryCard, record.action)
+        assertEquals(ReviewerActionStatus.APPLIED, record.status)
+        assertEquals("the target stays PC-qualified", pcA, record.cardRef.backendId)
+        assertEquals(
+            "a keyed backend supplies real binding evidence",
+            ReviewerActionHarness.COLLECTION_KEY, record.collectionRef?.collectionKey)
+        assertEquals(1, h.fake.reviewerActionBoundaryCrossings)
+        assertEquals(
+            "exactly one fresh scheduler query, on the owner",
+            nextCardsBefore + 1, h.fake.nextCardCount)
+
+        // The identity contract's own verdict for this record: routed to the exact instance.
+        val route = ReviewerActionRoutingPolicy(h.registry)
+            .route(record, boundIsLiveInThisProcess = true) as ReviewerActionRoute.Routed
+        assertEquals(pcA, route.backend.id)
+        assertEquals(
+            ReviewerActionHarness.COLLECTION_KEY,
+            (route.assurance as AnkiIdentityAssurance.AuthoritativeMatch).collectionKey)
+
+        assertEquals("the substitute receives zero action calls", 0, b.reviewerActionInvocations)
+        assertEquals(0, b.reviewerActionBoundaryCrossings)
+        assertEquals(0, b.reviewerActionReconciliationCount)
+        assertEquals(0, b.nextCardCount)
+        assertEquals(0, b.physicalCommitCalls)
+    }
+
     // ------------------------------------------------------------------- VER-21I-05  suspend A
 
     @Test
@@ -117,8 +180,71 @@ class Gate21iReviewerActionRoutingTest {
         assertEquals(0, b.nextCardCount)
     }
 
-    // ------------------------------------------------------------------- VER-21I-07  unsupported
+    // ----------------------------------------------------------------- VER-21I-06  suspend on PC
 
+    /**
+     * Suspend on a PC-owned session, with the scope question asked explicitly: the modelled action
+     * is [ReviewerAction.SuspendCard] (card scope) and this build models **no** note/sibling-scoped
+     * suspend at all (`ReviewerAction` has exactly `SetFlag`/`BuryCard`/`SuspendCard`), so there is
+     * nothing for an adapter to silently widen into. The assertion is that the dispatched action is
+     * byte-for-byte the admitted one, on the admitted backend, for the admitted card.
+     */
+    @Test
+    fun `a suspend bound to a keyed PC backend keeps its card scope and its owner`() = runTest {
+        val pcA = AnkiBackendId.PcAgent("gate21i-pca")
+        val bId = AnkiBackendId.Fake("gate21i-pcb")
+        val b = FakeAnkiBackend(
+            id = bId,
+            decks = listOf(AnkiDeck(ReviewerActionHarness.deckFor(bId), "B Deck")),
+            // Same numeric card id as the PC session's card: scope confusion must still be impossible.
+            cards = listOf(ReviewerActionHarness.card("A", bId)),
+            initialCapabilities = FakeAnkiBackend.REVIEW_ACTION_CAPABILITIES,
+            instanceId = "gate21i-pcb"
+        ).apply {
+            currentCollectionIdentity = AnkiCollectionIdentity(bId, ReviewerActionHarness.COLLECTION_KEY)
+        }
+        val h = ReviewerActionHarness(
+            backendId = pcA,
+            mode = AnkiBackendMode.PC_AGENT,
+            cards = listOf(
+                ReviewerActionHarness.card("A", pcA),
+                ReviewerActionHarness.card("A-sibling", pcA)
+            ),
+            extraBackends = listOf(b)
+        )
+        h.loadToRating()
+        assertEquals("A", h.turn!!.cardRef.cardId)
+
+        h.requestAction(ReviewerAction.SuspendCard)
+        h.drain()
+
+        val record = h.store.durableRecords().single()
+        assertEquals(pcA, record.backendId)
+        assertEquals(
+            "the dispatched action is the admitted one — no note/sibling widening exists to fall into",
+            ReviewerAction.SuspendCard, record.action)
+        assertEquals(ReviewerActionKind.SUSPEND, record.action.kind)
+        assertEquals("the suspended resource is the turn's own card", "A", record.cardRef.cardId)
+        assertEquals(pcA, record.cardRef.backendId)
+        assertEquals(ReviewerActionStatus.APPLIED, record.status)
+        assertEquals(1, h.fake.reviewerActionBoundaryCrossings)
+        assertEquals("the sibling card on the same backend was never a target", 1,
+            h.fake.reviewerActionInvocations)
+        assertEquals("the substitute receives zero action calls", 0, b.reviewerActionInvocations)
+        assertEquals(0, b.reviewerActionBoundaryCrossings)
+        assertEquals(0, b.reviewerActionReconciliationCount)
+        assertEquals(0, b.nextCardCount)
+    }
+
+    // ------------------------- VER-21I-01 (flag on AnkiDroid) + VER-21I-07  unsupported capability
+
+    /**
+     * VER-21I-01 is *capability-blocked*, not skipped: the pinned AnkiDroid public provider contract
+     * (v2.24.1) exposes no flag column, so `AnkiCapabilities.flags = false` always
+     * (`docs/BACKEND_CAPABILITY_MATRIX.md`, GATE 21A §capability). The honest verification of
+     * "flag on AnkiDroid" is therefore exactly this: a typed refusal with zero backend calls and
+     * nothing durable — never a substitute operation on any backend.
+     */
     @Test
     fun `an unsupported action is refused with a typed refusal, never a substitute`() = runTest {
         val b = backendB()
@@ -402,6 +528,65 @@ class Gate21iReviewerActionRoutingTest {
         assertEquals("degraded identity never becomes a match", ReviewerActionStatus.AMBIGUOUS,
             h.store.durableRecords().single().status)
         assertEquals("a blocked cell issues zero reconciliation calls", 0, h.fake.reviewerActionReconciliationCount)
+    }
+
+    /**
+     * VER-21I-15 — the **unknown** cell, which is not the degraded one. Keyless AnkiDroid is
+     * production reality (no collection key exists anywhere, DISCOVERY-21-03), so an action admitted
+     * there has a genuinely unknown collection dimension. Unknown must stay disclosed as unknown —
+     * `SessionContinuityVerified` while this process still holds the binding,
+     * `IdentityUnverifiable(NOMINAL)` after process death — it is never reported as a verified
+     * collection match, and it never becomes a blanket retry authorization.
+     */
+    @Test
+    fun `an unknown collection is disclosed as unverifiable and authorizes no blind retry`() = runTest {
+        val b = backendB()
+        val h = ReviewerActionHarness(extraBackends = listOf(b)) // A is keyless AnkiDroid
+        h.loadToRating()
+        assertNull("the backend presents no collection key", h.fake.currentCollectionIdentity)
+        assertNull("…so the session bound none",
+            h.state.anki!!.reviewSession!!.context.collection?.collectionKey)
+
+        h.fake.scriptActions(
+            FakeAnkiBackend.ActionStep(
+                ReviewerActionBackendResult.OutcomeUnknown(AnkiError.QueryFailure("lost"))))
+        h.requestAction(ReviewerAction.BuryCard)
+        h.drain()
+        assertEquals(ReviewerActionStatus.AMBIGUOUS, h.action?.status)
+        val record = h.store.durableRecords().single()
+        assertNull("the durable record claims no collection it never had",
+            record.collectionRef?.collectionKey)
+
+        val policy = ReviewerActionRoutingPolicy(h.registry)
+        val live = policy.reconcileRoute(record, boundIsLiveInThisProcess = true)
+            as ReviewerActionRoute.Routed
+        assertEquals(aId, live.backend.id)
+        assertEquals(AnkiIdentityAssurance.SessionContinuityVerified, live.assurance)
+        val restored = policy.reconcileRoute(record, boundIsLiveInThisProcess = false)
+            as ReviewerActionRoute.Routed
+        assertEquals(aId, restored.backend.id)
+        assertEquals(
+            AnkiIdentityAssurance.IdentityUnverifiable(AnkiUnverifiabilityQualifier.NOMINAL),
+            restored.assurance)
+        assertFalse(
+            "unknown is never reported as a verified collection match",
+            live.assurance is AnkiIdentityAssurance.AuthoritativeMatch ||
+                restored.assurance is AnkiIdentityAssurance.AuthoritativeMatch)
+
+        // Unknown is not a retry grant either: the machine refuses the blind retry, dispatches
+        // nothing further, and the record keeps its ambiguity, its owner and its parameters.
+        val invocations = h.fake.reviewerActionInvocations
+        h.send(AnkiStudyEvent.RetryReviewerAction(h.state.epoch, record.actionId))
+        assertTrue(
+            "an unknown collection authorizes no blind retry",
+            h.rejected.contains("anki-action-retry-not-safe"))
+        assertEquals(invocations, h.fake.reviewerActionInvocations)
+        val after = h.store.durableRecords().single()
+        assertEquals(ReviewerActionStatus.AMBIGUOUS, after.status)
+        assertEquals(aId, after.backendId)
+        assertEquals(ReviewerAction.BuryCard, after.action)
+        assertEquals(0, b.reviewerActionInvocations)
+        assertEquals(0, b.reviewerActionReconciliationCount)
     }
 
     // ------------------------------------------------------------------- VER-21I-16  prepared
@@ -761,7 +946,7 @@ class Gate21iReviewerActionRoutingTest {
             assertEquals(0, b.nextCardCount)
         }
 
-    // ------------------------------------------------------------------- VER-21I-27  reconnect
+    // ------------------------------------------- VER-21I-27 reconnect + VER-21I-28 new collection
 
     @Test
     fun `reconnect validates identity before safe recovery and a changed collection stays blocked`() =
