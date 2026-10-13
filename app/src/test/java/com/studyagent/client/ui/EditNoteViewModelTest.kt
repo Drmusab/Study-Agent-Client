@@ -1,5 +1,6 @@
 package com.studyagent.client.ui
 
+import com.studyagent.client.core.anki.AnkiBackendRegistry
 import androidx.lifecycle.ViewModelStore
 import com.studyagent.client.anki.edit.FakeNoteMutationBackend
 import com.studyagent.client.anki.edit.InMemoryNoteMutationStore
@@ -63,7 +64,7 @@ class EditNoteViewModelTest {
         var block: NoteEditBlock? = null
         private var counter = 0
         val coordinator = DefaultNoteMutationCoordinator(
-            backend,
+            AnkiBackendRegistry(listOf(backend)),
             DefaultNoteMutationLedger(store, nowEpochMs = { 1_000L }),
             NoteEditSafetyPolicy { block },
             NoteMutationIdSource { NoteMutationId("m-${++counter}") },

@@ -3,6 +3,7 @@ package com.studyagent.client.anki.edit
 import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiCollectionIdentity
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiCardDetails
 import com.studyagent.client.core.anki.AnkiCardRef
@@ -44,6 +45,14 @@ class FakeNoteMutationBackend(
 ) : AnkiBackend {
 
     val caps = MutableStateFlow(capabilities)
+
+    /**
+     * GATE 21J — the collection identity this instance reports. `null` is the AnkiDroid-like case:
+     * no authoritative discriminator. Tests set it to model two distinct collections.
+     */
+    var collectionIdentity: AnkiCollectionIdentity? = null
+    override val currentCollectionIdentity: AnkiCollectionIdentity?
+        get() = collectionIdentity
 
     // ---- collection state -----------------------------------------------------------------------
     var noteTypeId: String? = "model-1"

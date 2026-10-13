@@ -1,5 +1,6 @@
 package com.studyagent.client.anki.edit
 
+import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiDeckRef
@@ -54,12 +55,12 @@ class NoteMutationCoordinatorTest {
         private val ids = NoteMutationIdSource { NoteMutationId("m-${++counter}") }
         val safety = NoteEditSafetyPolicy { _ -> blocked }
         val ledger = DefaultNoteMutationLedger(store, nowEpochMs = { 1_000L })
-        val coordinator = DefaultNoteMutationCoordinator(backend, ledger, safety, ids, nowEpochMs = { 1_000L })
+        val coordinator = DefaultNoteMutationCoordinator(AnkiBackendRegistry(listOf(backend)), ledger, safety, ids, nowEpochMs = { 1_000L })
 
         fun base(): NoteEditBase = backend.editableBase()
 
         fun restarted(): DefaultNoteMutationCoordinator = DefaultNoteMutationCoordinator(
-            backend,
+            AnkiBackendRegistry(listOf(backend)),
             DefaultNoteMutationLedger(store, nowEpochMs = { 2_000L }),
             safety,
             NoteMutationIdSource { NoteMutationId("restart-${++counter}") },
@@ -224,6 +225,8 @@ class NoteMutationCoordinatorTest {
 
     @Test
     fun backendMismatchIsRefused() {
+        // GATE 21J: a base owned by a backend this process does not hold is a route refusal, not a
+        // silent write to the registered instance. The GATE 17 name is kept for traceability.
         runBlocking {
             val h = Harness()
             val foreign = AnkiBackendId.PcAgent("other")
@@ -232,7 +235,11 @@ class NoteMutationCoordinatorTest {
                 noteRef = AnkiNoteRef(foreign, "note-1"),
                 deckRef = null
             )
-            assertEquals(NoteMutationOutcome.Refused(NoteMutationRefusal.BackendMismatch), h.coordinator.save(base, frontEdit()))
+            assertEquals(
+                NoteMutationOutcome.Refused(NoteMutationRefusal.BackendRouteBlocked("backend_not_registered")),
+                h.coordinator.save(base, frontEdit())
+            )
+            assertTrue(h.backend.applyCalls.isEmpty())
         }
     }
 
@@ -802,7 +809,7 @@ class NoteMutationCoordinatorTest {
                 checks++
                 if (checks >= 2) NoteEditBlock("reviewer_action") else null
             }
-            val coordinator = DefaultNoteMutationCoordinator(h.backend, h.ledger, racing, NoteMutationIdSource { NoteMutationId("race") }, nowEpochMs = { 1L })
+            val coordinator = DefaultNoteMutationCoordinator(AnkiBackendRegistry(listOf(h.backend)), h.ledger, racing, NoteMutationIdSource { NoteMutationId("race") }, nowEpochMs = { 1L })
             val outcome = coordinator.save(h.base(), frontEdit())
             assertEquals(NoteMutationOutcome.Refused(NoteMutationRefusal.StudyActivityOverlaps(NoteEditBlock("reviewer_action"))), outcome)
             assertTrue(h.backend.applyCalls.isEmpty())

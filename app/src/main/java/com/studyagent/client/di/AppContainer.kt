@@ -464,7 +464,8 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
      */
     override val noteMutationCoordinator: NoteMutationCoordinator by lazy {
         DefaultNoteMutationCoordinator(
-            backend = ankiDroidBackend,
+            // GATE 21J: exact registry routing per record; no pinned instance, no preference lookup.
+            backends = ankiBackendRegistry,
             ledger = noteMutationLedger,
             safety = StudyActivityNoteEditSafetyPolicy(
                 reviewCommits = reviewCommitLedger,
