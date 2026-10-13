@@ -924,7 +924,22 @@ class FakeAnkiBackend(
         /** Refuses the boundary, as a backend must when the caller cannot make `SUBMITTING` durable. */
         val refusesMutationEntry: Boolean = false,
         /** The read-only evidence `reconcileReviewerAction` reports while this step is current. */
-        val reconciliation: ReviewerActionReconciliationResult? = null
+        val reconciliation: ReviewerActionReconciliationResult? = null,
+        /**
+         * GATE 21I — simulate **process death** after the durable boundary was crossed but before
+         * the provider effect was applied. The step throws [ProcessDeathSimulation] (an
+         * [Error], deliberately: an [Exception] from a backend is a contract violation the
+         * coordinator must classify, while a kernel-level kill is not a backend answer at all).
+         * The durable row stays `SUBMITTING` — exactly what the process left behind.
+         */
+        val crashAfterBoundary: Boolean = false,
+        /**
+         * GATE 21I — simulate process death **after** the provider effect was applied but before
+         * the response reached the client (applied / lost response, crash-flavoured): the effect
+         * happens on the fake's scheduler, then the process dies. The durable row stays
+         * `SUBMITTING` and only reconciliation may decide the outcome.
+         */
+        val crashAfterApply: Boolean = false
     )
 
     private val actionSteps = ArrayDeque<ActionStep>()
@@ -980,6 +995,11 @@ class FakeAnkiBackend(
             }
             actionBoundaryCrossings.incrementAndGet()
         }
+        // GATE 21I — death between the durable boundary and the provider effect: the durable row
+        // stays SUBMITTING and the provider never applied anything.
+        if (step.crashAfterBoundary) {
+            throw ProcessDeathSimulation("crash_after_boundary")
+        }
         // GATE 13 — a confirmed turn-invalidating action really changes what the scheduler hands
         // back: the card leaves the queue and the active turn is released, exactly like AnkiDroid's
         // `sched.buryCards` / `sched.suspendCards`. Without this the fake would keep offering the
@@ -991,6 +1011,11 @@ class FakeAnkiBackend(
                 queue = queue.filterIndexed { i, _ -> i != index }
                 if (index < cursor) cursor -= 1
             }
+        }
+        // GATE 21I — death after the effect, before the response: the scheduler state is what it
+        // is (applied), the durable row is still SUBMITTING, and only reconciliation decides.
+        if (step.crashAfterApply) {
+            throw ProcessDeathSimulation("crash_after_apply")
         }
         step.result
     }
@@ -1141,3 +1166,16 @@ private fun snapshotDetails(details: AnkiCardDetails): AnkiCardDetails = details
  * transport failure, not a scheduler answer, and the client must fail closed (AMBIGUOUS).
  */
 class FakeTransportLost(message: String) : RuntimeException(message)
+
+/**
+ * GATE 21I — a **process death** in the middle of a reviewer action: the OS killed the client
+ * between two durable writes.
+ *
+ * Deliberately an [Error], not an [Exception]: an exception thrown by a backend is a *backend
+ * contract violation* that the coordinator must classify (anything unclassified after dispatch is
+ * `OutcomeUnknown`), while a kernel-level kill is not a backend answer at all — it must propagate
+ * through every boundary untouched, leaving exactly the durable state the process had reached
+ * (`SUBMITTING` if the boundary write succeeded, `PREPARED` if it had not). The test harness
+ * catches it, discards the in-memory ledgers and restarts over the surviving bytes.
+ */
+class ProcessDeathSimulation(val window: String) : Error("simulated process death: $window")

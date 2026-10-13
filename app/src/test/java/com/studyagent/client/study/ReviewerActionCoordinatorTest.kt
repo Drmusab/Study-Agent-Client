@@ -23,7 +23,11 @@ class ReviewerActionCoordinatorTest {
 
     private val backend = AnkiBackendId.AnkiDroidLocal
     private val session = "study-13"
-    private val card = AnkiCardRef(backend, cardId = "42", collectionKey = "collection")
+    // GATE 21I — production AnkiDroid shape: the pinned provider exposes no collection
+    // discriminator (DISCOVERY-21-03), so card refs and session context carry no collection key.
+    // A record that *did* record a key against this keyless backend is a degraded binding under
+    // the GATE 21C contract (mismatch-grade, fail-closed) and is covered by the 21I routing tests.
+    private val card = AnkiCardRef(backend, cardId = "42", collectionKey = null)
 
     private fun request(
         action: ReviewerAction = ReviewerAction.BuryCard,
@@ -35,7 +39,7 @@ class ReviewerActionCoordinatorTest {
         cardRef = card,
         action = action,
         backendId = backend,
-        collectionRef = AnkiCollectionIdentity(backend, "collection"),
+        collectionRef = null,
         semantics = ReviewerActionSemantics(
             supportsIdempotentReplay = true, supportsAuthoritativeReconciliation = true)
     )

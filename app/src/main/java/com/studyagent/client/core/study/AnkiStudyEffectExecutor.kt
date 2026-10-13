@@ -88,6 +88,16 @@ class AnkiStudyEffectExecutor(
     private val commitRouting: ReviewCommitRoutingPolicy =
         ReviewCommitRoutingPolicy(registry, transactionRecovery),
     /**
+     * GATE 21I — the reviewer-action family's admission/recovery routing policy (one policy per
+     * transaction family: a shared mutable router is deliberately not introduced). It gates a new
+     * action (`OP-M1`) before any durable intent exists, an explicit retry (`OP-M2`) against the
+     * record's own binding evidence, and the process-death recovery pass (`OP-P`). The `OP-M3`
+     * gate for reconciliation lives in the family's reconciler (DECISION-21I-03). Defaults to the
+     * production policy over [registry]; no call site changes.
+     */
+    private val actionRouting: ReviewerActionRoutingPolicy =
+        ReviewerActionRoutingPolicy(registry, transactionRecovery),
+    /**
      * GATE 21G — durable ownership of the active StudySession (CHECKPOINT 21G-06).
      *
      * When present, a successful start persists the session's immutable lock and ending the
@@ -180,6 +190,22 @@ class AnkiStudyEffectExecutor(
             ?: return AnkiStudyEvent.ReviewerActionResolved(
                 effect.epoch, actionId,
                 AnkiReviewerActionOutcome.NotRecorded(ReviewActionCategories.LEDGER_UNAVAILABLE))
+        // GATE 21I — the new action is `OP-M1`: admission runs the identity contract against the
+        // action's *own* backend identity and the session's binding collection, before any durable
+        // intent exists. A blocked cell is a typed refusal with zero backend calls and no durable
+        // record — never a rewrite onto another backend (INV-21I-02, DECISION-21B-15/16).
+        val admission = actionRouting.route(
+            ownerBackendId = effect.cardRef.backendId,
+            bindingCollectionKey = effect.collectionRef?.collectionKey,
+            operation = AnkiOperationClass.OP_M1,
+            boundIsLiveInThisProcess = sessionBoundHere(effect.sessionId),
+            action = effect.action
+        )
+        if (admission is ReviewerActionRoute.Blocked) {
+            return AnkiStudyEvent.ReviewerActionResolved(
+                effect.epoch, actionId,
+                AnkiReviewerActionOutcome.NotRecorded(admission.token))
+        }
         val request = ReviewerActionRequest(
             sessionId = effect.sessionId,
             turnId = effect.turnId,
@@ -193,7 +219,15 @@ class AnkiStudyEffectExecutor(
         return reviewerActionEvent(effect.epoch, actionId, outcome)
     }
 
-    /** GATE 13 §13 — an explicit retry of the same logical action (same action id). */
+    /**
+     * GATE 13 §13 / GATE 21I — an explicit retry of the same logical action (same action id).
+     *
+     * The retry is `OP-M2` (or `OP-M1` for a restored, provably un-entered `PREPARED`): before the
+     * coordinator is asked to dispatch it, the identity contract is re-run against the durable
+     * record's *own* backend and binding collection. A blocked retry dispatches nothing and leaves
+     * the durable record exactly where it was — the typed token is what the projection shows, and
+     * the same retry is re-validated from scratch whenever it is offered again.
+     */
     private suspend fun retryReviewerAction(
         effect: AnkiStudyEffect.RetryReviewerAction
     ): AnkiStudyEvent? {
@@ -201,6 +235,21 @@ class AnkiStudyEffectExecutor(
             ?: return AnkiStudyEvent.ReviewerActionResolved(
                 effect.epoch, effect.actionId,
                 AnkiReviewerActionOutcome.NotRecorded(ReviewActionCategories.LEDGER_UNAVAILABLE))
+        val record = actionLedger?.get(effect.actionId)
+        if (record != null) {
+            val route = actionRouting.route(
+                record,
+                record.mutationOperationClass(),
+                boundIsLiveInThisProcess = sessionBoundHere(record.sessionId)
+            )
+            if (route is ReviewerActionRoute.Blocked) {
+                // Proven-not-applied stays proven-not-applied: the durable record keeps its
+                // status and its owner; only the dispatch is refused, with the block token.
+                return AnkiStudyEvent.ReviewerActionResolved(
+                    effect.epoch, effect.actionId,
+                    AnkiReviewerActionOutcome.RetryAvailable(route.token))
+            }
+        }
         return reviewerActionEvent(effect.epoch, effect.actionId, coordinator.retry(effect.actionId))
     }
 
@@ -479,6 +528,26 @@ class AnkiStudyEffectExecutor(
         commitRouting.recoveryPlan(ledger?.unresolved().orEmpty())
 
     /**
+     * GATE 21I — the read-only **OP-P recovery pass** over the durable **reviewer actions** of
+     * every backend (CHECKPOINT 21I-16).
+     *
+     * Same rule as the commit pass: load the unresolved records, group them by the backend
+     * identity **each record carries**, look up that exact registered instance, and read each
+     * backend's *current* collection identity, so a group is `Routed` only when registry,
+     * reachability and collection continuity permit it and is otherwise `Blocked` with a stable
+     * reason. Blocking is per group: one unavailable backend never blocks, rewrites or clears
+     * another backend's action records (DECISION-21B-16 rule 8, INV-21I-21).
+     *
+     * Read-only in the strictest sense: it issues no backend call, performs no reconciliation,
+     * retries nothing, and mutates no record. AUTO and the global preference are never consulted —
+     * the persisted identity is the only routing input. Recovery *decisions* (what a record of a
+     * given status may do) remain the GATE 13 recovery policy's; this pass only says which
+     * backend groups may be reached at all.
+     */
+    suspend fun actionRecoveryPlan(): Map<AnkiBackendId, BackendTransactionRoute> =
+        actionRouting.recoveryPlan(actionLedger?.unresolved().orEmpty())
+
+    /**
      * GATE 21H — the **OP-P verdict** for a persisted session lock (CHECKPOINT 21G-07 + 21H-14).
      *
      * The durable owner is decoded, unresolved transactions are routed by their *persisted* backend,
@@ -496,15 +565,26 @@ class AnkiStudyEffectExecutor(
         boundIsLiveInThisProcess: Boolean = false
     ): StudySessionRestore {
         val unresolved = ledger?.unresolved().orEmpty()
+        // GATE 21I — an unresolved *reviewer action* for this session/collection holds the
+        // next-card barrier exactly like an unresolved commit: the turn may already have left the
+        // scheduler's queue, and a fresh card must not be fetched until the action's own
+        // transaction barrier decides otherwise (INV-21I-28, GATE 13 §30).
+        val unresolvedActions = actionLedger?.unresolved().orEmpty()
         val lock = (decoded as? DecodedSessionLock.Valid)?.lock
         // The barrier flag reuses the ledger's own blocking rule (same session on this backend, or
         // an unfinished record in this backend's collection context) so "unresolved" here means the
         // same thing it means before scheduler traffic at session start.
-        val hasUnresolved = lock != null && unresolved.any { record ->
-            record.status != ReviewCommitStatus.COMMITTED && record.backendId == lock.backendId &&
-                (record.sessionId == lock.studySessionId || lock.collection?.collectionKey == null ||
-                    record.collectionKey == null || record.collectionKey == lock.collection?.collectionKey)
-        }
+        val hasUnresolved = lock != null &&
+            (unresolved.any { record ->
+                record.status != ReviewCommitStatus.COMMITTED && record.backendId == lock.backendId &&
+                    (record.sessionId == lock.studySessionId || lock.collection?.collectionKey == null ||
+                        record.collectionKey == null || record.collectionKey == lock.collection?.collectionKey)
+            } || unresolvedActions.any { record ->
+                record.status != ReviewerActionStatus.APPLIED && record.backendId == lock.backendId &&
+                    (record.sessionId == lock.studySessionId || lock.collection?.collectionKey == null ||
+                        record.collectionRef?.collectionKey == null ||
+                        record.collectionRef?.collectionKey == lock.collection?.collectionKey)
+            })
         return StudySessionRestorePolicy.restore(
             decoded = decoded,
             lookup = registry::find,
