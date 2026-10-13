@@ -2,9 +2,11 @@ package com.studyagent.client.core.anki.edit
 
 import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiCardDetails
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
+import com.studyagent.client.core.anki.AnkiOperationClass
 import com.studyagent.client.core.anki.AnkiResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -18,6 +20,13 @@ sealed interface NoteMutationRefusal {
     /** The resulting last field is empty and this backend cannot represent that write. */
     data object TrailingEmptyFieldNotRepresentable : NoteMutationRefusal
     data object BackendMismatch : NoteMutationRefusal
+
+    /**
+     * GATE 21J — the owning backend of this mutation cannot be used right now (not configured, or its
+     * verified collection no longer matches the one the mutation was admitted against). [token] is the
+     * stable routing token. Nothing was sent, and the mutation was never routed to another backend.
+     */
+    data class BackendRouteBlocked(val token: String) : NoteMutationRefusal
     data class DeckListingUnavailable(val error: AnkiError) : NoteMutationRefusal
     data object SaveInProgress : NoteMutationRefusal
     data class StudyActivityOverlaps(val block: NoteEditBlock) : NoteMutationRefusal
@@ -148,13 +157,19 @@ interface NoteMutationCoordinator {
  * One coordinator call runs at a time. A second call while one is in flight is refused ([SaveInProgress]).
  */
 class DefaultNoteMutationCoordinator(
-    private val backend: AnkiBackend,
+    /**
+     * GATE 21J — the exact configured instances. Every backend touch resolves the owner of the
+     * mutation (`base.backendId` for a new save, `record.backendId` for everything else) through this
+     * registry. There is no pinned instance, no fallback and no preference lookup.
+     */
+    private val backends: AnkiBackendRegistry,
     private val ledger: NoteMutationLedger,
     private val safety: NoteEditSafetyPolicy,
     private val ids: NoteMutationIdSource = UuidNoteMutationIdSource,
     private val nowEpochMs: () -> Long = System::currentTimeMillis
 ) : NoteMutationCoordinator {
 
+    private val routing = NoteMutationRoutingPolicy(backends)
     private val gate = Mutex()
 
     /**
@@ -189,6 +204,10 @@ class DefaultNoteMutationCoordinator(
                 if (record.status != NoteMutationStatus.CONFLICT) {
                     return@withGate NoteMutationOutcome.Refused(NoteMutationRefusal.ConflictNotResolvable(record.status))
                 }
+                // GATE 21J: a superseding save belongs to the conflicted mutation's owner, never to a new one.
+                if (base.backendId != record.backendId) {
+                    return@withGate NoteMutationOutcome.Refused(NoteMutationRefusal.BackendMismatch)
+                }
                 saveLocked(base, draft, supersedes = conflictedId)
             }
         }
@@ -210,7 +229,14 @@ class DefaultNoteMutationCoordinator(
             if (!pending.containsKey(mutationId)) {
                 return@withGate NoteMutationOutcome.Refused(NoteMutationRefusal.PayloadUnavailable)
             }
-            unsupportedDimensionFor(record.plan)?.let {
+            // The owner is decided before any transition, so a refusal changes nothing.
+            val backend = when (val route = routeFor(record)) {
+                is NoteMutationRoute.Blocked -> return@withGate NoteMutationOutcome.Refused(
+                    NoteMutationRefusal.BackendRouteBlocked(route.token)
+                )
+                is NoteMutationRoute.Routed -> route.backend
+            }
+            unsupportedDimensionFor(record.plan, backend)?.let {
                 return@withGate NoteMutationOutcome.Refused(NoteMutationRefusal.UnsupportedDimension(it))
             }
             val requeued = when (val step = ledger.apply(mutationId, NoteMutationStatus.RETRY_ALLOWED, NoteMutationEvent.RetryRequested)) {
@@ -265,6 +291,16 @@ class DefaultNoteMutationCoordinator(
     }
 
     private suspend fun reconcileAmbiguous(record: NoteMutationRecord): NoteMutationRecoveryOutcome {
+        // GATE 21J: reconciliation is asked only of the record's own owner, and only when the owner's
+        // identity permits it. A blocked owner is reported as unresolved evidence, never as a result.
+        val backend = when (val route = routing.route(record, AnkiOperationClass.OP_M3, pending.containsKey(record.mutationId))) {
+            is NoteMutationRoute.Blocked -> return NoteMutationRecoveryOutcome.StillAmbiguous(
+                record,
+                AnkiError.BackendUnavailable(route.token),
+                NoteMutationVerification.Unverifiable(route.token)
+            )
+            is NoteMutationRoute.Routed -> route.backend
+        }
         val evidence = backend.reconcileNoteMutation(
             NoteMutationReconciliationRequest(
                 mutationId = record.mutationId,
@@ -313,6 +349,10 @@ class DefaultNoteMutationCoordinator(
     private suspend fun stateEvidence(record: NoteMutationRecord): NoteMutationVerification {
         val payload = pending[record.mutationId]
             ?: return NoteMutationVerification.Unverifiable("payload_not_retained")
+        val backend = when (val route = routing.route(record, AnkiOperationClass.OP_R2, pending.containsKey(record.mutationId))) {
+            is NoteMutationRoute.Blocked -> return NoteMutationVerification.Unverifiable(route.token)
+            is NoteMutationRoute.Routed -> route.backend
+        }
         val refreshed = when (val read = backend.getCardDetails(record.cardRef)) {
             is AnkiResult.Success -> read.value
             is AnkiResult.Failure -> return NoteMutationVerification.Unverifiable("post_write_read_failed")
@@ -341,6 +381,13 @@ class DefaultNoteMutationCoordinator(
         draft: NoteEditDraft,
         supersedes: NoteMutationId?
     ): NoteMutationOutcome {
+        // GATE 21J: the owner of a new save is the base note's backend. Its exact instance, or a refusal.
+        val backend = when (val route = routing.admit(base.backendId)) {
+            is NoteMutationRoute.Blocked -> return NoteMutationOutcome.Refused(
+                NoteMutationRefusal.BackendRouteBlocked(route.token)
+            )
+            is NoteMutationRoute.Routed -> route.backend
+        }
         if (base.backendId != backend.id) return NoteMutationOutcome.Refused(NoteMutationRefusal.BackendMismatch)
 
         val validation = NoteEditPlanner.validateDraft(base, draft)
@@ -349,7 +396,7 @@ class DefaultNoteMutationCoordinator(
         val patch = NoteEditPlanner.buildPatch(base, draft)
         if (patch.isEmpty) return NoteMutationOutcome.NoChanges
 
-        unsupportedDimensionFor(patch)?.let {
+        unsupportedDimensionFor(patch, backend)?.let {
             return NoteMutationOutcome.Refused(NoteMutationRefusal.UnsupportedDimension(it))
         }
         if (patch.fieldChanges.isNotEmpty() &&
@@ -360,7 +407,7 @@ class DefaultNoteMutationCoordinator(
         }
 
         if (patch.deckChange != null) {
-            when (val deckCheck = checkDeckTarget(base, patch)) {
+            when (val deckCheck = checkDeckTarget(base, patch, backend)) {
                 is DeckCheck.ListingFailed ->
                     return NoteMutationOutcome.Refused(NoteMutationRefusal.DeckListingUnavailable(deckCheck.error))
                 is DeckCheck.Invalid -> return NoteMutationOutcome.ValidationFailed(deckCheck.errors)
@@ -381,7 +428,11 @@ class DefaultNoteMutationCoordinator(
         }
 
         val id = ids.next()
-        val record = newPreparedNoteMutationRecord(id, base, patch, plan, nowEpochMs(), supersedes)
+        // The collection the owner reports now is the collection this mutation is admitted against.
+        val admittedCollection = backend.currentCollectionIdentity?.takeIf { it.backendId == backend.id }
+        val record = newPreparedNoteMutationRecord(
+            id, base, patch, plan, nowEpochMs(), supersedes, collectionRef = admittedCollection
+        )
         when (val created = ledger.create(record)) {
             is NoteLedgerResult.Unavailable -> return NoteMutationOutcome.LedgerUnavailable(created.detail)
             is NoteLedgerResult.Rejected -> return NoteMutationOutcome.LedgerUnavailable(created.reason)
@@ -403,6 +454,15 @@ class DefaultNoteMutationCoordinator(
     private suspend fun runFromPrepared(record: NoteMutationRecord): NoteMutationOutcome {
         val id = record.mutationId
         val payload = pending[id] ?: return NoteMutationOutcome.Refused(NoteMutationRefusal.PayloadUnavailable)
+
+        // GATE 21J: the write goes to the record's own owner, or nowhere. Blocked before the boundary,
+        // so the record stays PREPARED and nothing was sent.
+        val backend = when (val route = routeFor(record)) {
+            is NoteMutationRoute.Blocked -> return NoteMutationOutcome.Refused(
+                NoteMutationRefusal.BackendRouteBlocked(route.token)
+            )
+            is NoteMutationRoute.Routed -> route.backend
+        }
 
         // Study work can start between recording and writing; check again before any write.
         safety.blockingStudyActivity(record.noteRef)?.let {
@@ -455,7 +515,7 @@ class DefaultNoteMutationCoordinator(
                 step = step
             )
             val result = try {
-                callBackend(request)
+                callBackend(backend, request)
             } catch (cancelled: CancellationException) {
                 // The write may have been issued. Record that before the cancellation propagates.
                 withContext(NonCancellable) {
@@ -466,7 +526,7 @@ class DefaultNoteMutationCoordinator(
 
             when (result) {
                 is NoteMutationBackendResult.ConfirmedApplied -> {
-                    if (index == steps.lastIndex) return finishApplied(current, record, steps)
+                    if (index == steps.lastIndex) return finishApplied(backend, current, record, steps)
                 }
                 is NoteMutationBackendResult.ConfirmedNotApplied -> {
                     if (index == 0) {
@@ -517,12 +577,13 @@ class DefaultNoteMutationCoordinator(
      * recorded as AMBIGUOUS: it is never reported as APPLIED and never replayed.
      */
     private suspend fun finishApplied(
+        backend: AnkiBackend,
         current: NoteMutationRecord,
         record: NoteMutationRecord,
         steps: List<NoteMutationStep>
     ): NoteMutationOutcome {
         val id = record.mutationId
-        val refreshed = readForVerification(record)
+        val refreshed = readForVerification(backend, record)
         when (val verification = NoteMutationVerifier.verify(steps, refreshed, record.backendId)) {
             NoteMutationVerification.MatchesIntent -> Unit
             is NoteMutationVerification.DiffersFromIntent, is NoteMutationVerification.Unverifiable -> {
@@ -560,7 +621,7 @@ class DefaultNoteMutationCoordinator(
     }
 
     /** One authoritative read, attempted twice: a single transient read failure must not decide truth. */
-    private suspend fun readForVerification(record: NoteMutationRecord): AnkiCardDetails? {
+    private suspend fun readForVerification(backend: AnkiBackend, record: NoteMutationRecord): AnkiCardDetails? {
         var attempts = 0
         while (attempts < POST_WRITE_READ_ATTEMPTS) {
             attempts++
@@ -607,7 +668,7 @@ class DefaultNoteMutationCoordinator(
      * One backend call. Any failure except cancellation is an unknown outcome: the call may have
      * reached the backend. Only the backend itself can classify a failure as proven non-application.
      */
-    private suspend fun callBackend(request: BackendNoteMutationRequest): NoteMutationBackendResult {
+    private suspend fun callBackend(backend: AnkiBackend, request: BackendNoteMutationRequest): NoteMutationBackendResult {
         val attempt = runCatching { backend.applyNoteMutation(request) }
         val failure = attempt.exceptionOrNull()
         if (failure is CancellationException) throw failure
@@ -643,7 +704,7 @@ class DefaultNoteMutationCoordinator(
         }
     }
 
-    private fun unsupportedDimensionFor(patch: NoteMutationPatch): String? {
+    private fun unsupportedDimensionFor(patch: NoteMutationPatch, backend: AnkiBackend): String? {
         val caps = backend.capabilities.value
         return when {
             !caps.cardDetails -> "card_details"
@@ -667,7 +728,7 @@ class DefaultNoteMutationCoordinator(
         return patch.fieldChanges.firstOrNull { it.ordinal == lastIndex }?.newValue ?: base.fields[lastIndex].value
     }
 
-    private fun unsupportedDimensionFor(plan: NoteMutationPlan): String? {
+    private fun unsupportedDimensionFor(plan: NoteMutationPlan, backend: AnkiBackend): String? {
         val caps = backend.capabilities.value
         return when {
             !caps.cardDetails -> "card_details"
@@ -685,7 +746,7 @@ class DefaultNoteMutationCoordinator(
     }
 
     /** Deck targets are verified against the live listing: existence and not-filtered, both ways. */
-    private suspend fun checkDeckTarget(base: NoteEditBase, patch: NoteMutationPatch): DeckCheck {
+    private suspend fun checkDeckTarget(base: NoteEditBase, patch: NoteMutationPatch, backend: AnkiBackend): DeckCheck {
         val change = patch.deckChange ?: return DeckCheck.Verified
         val decks = when (val listing = backend.getDecks()) {
             is AnkiResult.Failure -> return DeckCheck.ListingFailed(listing.error)
@@ -700,11 +761,16 @@ class DefaultNoteMutationCoordinator(
         }
         val source = base.deckRef
         if (source != null) {
-            val sourceDeck = decks.firstOrNull { it.ref.deckId == source.deckId }
+            // GATE 21J: a numeric deck id is only meaningful inside its own backend.
+            val sourceDeck = decks.firstOrNull { it.ref.backendId == backend.id && it.ref.deckId == source.deckId }
             if (sourceDeck?.isFiltered == true) errors += NoteEditValidationError.SourceDeckFiltered
         }
         return if (errors.isEmpty()) DeckCheck.Verified else DeckCheck.Invalid(errors)
     }
+
+    /** The owner route for an existing durable record: exact instance, or a typed block. */
+    private fun routeFor(record: NoteMutationRecord): NoteMutationRoute =
+        routing.route(record, record.mutationOperationClass(), boundIsLiveInThisProcess = pending.containsKey(record.mutationId))
 
     private suspend fun withGate(
         busy: NoteMutationOutcome,

@@ -70,7 +70,8 @@ class EditNoteViewModel(
         val saving: Boolean
     )
 
-    private var backend: AnkiBackend = initialBackend
+    // GATE 21J: the editor's backend is fixed for its whole lifetime (INV-21J-01). There is no setter.
+    private val backend: AnkiBackend = initialBackend
     private var cardRef: AnkiCardRef = initialCardRef
     private var generation: Long = 0L
     private var editor: Editor? = null
@@ -172,28 +173,8 @@ class EditNoteViewModel(
         }
     }
 
-    /**
-     * A backend switch never reinterprets the reference the editor was opened with: the draft is
-     * dropped and the screen fails closed unless navigation supplies a reference qualified for the
-     * new backend and collection.
-     */
-    fun switchBackend(next: AnkiBackend) {
-        if (next === backend) return
-        loadJob?.cancel()
-        saveJob?.cancel()
-        backend = next
-        editor = null
-        generation += 1L
-        when {
-            next.id != cardRef.backendId -> _uiState.value = EditNoteUiState.Error(
-                AnkiError.InvalidRequest(detail = "card_ref_foreign_backend")
-            )
-            cardRef.collectionKey == null -> _uiState.value = EditNoteUiState.Error(
-                AnkiError.InvalidRequest(detail = "edit_note_collection_identity_unavailable")
-            )
-            else -> load()
-        }
-    }
+    // GATE 21J: there is deliberately no backend switch. A different backend means a new editor opened
+    // from that backend's own note reference (navigation), never a mutation of this editor's owner.
 
     // ---- draft edits ---------------------------------------------------------------------------
 

@@ -371,6 +371,9 @@ object EditNoteMapper {
             "Anki's public interface cannot store an empty last field, so this edit cannot be written."
         NoteMutationRefusal.BackendMismatch ->
             "The note belongs to a different backend than the one currently connected. The edit was not sent."
+        is NoteMutationRefusal.BackendRouteBlocked ->
+            "The backend that owns this note is unavailable, or its collection can no longer be verified. " +
+                "Nothing was written, and Study Agent did not switch to another backend."
         is NoteMutationRefusal.DeckListingUnavailable ->
             "The deck list could not be read (${message(reason.error)}), so the move cannot be verified."
         NoteMutationRefusal.SaveInProgress -> "A save is already running. Wait for it to finish."

@@ -1,6 +1,7 @@
 package com.studyagent.client.core.anki.edit
 
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiCollectionIdentity
 import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiNoteRef
@@ -35,13 +36,23 @@ data class NoteMutationRecord(
     /** Set on a record created to resolve a conflict; links back to the mutation it supersedes. */
     val supersedesMutationId: NoteMutationId? = null,
     val createdAtEpochMs: Long,
-    val updatedAtEpochMs: Long
+    val updatedAtEpochMs: Long,
+    /**
+     * GATE 21J — the collection this mutation was admitted against, as its OWNING backend reported
+     * it at admission. `null` means the backend had no authoritative discriminator at that moment
+     * (the normal AnkiDroid case): unknown, never a match. Optional with a `null` default so a record
+     * written before GATE 21J decodes unchanged. It belongs to [backendId] by construction.
+     */
+    val collectionRef: AnkiCollectionIdentity? = null
 ) {
     init {
         require(lastEnteredOperation >= -1 && lastEnteredOperation < plan.operations.size) {
             "Operation index is outside the plan"
         }
         require(attemptCount >= 0) { "Attempt count cannot be negative" }
+        require(collectionRef == null || collectionRef.backendId == backendId) {
+            "A mutation's collection identity must belong to the mutation's own backend"
+        }
     }
 }
 
@@ -52,7 +63,8 @@ fun newPreparedNoteMutationRecord(
     patch: NoteMutationPatch,
     plan: NoteMutationPlan,
     nowEpochMs: Long,
-    supersedes: NoteMutationId? = null
+    supersedes: NoteMutationId? = null,
+    collectionRef: AnkiCollectionIdentity? = null
 ): NoteMutationRecord = NoteMutationRecord(
     mutationId = mutationId,
     backendId = base.backendId,
@@ -69,5 +81,6 @@ fun newPreparedNoteMutationRecord(
     reason = NoteMutationReason.NONE,
     supersedesMutationId = supersedes,
     createdAtEpochMs = nowEpochMs,
-    updatedAtEpochMs = nowEpochMs
+    updatedAtEpochMs = nowEpochMs,
+    collectionRef = collectionRef
 )
