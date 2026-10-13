@@ -140,11 +140,15 @@ class Gate21ArchitectureAuditTest {
 
     @Test
     fun `transaction recovery routes by the persisted record identity`() {
-        val actions = main("core/anki/ReviewerActionRecovery.kt").code()
+        // GATE 21I — the exact identity lookup for the reviewer-action family lives in its
+        // routing policy (recovery and reconciliation both resolve through it); the reconciler
+        // keeps the card/collection resource check.
+        val actionRouting = main("core/anki/ReviewerActionRoutingPolicy.kt").code()
         assertTrue(
-            "reviewer-action reconciliation must resolve the record's own backend",
-            actions.contains("registry.find(record.backendId)")
+            "reviewer-action routing must resolve the record's own backend exactly",
+            actionRouting.contains("registry.find(record.backendId)")
         )
+        val actions = main("core/anki/ReviewerActionRecovery.kt").code()
         assertTrue(
             "reviewer-action reconciliation must refuse a foreign card or collection",
             actions.contains("record.cardRef.backendId != backend.id")

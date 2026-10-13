@@ -24,7 +24,32 @@ class ReviewerActionHarness(
     val store: InMemoryReviewerActionStore = InMemoryReviewerActionStore(),
     val commitStore: InMemoryReviewCommitStore = InMemoryReviewCommitStore(),
     capabilities: AnkiCapabilities = FakeAnkiBackend.REVIEW_ACTION_CAPABILITIES,
-    flagWrites: Boolean = false
+    flagWrites: Boolean = false,
+    commitSteps: List<FakeAnkiBackend.CommitStep> = emptyList(),
+    /**
+     * GATE 21I — other backends installed alongside the session's own. A registry that holds more
+     * than one backend is what makes "the action is not redirected by a preference change"
+     * observable: a preference-driven resolution could pick another backend, and must not.
+     */
+    val extraBackends: List<AnkiBackend> = emptyList(),
+    /**
+     * GATE 21/21I — the session's immutable backend lock, exactly as production wires it
+     * (`AnkiStudyEffectExecutor.sessionLocks`). It is what makes the `OP-M1` session-backend
+     * consistency check and the "bound live in this process" evidence real in this harness.
+     */
+    val sessionLocks: AnkiStudyBackendLockTracker = AnkiStudyBackendLockTracker(),
+    /**
+     * GATE 21H/21I — the collection identity this fake reports, if any.
+     *
+     * The default is production reality: AnkiDroid reports none (no key exists, DISCOVERY-21-03),
+     * so a session bound to it records no collection and the collection dimension stays genuinely
+     * unknown; every other identity models a *keyed* backend whose cards and session carry the
+     * same key it reports, so a durable record can reach an authoritative collection match —
+     * which is what the GATE 21C matrix needs before a mutation retry (`OP-M2`) or a read-only
+     * reconciliation (`OP-M3`) is permitted. Tests that need a keyed *local* backend alongside a
+     * PC substitute (so session-start resolution stays unambiguous) override this explicitly.
+     */
+    liveCollectionKey: String? = if (backendId == BACKEND) null else COLLECTION_KEY
 ) {
     var now: Long = 10_000L
     val clock: () -> Long = { now }
@@ -35,8 +60,11 @@ class ReviewerActionHarness(
         cards = cards,
         initialCapabilities = capabilities,
         instanceId = "gate13",
-        flagWrites = flagWrites
-    )
+        flagWrites = flagWrites,
+        commitSteps = commitSteps
+    ).apply {
+        currentCollectionIdentity = liveCollectionKey?.let { AnkiCollectionIdentity(backendId, it) }
+    }
     val backend: AnkiBackend = fake
     val semantics = ReviewerActionCapabilities(
         flag = capabilities.flags,
@@ -49,6 +77,13 @@ class ReviewerActionHarness(
         )
     )
 
+    /**
+     * GATE 21I — the registry is one shared instance across simulated process restarts: a backend
+     * that was *removed from configuration* stays removed, while a backend that merely lost
+     * connectivity is still the same registered instance (its scheduler state outlives the
+     * client process, which is what makes a lost response recoverable).
+     */
+    val registry = AnkiBackendRegistry(listOf(backend) + extraBackends)
     var commitLedger = ReviewCommitLedger(commitStore, clock)
         private set
     var ledger = DurableReviewerActionLedger(store, clock)
@@ -61,13 +96,18 @@ class ReviewerActionHarness(
     val rejected = mutableListOf<String>()
 
     private fun newExecutor() = AnkiStudyEffectExecutor(
-        registry = AnkiBackendRegistry(listOf(backend)),
+        registry = registry,
         ledger = commitLedger,
         clock = clock,
-        actionLedger = ledger
+        actionLedger = ledger,
+        sessionLocks = sessionLocks
     )
 
-    /** A new process over the same durable state: ledger memory dies, the store survives. */
+    /**
+     * A new process over the same durable state: ledger memory dies, the store survives. The
+     * backends themselves are the same objects — a real backend's scheduler state outlives the
+     * client process, which is exactly what makes a lost response recoverable.
+     */
     fun restart() {
         ledger = store.restart(clock)
         commitLedger = commitStore.restart(clock)
@@ -142,15 +182,22 @@ class ReviewerActionHarness(
 
     /** Direct coordinator access, for the transaction-level assertions (VERIFICATION 1-13). */
     fun coordinator(): DefaultReviewerActionCoordinator =
-        DefaultReviewerActionCoordinator(ledger, commitLedger, AnkiBackendRegistry(listOf(backend)), clock)
+        DefaultReviewerActionCoordinator(ledger, commitLedger, registry, clock)
 
     companion object {
         val BACKEND = AnkiBackendId.AnkiDroidLocal
 
-        fun deckFor(backend: AnkiBackendId) = AnkiDeckRef(backend, "1", "collection")
+        /** The collection key this harness's fixtures carry on cards and decks. */
+        const val COLLECTION_KEY = "collection"
 
-        fun card(id: String, backend: AnkiBackendId = BACKEND) = AnkiRenderedCard(
-            AnkiCardRef(backend, cardId = id, collectionKey = "collection"),
+        fun deckFor(backend: AnkiBackendId) = AnkiDeckRef(backend, "1", COLLECTION_KEY)
+
+        fun card(
+            id: String,
+            backend: AnkiBackendId = BACKEND,
+            collectionKey: String? = COLLECTION_KEY
+        ) = AnkiRenderedCard(
+            AnkiCardRef(backend, cardId = id, collectionKey = collectionKey),
             "<b>Q $id</b>", "<b>A $id</b>", "Question $id", "Answer $id", "Answer $id",
             deckRef = deckFor(backend)
         )

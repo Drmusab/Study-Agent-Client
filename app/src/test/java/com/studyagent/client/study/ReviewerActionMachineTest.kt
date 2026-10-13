@@ -196,7 +196,10 @@ class ReviewerActionMachineTest {
             turnId = ReviewTurnId("turn-1"),
             cardRef = card.ref,
             action = ReviewerAction.BuryCard,
-            collectionRef = AnkiCollectionIdentity(backendId, "collection")
+            // GATE 21I — AnkiDroid reports no collection key (DISCOVERY-21-03): the session
+            // context, and therefore the record, carries none. Keyless records are the normal
+            // AnkiDroid case and reconcile under the family's instance-bound evidence.
+            collectionRef = null
         ).toRecord(1_000L)
         val seedLedger = store.restart(clock = { 1_000L })
         seedLedger.create(seed)
@@ -225,7 +228,9 @@ class ReviewerActionMachineTest {
             turnId = ReviewTurnId("turn-1"),
             cardRef = card.ref,
             action = ReviewerAction.BuryCard,
-            collectionRef = AnkiCollectionIdentity(backendId, "collection"),
+            // GATE 21I — AnkiDroid reports no collection key (DISCOVERY-21-03): keyless is the
+            // production shape for this backend; a recorded key against it would be degraded.
+            collectionRef = null,
             // The semantics frozen with the record (§28) are what authorizes the read-only probe.
             semantics = ReviewerActionSemantics(
                 supportsIdempotentReplay = true,
@@ -284,7 +289,9 @@ class ReviewerActionMachineTest {
             turnId = ReviewTurnId("turn-1"),
             cardRef = card.ref,
             action = ReviewerAction.SuspendCard,
-            collectionRef = AnkiCollectionIdentity(backendId, "collection")
+            // GATE 21I — AnkiDroid reports no collection key (DISCOVERY-21-03): keyless is the
+            // production shape for this backend; a recorded key against it would be degraded.
+            collectionRef = null
         )
         store.restart(clock = { 1_000L }).create(request.toRecord(1_000L))
 

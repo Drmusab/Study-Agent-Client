@@ -268,6 +268,11 @@ sealed interface ReviewerActionReconciliationResult {
  * action was locked into when it was created — never from the current global preference; only the
  * record's own card is consulted; a collection mismatch is
  * [ReviewerActionReconciliationResult.Unresolved], never a redirect.
+ *
+ * GATE 21I — the `OP-M3` identity gate (DECISION-21I-03) applies here, before any provider call:
+ * a verified mismatch or a degraded key blocks the read with a stable token (zero calls), while a
+ * keyless binding continues under the family's instance-bound card-state evidence, disclosed as
+ * unverifiable — never as a verified collection match.
  */
 interface ReviewerActionReconciler {
     suspend fun reconcile(record: ReviewerActionRecord): ReviewerActionReconciliationResult
@@ -285,7 +290,12 @@ interface ReviewerActionReconciler {
 class AnkiReviewerActionReconciler(
     private val registry: AnkiBackendRegistry,
     private val clock: () -> Long = System::currentTimeMillis,
-    private val timeoutMs: Long = DEFAULT_TIMEOUT_MS
+    private val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    /**
+     * GATE 21I — the family's `OP-M3` identity gate (DECISION-21I-03). Defaults to the
+     * production policy over [registry]; tests may substitute one to script identity evidence.
+     */
+    private val routing: ReviewerActionRoutingPolicy = ReviewerActionRoutingPolicy(registry)
 ) : ReviewerActionReconciler {
     init { require(timeoutMs > 0) }
 
@@ -296,9 +306,20 @@ class AnkiReviewerActionReconciler(
     }
 
     override suspend fun reconcile(record: ReviewerActionRecord): ReviewerActionReconciliationResult {
+        // GATE 21I — the identity gate runs **before** the provider call and before any other
+        // evidence is gathered. A verified collection mismatch, a degraded key or a foreign
+        // backend is `Unresolved` with a stable token — never a redirect to another collection,
+        // never a guess (DECISION-21I-03, CHECKPOINT 21I-14/21I-19). The reconciler has no
+        // session context, so it reads `boundIsLiveInThisProcess = false`: the conservative
+        // reading, which is also the reading after process death.
+        val gate = routing.reconcileRoute(record, boundIsLiveInThisProcess = false)
         // The backend locked into the original action, not the current preference.
-        val backend = registry.find(record.backendId)
-            ?: return ReviewerActionReconciliationResult.Unresolved(AnkiError.BackendUnavailable())
+        val backend = when (gate) {
+            is ReviewerActionRoute.Routed -> gate.backend
+            // Zero provider calls: a blocked cell issues no read at all.
+            is ReviewerActionRoute.Blocked ->
+                return ReviewerActionReconciliationResult.Unresolved(gate.error)
+        }
         if (record.cardRef.backendId != backend.id ||
             record.collectionRef?.let { it.backendId != backend.id } == true
         ) {
