@@ -80,6 +80,14 @@ class AnkiStudyEffectExecutor(
     private val transactionRecovery: AnkiTransactionRecoveryPlanner =
         AnkiTransactionRecoveryPlanner(registry),
     /**
+     * GATE 21H — the rating family's admission/recovery routing policy (one pure function over the
+     * record's **own** backend identity and binding collection evidence, the registry, and the 21C
+     * assurance matrix). Defaults to the production policy over [registry]; tests may substitute one
+     * to script identity evidence without a second routing mechanism.
+     */
+    private val commitRouting: ReviewCommitRoutingPolicy =
+        ReviewCommitRoutingPolicy(registry, transactionRecovery),
+    /**
      * GATE 21G — durable ownership of the active StudySession (CHECKPOINT 21G-06).
      *
      * When present, a successful start persists the session's immutable lock and ending the
@@ -104,7 +112,13 @@ class AnkiStudyEffectExecutor(
     data class ReconciliationDiagnostics(
         val resultToken: String,
         val latencyMs: Long,
-        val atEpochMs: Long
+        val atEpochMs: Long,
+        /**
+         * GATE 21H — the identity cell that refused the query before it was issued (for example
+         * `reconciliation_requires_authoritative_match`), or `null` when the backend was actually
+         * asked. Observational only: it never decides a transaction state.
+         */
+        val identityBlockToken: String? = null
     )
 
     private val reconciliationDiagnostics = ConcurrentHashMap<ReviewCommitId, ReconciliationDiagnostics>()
@@ -445,6 +459,60 @@ class AnkiStudyEffectExecutor(
         }
     }
 
+    // ------------------------------------------------- GATE 21H process-death recovery (OP-P)
+
+    /**
+     * GATE 21H — the read-only **OP-P recovery pass** over the durable transactions of every backend.
+     *
+     * It loads the unresolved records, groups them by the backend identity **each record carries**,
+     * looks up that exact registered instance, and reads each backend's *current* collection
+     * identity, so a group is `Routed` only when registry, reachability and collection continuity
+     * permit it and is otherwise `Blocked` with a stable reason. Blocking is per group: one
+     * unavailable backend never blocks, rewrites or clears another backend's records
+     * (DECISION-21B-16 rule 8).
+     *
+     * Read-only in the strictest sense: it issues no scheduler call, performs no reconciliation,
+     * retries nothing, and mutates no record. AUTO and the global preference are never consulted —
+     * the persisted identity is the only routing input.
+     */
+    suspend fun recoveryPlan(): Map<AnkiBackendId, BackendTransactionRoute> =
+        commitRouting.recoveryPlan(ledger?.unresolved().orEmpty())
+
+    /**
+     * GATE 21H — the **OP-P verdict** for a persisted session lock (CHECKPOINT 21G-07 + 21H-14).
+     *
+     * The durable owner is decoded, unresolved transactions are routed by their *persisted* backend,
+     * and the GATE 21G restore policy then answers with the lock's continuation assurance plus the
+     * next-card barrier flag: when [StudySessionRestore.Restored.hasUnresolvedTransactions] is true,
+     * no next card may be fetched until the durable transaction barrier permits it. A blocked or
+     * invalid lock keeps its identity — no AUTO fallback, no sibling backend, no rewrite.
+     *
+     * [boundIsLiveInThisProcess] is `false` for the design case (restore after process death); a
+     * caller that rehydrates the store without an intervening death may pass `true`. Either way this
+     * call touches no scheduler: it reads the ledger, the store and the registry only.
+     */
+    suspend fun restoreSession(
+        decoded: DecodedSessionLock?,
+        boundIsLiveInThisProcess: Boolean = false
+    ): StudySessionRestore {
+        val unresolved = ledger?.unresolved().orEmpty()
+        val lock = (decoded as? DecodedSessionLock.Valid)?.lock
+        // The barrier flag reuses the ledger's own blocking rule (same session on this backend, or
+        // an unfinished record in this backend's collection context) so "unresolved" here means the
+        // same thing it means before scheduler traffic at session start.
+        val hasUnresolved = lock != null && unresolved.any { record ->
+            record.status != ReviewCommitStatus.COMMITTED && record.backendId == lock.backendId &&
+                (record.sessionId == lock.studySessionId || lock.collection?.collectionKey == null ||
+                    record.collectionKey == null || record.collectionKey == lock.collection?.collectionKey)
+        }
+        return StudySessionRestorePolicy.restore(
+            decoded = decoded,
+            lookup = registry::find,
+            hasUnresolvedTransactions = hasUnresolved,
+            boundIsLiveInThisProcess = boundIsLiveInThisProcess
+        )
+    }
+
     /**
      * Read-only reconciliation of an unknown outcome. Never a mutation and never a replay: the
      * only backend call is the read-only evidence query inside [ReviewCommitReconciler]
@@ -459,9 +527,20 @@ class AnkiStudyEffectExecutor(
     ): ReviewCommitRecoveryResult {
         val commitId = record.commitId
         val startedAt = clock()
+        // GATE 21H — reconciliation is `OP-M3`, the sharpest cell of the identity matrix: it is
+        // permitted only under an authoritative collection match *and* a backend that exposes an
+        // authoritative read. A blocked cell issues no provider call at all and infers nothing —
+        // the durable status stays AMBIGUOUS and the block token is what diagnostics report. This is
+        // the gate that keeps an ambiguous rating from being "resolved" by reading a collection the
+        // transaction was never written against.
+        val gate = commitRouting.route(
+            record, AnkiOperationClass.OP_M3, boundIsLiveInThisProcess = false
+        )
         // Contract guard: a backend that throws from a read-only probe violated the
         // AnkiBackend contract; the outcome stays unknown (read-only — nothing to undo).
-        val reconciliation = try {
+        val reconciliation = if (gate is ReviewCommitRoute.Blocked) {
+            ReviewCommitReconciliationResult.Unresolved(AnkiError.InvalidRequest(gate.token))
+        } else try {
             reconciler.reconcile(record)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -474,7 +553,8 @@ class AnkiStudyEffectExecutor(
             is ReviewCommitReconciliationResult.Unresolved -> "unresolved"
         }
         reconciliationDiagnostics[commitId] = ReconciliationDiagnostics(
-            token, (clock() - startedAt).coerceAtLeast(0L), startedAt)
+            token, (clock() - startedAt).coerceAtLeast(0L), startedAt,
+            identityBlockToken = (gate as? ReviewCommitRoute.Blocked)?.token)
         val evidence = when (reconciliation) {
             is ReviewCommitReconciliationResult.ConfirmedCommitted ->
                 ReconcileCommitResult.Applied("reconciled", reconciliation.receipt)
@@ -531,6 +611,17 @@ class AnkiStudyEffectExecutor(
         val locked = tracker.locks.value[studySessionId] ?: return true
         return locked.backendId == backendId
     }
+
+    /**
+     * GATE 21H — is this session's binding *this process's own live binding*?
+     *
+     * True only while the lock tracker still holds a context for the session (bound here, not ended).
+     * It is the sole input that can produce `SESSION_CONTINUITY_VERIFIED` in the identity matrix, so it
+     * is never assumed: without a tracker, or for a session this process did not bind, the answer is
+     * `false` and the conservative reading applies.
+     */
+    private fun sessionBoundHere(studySessionId: String): Boolean =
+        sessionLocks?.locks?.value?.containsKey(studySessionId) == true
 
     private suspend fun read(effect: AnkiStudyEffect): AnkiStudyEvent? {
         return try {
@@ -762,15 +853,19 @@ class AnkiStudyEffectExecutor(
         }
 
         // Route by the backendId persisted in this commit's identity — never by preference
-        // (INV-21-03). A record whose backend is gone stays refused; it is never replayed against
-        // another backend that never saw the original attempt (INV-21-04).
-        val route = transactionRecovery.plan(listOf(commitId.backendId))[commitId.backendId]
-        val backend = (route as? BackendTransactionRoute.Routed)?.backend
-            ?: registry.find(commitId.backendId)
+        // (INV-21-03). GATE 21H owns the verdict: the transaction goes to the exact registered
+        // instance it was written against, and only when the locked identity contract permits this
+        // operation class (OP-M1 for a first attempt, OP-M2 for a repeat) under the transaction's own
+        // binding collection evidence. A record whose backend is gone, whose collection can no longer
+        // be confirmed, or whose collection has verifiably changed is refused here — before any
+        // backend call — and is never replayed against another backend (INV-21-04, DECISION-21B-16).
+        val operation = record.mutationOperationClass()
+        val route = commitRouting.route(
+            record, operation, boundIsLiveInThisProcess = sessionBoundHere(commitId.studySessionId)
+        )
+        val backend = (route as? ReviewCommitRoute.Routed)?.backend
         if (backend == null) {
-            val reason = (route as? BackendTransactionRoute.Blocked)
-                ?.reason?.name?.lowercase()
-                ?: "backend_missing"
+            val reason = (route as? ReviewCommitRoute.Blocked)?.token ?: "backend_missing"
             val saved = ledger.markRefused(commitId, reason)
             return if (saved != null) saved.toOutcome() else storageFault("commit_persistence_failure")
         }

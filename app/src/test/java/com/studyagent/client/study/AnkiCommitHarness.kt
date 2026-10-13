@@ -56,9 +56,24 @@ class AnkiCommitHarness(
     var now: Long = 10_000L
     val clock: () -> Long = { now }
     val deck: AnkiDeckRef = deckFor(backendId)
+
+    /**
+     * GATE 21H — the collection identity this fake reports, if any.
+     *
+     * AnkiDroid reports none (production reality: no key exists, DISCOVERY-21-03), so a session bound
+     * to it records no collection and the collection dimension stays genuinely unknown. Every other
+     * identity in this harness models a *keyed* backend: its cards, decks and session carry the same
+     * collection key it reports, so a durable record can reach an authoritative collection match —
+     * which is what the GATE 21C matrix requires before a mutation retry (`OP-M2`) or a read-only
+     * reconciliation (`OP-M3`) is permitted. A fixture whose records claim a collection the backend
+     * cannot confirm is the fail-closed *degraded* case, and 21H tests construct it on purpose.
+     */
+    val liveCollectionKey: String? = if (backendId == BACKEND) null else COLLECTION_KEY
     val fake = FakeAnkiBackend(id = backendId, decks = listOf(AnkiDeck(deck, "Deck")), cards = cards,
         commitSteps = commitSteps, nextErrors = nextErrors, instanceId = "gate11", mode = fakeMode,
-        guaranteeLevel = guarantee)
+        guaranteeLevel = guarantee).apply {
+        currentCollectionIdentity = liveCollectionKey?.let { AnkiCollectionIdentity(backendId, it) }
+    }
     val backend: AnkiBackend = wrap(fake)
     var ledger = ReviewCommitLedger(store, clock)
         private set
@@ -139,6 +154,9 @@ class AnkiCommitHarness(
 
     companion object {
         val BACKEND = AnkiBackendId.AnkiDroidLocal
+
+        /** The collection key this harness's fixtures carry on cards and decks. */
+        const val COLLECTION_KEY = "collection"
         val DECK = AnkiDeckRef(BACKEND, "1", "collection")
 
         /** A non-AnkiDroid identity whose fake may legitimately advertise authoritative reconciliation. */
