@@ -1,5 +1,11 @@
 # GATE 21L — Custom Study & Filtered Session Backend Ownership (BLOCKED Report)
 
+> **Read `docs/GATE_21L_REPORT.md` first.** That document is the current, authoritative GATE 21L record
+> (same verdict: `BLOCKED`). It re-runs the prerequisite validation at HEAD `42336ad`, re-derives the backend
+> capability rows from the pinned upstream sources with a reproducible script
+> (`tools/check-capability-pins.sh`), and adds executed build/regression results. This file is kept unchanged
+> below as the earlier record of the same verdict.
+
 **Status:** `BLOCKED`
 **IMPLEMENTATION AUTHORIZED: NO**
 **Type:** Prerequisite validation → blocker documentation. No production code, tests, or build changes.
