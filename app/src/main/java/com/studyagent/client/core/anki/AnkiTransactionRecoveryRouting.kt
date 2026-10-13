@@ -13,7 +13,18 @@ enum class BackendTransactionBlockReason {
      * written against (DECISION-21-16). Only decidable when collection identity exists; a backend
      * without one never produces this (DISCOVERY-21-03).
      */
-    COLLECTION_MISMATCH
+    COLLECTION_MISMATCH,
+
+    /**
+     * GATE 21H — the record was written against a collection this backend could name, and it cannot
+     * name one now. `BACKEND_FAILURE_MATRIX` §6 and `BACKEND_IDENTITY_CONTRACT` §3.5: *"key recorded,
+     * live key now unknown ⇒ blocked"* — "we could tell before and cannot now" is mismatch-grade and
+     * is never read as "no key, therefore fine".
+     *
+     * Unreachable for a backend that never produces a key (the AnkiDroid case, DISCOVERY-21-03):
+     * unknown on the record side means there is nothing to compare, which blocks nothing.
+     */
+    COLLECTION_IDENTITY_UNAVAILABLE
 }
 
 /** Where one backend's durable transactions must go. Never "wherever a backend is available". */
@@ -80,11 +91,19 @@ class AnkiTransactionRecoveryPlanner(private val registry: AnkiBackendRegistry) 
             return BackendTransactionRoute.Blocked(backendId, BackendTransactionBlockReason.BACKEND_UNREACHABLE)
         }
         val active = activeCollectionKeys[backendId]
-        // Only a *known* pair can disagree. Unknown on either side is not a mismatch — it is a
-        // backend that cannot prove collection identity, and pretending otherwise would either block
-        // every recovery or fabricate equivalence (DECISION-21-02, INV-21-06).
-        if (recordCollectionKey != null && active != null && recordCollectionKey != active) {
-            return BackendTransactionRoute.Blocked(backendId, BackendTransactionBlockReason.COLLECTION_MISMATCH)
+        // GATE 21H — the recorded-key direction fails closed in *both* of its cases: a key that is
+        // known now and different is a mismatch, and a key that is unknown now is degraded. Only a
+        // record that recorded no key is beyond comparison (the normal AnkiDroid case), and that is
+        // unknown-vs-unknown, which blocks nothing (DECISION-21-02, INV-21-06, failure matrix §6).
+        if (recordCollectionKey != null) {
+            if (active == null) {
+                return BackendTransactionRoute.Blocked(
+                    backendId, BackendTransactionBlockReason.COLLECTION_IDENTITY_UNAVAILABLE
+                )
+            }
+            if (recordCollectionKey != active) {
+                return BackendTransactionRoute.Blocked(backendId, BackendTransactionBlockReason.COLLECTION_MISMATCH)
+            }
         }
         return BackendTransactionRoute.Routed(backendId, backend)
     }
