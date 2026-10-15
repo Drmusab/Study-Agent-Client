@@ -211,12 +211,13 @@ class Gate21ArchitectureAuditTest {
             .filter { it.code().let { c -> c.contains(".resolve(") && c.contains("BackendResolutionRequest") } }
             .map { it.name }
             .sorted()
-        // The GATE 01 selector adapter, the status center, GATE 21F's new-read binding boundary,
-        // and — since GATE 21G — the two session-start pre-binding sites (the starter resolves for
-        // the request, the executor resolves inside begin()) are the only policy callers.
-        // Reference/continued reads never resolve; bound study work never resolves.
+        // The legacy resolver adapter, GATE 01 selector adapter, status center, GATE 21F read
+        // binding boundary, and the two GATE 21G session-start pre-binding sites are the only
+        // request construction/delegation sites. Reference/continued reads and bound study work
+        // never resolve.
         assertEquals(
             listOf(
+                "AnkiBackendResolver.kt",
                 "AnkiBackendSelector.kt",
                 "AnkiBackendStatus.kt",
                 "AnkiLocalStudyStarter.kt",
@@ -225,13 +226,13 @@ class Gate21ArchitectureAuditTest {
             ),
             callers
         )
-        // The resolver itself is the only definition of the policy.
-        assertTrue(
-            main("core/anki/AnkiBackendResolver.kt").code()
-                .contains("fun resolve(") &&
-                main("core/anki/AnkiBackendResolver.kt").code()
-                .contains("request: BackendResolutionRequest")
-        )
+        // The old API is only a compatibility projection; the one actual policy is Resolver2.
+        val legacyResolver = main("core/anki/AnkiBackendResolver.kt").code()
+        val policyResolver = main("core/anki/AnkiBackendResolver2.kt").code()
+        assertTrue(legacyResolver.contains("AnkiBackendResolver2.resolve"))
+        assertFalse(legacyResolver.contains("request.preference.accepts(it.id)"))
+        assertTrue(policyResolver.contains("fun resolve("))
+        assertTrue(policyResolver.contains("request.preference"))
         // The study runtime and every coordinator are deliberately absent from that list,
         // except the executor's single pre-binding site inside begin() (see the test above).
         studySources().forEach { file ->
@@ -261,15 +262,17 @@ class Gate21ArchitectureAuditTest {
 
     @Test
     fun `manual selection never silently substitutes another backend`() {
-        val resolver = main("core/anki/AnkiBackendResolver.kt").code()
-        // The mode filter runs first and is never widened by availability.
-        assertTrue(resolver.contains("request.preference.accepts(it.id)"))
+        val compatibilityAdapter = main("core/anki/AnkiBackendResolver.kt").code()
+        val resolver = main("core/anki/AnkiBackendResolver2.kt").code()
+        // The legacy API delegates; routing predicates live only in the instance-aware policy.
+        assertTrue(compatibilityAdapter.contains("AnkiBackendResolver2.resolve"))
+        assertFalse(compatibilityAdapter.contains("request.preference.accepts(it.id)"))
         assertTrue(
-            "an explicit mode must be able to fail with its own typed reason",
-            resolver.contains("PreferredBackendUnavailable")
+            "an explicit preference must fail with a typed result instead of widening candidates",
+            resolver.contains("resolveExplicit") && resolver.contains("ExplicitBackendUnavailable")
         )
-        // A local-preference branch may only ever *narrow* to the local kind, never widen to remote.
-        assertTrue(resolver.contains("it.locality == AnkiBackendLocality.LOCAL_DEVICE"))
+        assertTrue(resolver.contains("val candidates = descriptors.filter"))
+        assertTrue(resolver.contains("val local = capable.filter"))
     }
 
     // ----------------------------------------------------------------------- AUDIT-21-13

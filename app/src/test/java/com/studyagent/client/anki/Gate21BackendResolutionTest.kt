@@ -205,6 +205,18 @@ class Gate21BackendResolutionTest {
     }
 
     @Test
+    fun `manual PC kind is ambiguous for multiple configured instances even if one is unavailable`() {
+        val result = resolve(
+            AnkiBackendMode.PC_AGENT,
+            emptySet(),
+            ready(pcId),
+            FakeAnkiBackend(otherPcId, initialAvailability = AnkiAvailability.AgentDisconnected)
+        )
+        assertTrue(result is BackendResolutionResult.Ambiguous)
+        assertEquals(setOf(pcId, otherPcId), (result as BackendResolutionResult.Ambiguous).candidates)
+    }
+
+    @Test
     fun `resolution is pure - it never probes, refreshes or rewrites the preference`() {
         val local = ready(localId)
         val decksBefore = local.getDecksCalls

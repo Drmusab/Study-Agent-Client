@@ -54,6 +54,9 @@ object AnkiBackendResolver2 {
             is BackendPreference.Auto -> resolveAuto(request, sortedDescriptors)
             is BackendPreference.Explicit -> resolveExplicit(pref, request, sortedDescriptors)
             is BackendPreference.ExplicitKind -> resolveExplicitKind(pref, request, sortedDescriptors)
+            is BackendPreference.InvalidStored -> BackendResolutionResult2.ConfigurationInvalid(
+                detail = "invalid_backend_preference_${pref.issue.name.lowercase()}"
+            )
         }
     }
 
@@ -75,8 +78,8 @@ object AnkiBackendResolver2 {
         val considered = eligible.map { it.id }.toSet()
 
         if (eligible.isEmpty()) {
-            // N == 0: no instance of the requested kind is configured.
-            return BackendResolutionResult2.NoBackendConfigured(considered = considered)
+            // N == 0 for an explicit kind is an explicit-selection failure, not AUTO's no-backend case.
+            return BackendResolutionResult2.ExplicitBackendKindUnavailable(requestedKind = requestedKind)
         }
         if (eligible.size >= 2) {
             // N >= 2: ambiguous. Two profiles are two collections; policy must not pick.
@@ -89,11 +92,16 @@ object AnkiBackendResolver2 {
         // N == 1: delegate to the explicit-instance logic so readiness + capability semantics are
         // identical between pinned and unambiguous-kind selection (one policy, two entry points).
         val single = eligible.single()
-        return resolveExplicit(
+        return when (val result = resolveExplicit(
             BackendPreference.Explicit(single.id),
             request,
             listOf(single)
-        )
+        )) {
+            is BackendResolutionResult2.Resolved -> result.copy(
+                reason = BackendResolutionReason.ONLY_ELIGIBLE_CANDIDATE
+            )
+            else -> result
+        }
     }
 
     // --------------------------------------------------------------- AUTO
@@ -186,12 +194,20 @@ object AnkiBackendResolver2 {
 
         // Ready gate (R2). A pinned instance that is not reachable fails with its own reason — no sibling.
         if (!candidate.isReachable) {
+            // Checking is not promoted to a fabricated backend fault: null means no cause is known yet.
             val reason = reasonFor(candidate)
-                ?: AnkiBackendUnavailableReason.BACKEND_ERROR
+            val failure = when (reason) {
+                AnkiBackendUnavailableReason.AUTHENTICATION_REQUIRED ->
+                    BackendResolutionFailure.AUTHENTICATION_REQUIRED
+                AnkiBackendUnavailableReason.PERMISSION_REQUIRED ->
+                    BackendResolutionFailure.PERMISSION_REQUIRED
+                else -> BackendResolutionFailure.EXPLICIT_BACKEND_UNAVAILABLE
+            }
             return BackendResolutionResult2.ExplicitBackendUnavailable(
                 pinnedId = pinnedId,
                 reason = reason,
                 considered = considered,
+                failure = failure,
                 error = errorFor(candidate)
             )
         }
@@ -226,9 +242,7 @@ object AnkiBackendResolver2 {
         val error = if (single != null) {
             errorFor(single)
         } else {
-            AnkiError.BackendUnavailable(
-                request.requiredCapabilities.firstOrNull()?.name?.lowercase() ?: "backend_unavailable"
-            )
+            AnkiError.BackendUnavailable(operationErrorToken(request))
         }
         return BackendResolutionResult2.NoEligibleBackend(
             considered = considered,
@@ -236,6 +250,12 @@ object AnkiBackendResolver2 {
             error = error
         )
     }
+
+    private fun operationErrorToken(request: BackendResolutionRequest2): String =
+        request.requiredCapabilities.minByOrNull { it.name }
+            ?.name
+            ?.lowercase()
+            ?: "backend_unavailable"
 
     private fun reasonFor(d: AnkiBackendDescriptor): AnkiBackendUnavailableReason? =
         d.availability.unavailableReason()

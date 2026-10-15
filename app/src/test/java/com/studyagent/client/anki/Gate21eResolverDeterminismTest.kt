@@ -6,10 +6,13 @@ import com.studyagent.client.core.anki.AnkiBackendDescriptor
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiBackendKind
 import com.studyagent.client.core.anki.AnkiBackendLocality
+import com.studyagent.client.core.anki.AnkiBackendRegistry
+import com.studyagent.client.core.anki.AnkiBackendResolver
 import com.studyagent.client.core.anki.AnkiBackendUnavailableReason
 import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiBackendResolver2
 import com.studyagent.client.core.anki.BackendPreference
+import com.studyagent.client.core.anki.BackendPreferenceInvalidIssue
 import com.studyagent.client.core.anki.BackendResolutionFailure
 import com.studyagent.client.core.anki.BackendResolutionReason
 import com.studyagent.client.core.anki.BackendResolutionRequest2
@@ -232,6 +235,31 @@ class Gate21eResolverDeterminismTest {
         }
     }
 
+    @Test
+    fun `unavailable error projection is independent of capability set insertion order`() {
+        val downLocal = unavailable(localId, AnkiAvailability.CollectionNotInitialized)
+        val downPc = unavailable(pcA, AnkiAvailability.AgentDisconnected)
+        val first = resolve(
+            BackendPreference.Auto,
+            linkedSetOf(
+                com.studyagent.client.core.anki.AnkiRequiredCapability.CARD_DETAILS,
+                com.studyagent.client.core.anki.AnkiRequiredCapability.DECKS
+            ),
+            downLocal,
+            downPc
+        )
+        val second = resolve(
+            BackendPreference.Auto,
+            linkedSetOf(
+                com.studyagent.client.core.anki.AnkiRequiredCapability.DECKS,
+                com.studyagent.client.core.anki.AnkiRequiredCapability.CARD_DETAILS
+            ),
+            downPc,
+            downLocal
+        )
+        assertEquals(first, second)
+    }
+
     // --------------------------------------------------------- VER-21E-17 multiple PC instances
 
     @Test
@@ -247,6 +275,106 @@ class Gate21eResolverDeterminismTest {
         // Explicit pin resolves exactly one of them.
         val pickB = resolve(BackendPreference.Explicit(pcB), emptySet(), ready(pcA), ready(pcB))
         assertEquals(pcB, (pickB as BackendResolutionResult2.Resolved).backendId)
+    }
+
+    @Test
+    fun `legacy explicit PC kind with zero instances is an explicit unavailable result`() {
+        val result = resolve(
+            BackendPreference.ExplicitKind(AnkiBackendKind.PC_AGENT),
+            emptySet(),
+            ready(localId)
+        )
+        assertTrue(result is BackendResolutionResult2.ExplicitBackendKindUnavailable)
+        assertEquals(
+            BackendResolutionFailure.EXPLICIT_BACKEND_UNAVAILABLE,
+            (result as BackendResolutionResult2.Failed).failure
+        )
+    }
+
+    @Test
+    fun `legacy PC kind is ambiguous when multiple instances are configured even if only one is ready`() {
+        val result = resolve(
+            BackendPreference.ExplicitKind(AnkiBackendKind.PC_AGENT),
+            emptySet(),
+            ready(pcA),
+            unavailable(pcB, AnkiAvailability.AgentDisconnected)
+        )
+        assertTrue(result is BackendResolutionResult2.Ambiguous)
+        assertEquals(setOf(pcA, pcB), (result as BackendResolutionResult2.Ambiguous).candidates)
+    }
+
+    @Test
+    fun `legacy kind resolution is labelled as a unique eligible candidate not an instance pin`() {
+        val result = resolve(
+            BackendPreference.ExplicitKind(AnkiBackendKind.PC_AGENT),
+            emptySet(),
+            ready(pcA)
+        )
+        assertEquals(
+            BackendResolutionResult2.Resolved(pcA, BackendResolutionReason.ONLY_ELIGIBLE_CANDIDATE),
+            result
+        )
+    }
+
+    @Test
+    fun `invalid stored preference is a configuration failure and cannot resolve through AUTO`() {
+        val result = resolve(
+            BackendPreference.InvalidStored(BackendPreferenceInvalidIssue.UNKNOWN_MODE),
+            emptySet(),
+            ready(localId),
+            ready(pcA)
+        )
+        assertTrue(result is BackendResolutionResult2.ConfigurationInvalid)
+        assertEquals(
+            BackendResolutionFailure.CONFIGURATION_INVALID,
+            (result as BackendResolutionResult2.Failed).failure
+        )
+        assertTrue(result.considered.isEmpty())
+    }
+
+    @Test
+    fun `Checking is not fabricated as a backend fault for an explicit pin`() {
+        val result = resolve(
+            BackendPreference.Explicit(localId),
+            emptySet(),
+            unavailable(localId, AnkiAvailability.Checking)
+        ) as BackendResolutionResult2.ExplicitBackendUnavailable
+        assertEquals(null, result.reason)
+        assertEquals(BackendResolutionFailure.EXPLICIT_BACKEND_UNAVAILABLE, result.failure)
+    }
+
+    @Test
+    fun `authentication requirement remains a distinct typed explicit failure`() {
+        val result = resolve(
+            BackendPreference.Explicit(pcA),
+            emptySet(),
+            unavailable(pcA, AnkiAvailability.AgentAuthenticationRequired)
+        ) as BackendResolutionResult2.ExplicitBackendUnavailable
+        assertEquals(AnkiBackendUnavailableReason.AUTHENTICATION_REQUIRED, result.reason)
+        assertEquals(BackendResolutionFailure.AUTHENTICATION_REQUIRED, result.failure)
+        assertEquals(pcA, result.pinnedId)
+    }
+
+    @Test
+    fun `application resolver facade delegates to the one instance-aware policy`() {
+        val local = FakeAnkiBackend(
+            id = localId,
+            initialCapabilities = reviewCaps(),
+            initialAvailability = AnkiAvailability.Ready(reviewCaps())
+        )
+        val pc = FakeAnkiBackend(
+            id = pcA,
+            initialCapabilities = reviewCaps(),
+            initialAvailability = AnkiAvailability.Ready(reviewCaps())
+        )
+        val resolver = AnkiBackendResolver(AnkiBackendRegistry(listOf(local, pc)))
+        val result = resolver.resolve(
+            BackendResolutionRequest2(BackendPreference.Explicit(pcA), emptySet(), "test_facade")
+        )
+        assertEquals(
+            BackendResolutionResult2.Resolved(pcA, BackendResolutionReason.EXPLICIT_PIN),
+            result
+        )
     }
 
     // --------------------------------------------------------- VER-21E-23 pure / no I/O
@@ -299,7 +427,7 @@ class Gate21eResolverDeterminismTest {
         val permFail = resolve(BackendPreference.Explicit(localId), emptySet(), downLocal)
         assertTrue(permFail is BackendResolutionResult2.ExplicitBackendUnavailable)
         assertEquals(setOf(localId), (permFail as BackendResolutionResult2.Failed).considered)
-        assertEquals(BackendResolutionFailure.EXPLICIT_BACKEND_UNAVAILABLE, permFail.failure)
+        assertEquals(BackendResolutionFailure.PERMISSION_REQUIRED, permFail.failure)
 
         val miss = resolve(BackendPreference.Explicit(pcA), emptySet(), ready(localId))
         assertEquals(BackendResolutionFailure.EXPLICIT_BACKEND_MISSING, (miss as BackendResolutionResult2.Failed).failure)

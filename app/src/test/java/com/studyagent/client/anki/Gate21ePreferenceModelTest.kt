@@ -4,6 +4,7 @@ import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiBackendKind
 import com.studyagent.client.core.anki.AnkiBackendMode
 import com.studyagent.client.core.anki.BackendPreference
+import com.studyagent.client.core.anki.BackendPreferenceInvalidIssue
 import com.studyagent.client.core.anki.toPreference
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -69,7 +70,11 @@ class Gate21ePreferenceModelTest {
             BackendPreference.Auto,
             BackendPreference.Explicit(localId),
             BackendPreference.Explicit(pcA),
-            BackendPreference.ExplicitKind(AnkiBackendKind.PC_AGENT)
+            BackendPreference.ExplicitKind(AnkiBackendKind.PC_AGENT),
+            BackendPreference.InvalidStored(
+                BackendPreferenceInvalidIssue.INVALID_INSTANCE_PIN,
+                legacyMode = AnkiBackendMode.PC_AGENT
+            )
         )
         cases.forEach { pref ->
             val encoded = json.encodeToString(BackendPreference.serializer(), pref)
