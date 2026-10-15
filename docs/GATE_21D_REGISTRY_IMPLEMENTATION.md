@@ -1,5 +1,12 @@
 # GATE 21D — Backend Registry, Availability & Capabilities (Implementation)
 
+> **Re-verified 2026-10-15 at HEAD `25cc924`.** `docs/GATE_21D_REVERIFICATION.md` re-executes
+> AUDIT-21D-01…16 and VER-21D-01…26 against the current tree (focused 99/99, full suite 2629/2629)
+> and confirms this lock **unchanged** — the registry, state, taxonomy, observer, PC structure,
+> adapter and every `Gate21d*` test are byte-identical to the landing commit, apart from one additive
+> `AnkiBackend.kt` default introduced later by GATE 21F. This document remains the authoritative lock
+> record for the gate's original execution; that one is the current-tree verification.
+
 **Status:** implementation complete and harness-verified — PART V Gradle tasks `BLOCKED — environmental limitation`.
 **Repository:** `Drmusab/Study-Agent-Client`
 **Branch:** `arena/36750f6f-study-agent-client`
