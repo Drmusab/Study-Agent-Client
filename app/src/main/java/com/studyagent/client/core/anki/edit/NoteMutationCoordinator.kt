@@ -294,11 +294,28 @@ class DefaultNoteMutationCoordinator(
         // GATE 21J: reconciliation is asked only of the record's own owner, and only when the owner's
         // identity permits it. A blocked owner is reported as unresolved evidence, never as a result.
         val backend = when (val route = routing.route(record, AnkiOperationClass.OP_M3, pending.containsKey(record.mutationId))) {
-            is NoteMutationRoute.Blocked -> return NoteMutationRecoveryOutcome.StillAmbiguous(
-                record,
-                AnkiError.BackendUnavailable(route.token),
-                NoteMutationVerification.Unverifiable(route.token)
-            )
+            is NoteMutationRoute.Blocked -> {
+                // The *reconciliation* is refused, but the read-only comparison is a different
+                // operation class (`OP-R2`) and the locked §3.3 matrix decides it on its own merits.
+                // Keeping it preserves the human-facing evidence: under a mismatch or a degraded key
+                // `stateEvidence` is itself blocked and says so, and under nominal evidence the human
+                // still sees what Anki currently holds — evidence for them, never proof of the
+                // transaction. Dropping this read would make an ambiguous save look emptier than it
+                // is, which is a diagnostic regression and not a safety gain.
+                //
+                // The read needs the in-process payload. Without it there is nothing to compare, so
+                // the block token is the honest detail rather than an invented comparison.
+                val evidence = if (pending.containsKey(record.mutationId)) {
+                    stateEvidence(record)
+                } else {
+                    NoteMutationVerification.Unverifiable(route.token)
+                }
+                return NoteMutationRecoveryOutcome.StillAmbiguous(
+                    record,
+                    AnkiError.BackendUnavailable(route.token),
+                    evidence
+                )
+            }
             is NoteMutationRoute.Routed -> route.backend
         }
         val evidence = backend.reconcileNoteMutation(

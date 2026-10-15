@@ -2,6 +2,7 @@ package com.studyagent.client.anki.edit
 
 import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiCollectionIdentity
 import com.studyagent.client.core.anki.AnkiCardRef
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
@@ -22,6 +23,7 @@ import com.studyagent.client.core.anki.edit.NoteMutationIdSource
 import com.studyagent.client.core.anki.edit.NoteMutationOutcome
 import com.studyagent.client.core.anki.edit.NoteMutationReason
 import com.studyagent.client.core.anki.edit.NoteMutationRecord
+import com.studyagent.client.core.anki.edit.NoteMutationSemantics
 import com.studyagent.client.core.anki.edit.NoteMutationRecoveryOutcome
 import com.studyagent.client.core.anki.edit.NoteMutationRefusal
 import com.studyagent.client.core.anki.edit.NoteMutationReconciliationResult
@@ -71,6 +73,29 @@ class NoteMutationCoordinatorTest {
             val text = store.encoded ?: return null
             return NoteMutationCodec.decode(text)?.firstOrNull { it.mutationId.value == id }?.status
         }
+    }
+
+    /**
+     * A harness whose backend can honestly answer a reconciliation read.
+     *
+     * The default [Harness] is AnkiDroid-shaped: `authoritativeReconciliation = false` and no
+     * collection key, so locked §3.3 blocks `OP-M3` for it and an ambiguous record stays ambiguous.
+     * That is the production truth today (no backend overrides `reconcileNoteMutation`). The
+     * reconciliation state machine below is a GATE 17 guarantee, so it is exercised against a
+     * backend that *declares* the authoritative read it implements and *proves* its collection —
+     * the only combination under which the locked matrix permits the operation. Declaring a read
+     * the semantics deny would be the inconsistent fixture this replaces.
+     */
+    private fun reconcilingHarness(events: MutableList<String> = mutableListOf()): Harness {
+        val backend = FakeNoteMutationBackend(
+            noteMutationSemantics = NoteMutationSemantics.ANKIDROID_V2_24_1.copy(
+                authoritativeReconciliation = true
+            ),
+            events = events
+        ).apply {
+            collectionIdentity = AnkiCollectionIdentity(AnkiBackendId.AnkiDroidLocal, "coll-h")
+        }
+        return Harness(events, backend)
     }
 
     private fun frontEdit(value: String = "edited") = NoteEditDraft(fieldValues = mapOf(0 to value))
@@ -340,7 +365,7 @@ class NoteMutationCoordinatorTest {
     @Test
     fun ambiguousBecomesRetryableOnlyThroughAuthoritativeEvidence() {
         runBlocking {
-            val h = Harness()
+            val h = reconcilingHarness()
             h.backend.applyHook = { _, _ -> NoteMutationBackendResult.OutcomeUnknown(AnkiError.Unknown("timeout")) }
             val id = h.coordinator.save(h.base(), frontEdit("later")).recordOrNull()!!.mutationId
 
@@ -360,7 +385,7 @@ class NoteMutationCoordinatorTest {
     @Test
     fun reconciliationThatConfirmsApplicationIsTerminal() {
         runBlocking {
-            val h = Harness()
+            val h = reconcilingHarness()
             h.backend.applyHook = { _, _ -> NoteMutationBackendResult.OutcomeUnknown(AnkiError.Unknown("timeout")) }
             val id = h.coordinator.save(h.base(), frontEdit()).recordOrNull()!!.mutationId
             h.backend.reconcileResult = NoteMutationReconciliationResult.ConfirmedApplied
