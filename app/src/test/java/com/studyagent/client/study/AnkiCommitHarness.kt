@@ -48,6 +48,12 @@ class AnkiCommitHarness(
      * ownership (and simulate process death) without building its own executor.
      */
     val sessionLockStore: com.studyagent.client.core.anki.StudySessionLockStore? = null,
+    /**
+     * GATE 21G VER-21G-30 — optional non-Anki answer evaluator (in production this is the PC-hosted
+     * AI service). Defaults to `null`, so every existing harness user keeps the historical
+     * manual-review degradation byte-for-byte.
+     */
+    private val answerEvaluator: AnkiAnswerEvaluator? = null,
     /** GATE 11 checkpoint 4 — deterministic scheduler failure mode for the fake backend. */
     fakeMode: FakeCommitMode = FakeCommitMode.SUCCESS,
     /** LOCAL_DEDUP_ONLY makes the fake re-apply any repeated id that already had an effect. */
@@ -75,10 +81,19 @@ class AnkiCommitHarness(
         currentCollectionIdentity = liveCollectionKey?.let { AnkiCollectionIdentity(backendId, it) }
     }
     val backend: AnkiBackend = wrap(fake)
+
+    /**
+     * GATE 21G — the one registry this harness's executor routes through, exposed so a test can put
+     * a *read* context (GATE 21F) on another backend of the same registry and still observe that
+     * study traffic never leaves the session's locked backend. Same backend objects, so every
+     * per-backend counter below is shared with the executor's view.
+     */
+    val registry = AnkiBackendRegistry(listOf(backend) + extraBackends)
+
     var ledger = ReviewCommitLedger(store, clock)
         private set
     var executor = AnkiStudyEffectExecutor(
-        AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults,
+        registry, ledger, clock, faults, answerEvaluator = answerEvaluator,
         sessionLocks = sessionLocks, sessionLockStore = sessionLockStore)
         private set
 
@@ -89,7 +104,7 @@ class AnkiCommitHarness(
     fun restartLedger() {
         ledger = store.restart(clock)
         executor = AnkiStudyEffectExecutor(
-            AnkiBackendRegistry(listOf(backend) + extraBackends), ledger, clock, faults,
+            registry, ledger, clock, faults, answerEvaluator = answerEvaluator,
             sessionLocks = sessionLocks, sessionLockStore = sessionLockStore)
     }
 

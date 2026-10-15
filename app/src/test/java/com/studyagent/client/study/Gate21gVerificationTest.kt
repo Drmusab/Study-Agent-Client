@@ -14,16 +14,19 @@ import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiFlag
+import com.studyagent.client.core.anki.AnkiRequiredCapability
 import com.studyagent.client.core.anki.AnkiResult
 import com.studyagent.client.core.anki.AnkiReviewSession
 import com.studyagent.client.core.anki.AnkiSessionContext
 import com.studyagent.client.core.anki.AnkiStudyBackendLockTracker
 import com.studyagent.client.core.anki.BackendCommitResult
+import com.studyagent.client.core.anki.BackendPreference
 import com.studyagent.client.core.anki.BackendResolutionRequest2
 import com.studyagent.client.core.anki.BackendResolutionResult2
 import com.studyagent.client.core.anki.DecodedSessionLock
 import com.studyagent.client.core.anki.DurableReviewerActionLedger
 import com.studyagent.client.core.anki.InMemoryStudySessionLockStore
+import com.studyagent.client.core.anki.LibraryDataState
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.ReviewCommitId
 import com.studyagent.client.core.anki.ReviewCommitLedger
@@ -40,7 +43,10 @@ import com.studyagent.client.core.anki.StudySessionLockStore
 import com.studyagent.client.core.anki.StudySessionRestore
 import com.studyagent.client.core.anki.StudySessionRestorePolicy
 import com.studyagent.client.core.anki.toPreference
+import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
+import com.studyagent.client.core.study.AnkiAnswerEvaluationResult
+import com.studyagent.client.core.study.AnkiAnswerEvaluator
 import com.studyagent.client.core.study.AnkiCommitOutcome
 import com.studyagent.client.core.study.AnkiReviewerActionOutcome
 import com.studyagent.client.core.study.AnkiStudyEffect
@@ -51,6 +57,11 @@ import com.studyagent.client.core.study.SessionPhase
 import com.studyagent.client.core.study.StudyEvent
 import com.studyagent.client.core.study.StudyReducer
 import com.studyagent.client.core.study.projectSessionOwnership
+import com.studyagent.client.data.anki.AnkiLibraryRepository
+import com.studyagent.client.data.anki.context.AnkiReadContextBindingResult
+import com.studyagent.client.data.anki.context.AnkiReadContextController
+import com.studyagent.client.testutil.TestClock
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -102,7 +113,8 @@ class Gate21gVerificationTest {
         locks: AnkiStudyBackendLockTracker = AnkiStudyBackendLockTracker(),
         store: StudySessionLockStore? = null,
         commitSteps: List<FakeAnkiBackend.CommitStep> = emptyList(),
-        nextErrors: List<AnkiError> = emptyList()
+        nextErrors: List<AnkiError> = emptyList(),
+        evaluator: AnkiAnswerEvaluator? = null
     ) = AnkiCommitHarness(
         mode = mode,
         cards = listOf(AnkiCommitHarness.card("123", localId), AnkiCommitHarness.card("456", localId)),
@@ -110,7 +122,8 @@ class Gate21gVerificationTest {
         nextErrors = nextErrors,
         extraBackends = extra,
         sessionLocks = locks,
-        sessionLockStore = store
+        sessionLockStore = store,
+        answerEvaluator = evaluator
     )
 
     /**
@@ -923,5 +936,123 @@ class Gate21gVerificationTest {
         assertEquals("cross-backend reviewer actions", 0, pc.reviewerActionBoundaryCrossings)
         assertEquals(localId, locks.lockedBackendFor(sessionId))
         assertEquals(localId, (store.load() as DecodedSessionLock.Valid).lock.backendId)
+    }
+
+    // ------------------------------------------------------------------------ VER-21G-30
+
+    /**
+     * VER-21G-30 — a PC-hosted AI evaluation service is an *independent non-Anki* service
+     * (INV-21G-22). Using it while AnkiDroid owns the Anki scheduler must put zero scheduler,
+     * mutation or session traffic on the PC **Anki** backend.
+     */
+    @Test
+    fun `a pc ai evaluation service never reaches the pc anki scheduler`() = runTest {
+        val locks = AnkiStudyBackendLockTracker()
+        val pc = pcBackend()
+        var aiCalls = 0
+        // The PC AI service: a non-Anki evaluator. It is genuinely on the turn's path below.
+        val pcAiService = AnkiAnswerEvaluator { request ->
+            aiCalls++
+            // The evaluation is about the locked session's own card, on the locked backend.
+            assertEquals(localId, request.cardRef.backendId)
+            AnkiAnswerEvaluationResult.Success(
+                Evaluation(shortFeedback = "pc ai", suggestedRating = Rating.GOOD)
+            )
+        }
+        val h = localHarness(extra = listOf(pc), locks = locks, evaluator = pcAiService)
+
+        h.send(
+            AnkiStudyEvent.Start(
+                quiet("study-1", AnkiBackendMode.ANKIDROID_LOCAL, h.deck)
+                    .copy(evaluateAnswers = true)
+            )
+        )
+        h.drain()
+        val sessionId = h.state.anki!!.reviewSession!!.context.studySessionId
+        assertEquals(localId, locks.lockedBackendFor(sessionId))
+
+        // Submit an answer: the reducer routes it to the AI evaluator, not to a backend.
+        h.send(StudyEvent.UserSubmitAnswer(h.state.currentCardId!!, "the sinoatrial node"))
+        val evalEffect = h.pending.filterIsInstance<AnkiStudyEffect.EvaluateAnswer>().single()
+        h.pending.remove(evalEffect)
+        h.run(evalEffect)
+        assertEquals("the PC AI service must actually have served the turn", 1, aiCalls)
+
+        // The turn still completes on the locked AnkiDroid scheduler.
+        h.drain(limit = 10)
+        if (h.state.phase == SessionPhase.WaitingForAnswer) {
+            h.send(StudyEvent.UserRequestAnswer(h.state.currentCardId))
+            h.drain(limit = 10)
+        }
+        assertEquals(SessionPhase.WaitingForRating, h.state.phase)
+        h.rate(Rating.GOOD)
+        h.run(h.takeCommitEffect())
+        h.drain(limit = 10)
+
+        // Non-vacuity: the locked backend really did schedule and mutate.
+        assertTrue("the locked backend must have scheduled the turn", h.fake.nextCardCount >= 1)
+        assertEquals("the rating must have mutated on the locked backend", 1, h.fake.physicalCommitCalls)
+        // ...and the PC Anki backend saw nothing at all: AI service use is not scheduler authority.
+        assertOtherBackendUntouched(pc, "VER-21G-30")
+        assertEquals(localId, locks.lockedBackendFor(sessionId))
+    }
+
+    // ------------------------------------------------------------------------ VER-21G-31
+
+    /**
+     * VER-21G-31 — GATE 21F read contexts are explicitly *replaceable*; the GATE 21G session lock
+     * is not (INV-21G-23). Moving the Library read context to B while a StudySession is locked to A
+     * must leave every study operation on A.
+     */
+    @Test
+    fun `a library read context on b leaves the study session locked to a`() = runTest {
+        val locks = AnkiStudyBackendLockTracker()
+        val pc = pcBackend().apply {
+            // A PC agent reports its collection identity (AnkiDroid does not). The label matches the
+            // locked session's deck label on purpose: a shared label is still not shared identity.
+            currentCollectionIdentity = AnkiCollectionIdentity(pcId, "collection")
+        }
+        val h = localHarness(extra = listOf(pc), locks = locks)
+        // The session binds first, while the preference still names AnkiDroid.
+        h.loadToRating()
+        val sessionId = h.state.anki!!.reviewSession!!.context.studySessionId
+        assertEquals(localId, locks.lockedBackendFor(sessionId))
+
+        // The user browses the Library on the PC backend: a genuinely new read context on B.
+        val preference = MutableStateFlow<BackendPreference>(BackendPreference.Auto)
+        val readContexts = AnkiReadContextController(registry = h.registry, preference = preference)
+        preference.value = AnkiBackendMode.PC_AGENT.toPreference()
+        val binding = (
+            readContexts.bindNewContext(setOf(AnkiRequiredCapability.DECKS), "library")
+                as AnkiReadContextBindingResult.Bound
+            ).binding
+        assertEquals("the read context must really be on B", pcId, binding.context.backendId)
+
+        // A real read-only Library refresh through that binding: B is serving read screens.
+        val library = AnkiLibraryRepository(binding, TestClock())
+        val snapshot = (library.refresh() as LibraryDataState.Ready).snapshot
+        assertEquals(pcId, checkNotNull(snapshot.readContext).backendId)
+        assertTrue("the read context must actually have read from B", pc.getDecksCalls >= 1)
+
+        // The StudySession is untouched: it rates, commits and advances on A.
+        val readsBefore = h.fake.nextCardCount
+        h.rate(Rating.GOOD)
+        h.run(h.takeCommitEffect())
+        h.drain(limit = 10)
+        assertEquals("the rating must have mutated on the locked backend", 1, h.fake.physicalCommitCalls)
+        assertTrue("the locked backend must keep scheduling", h.fake.nextCardCount > readsBefore)
+
+        // B's *scheduler* never saw the session; its only traffic was the read context's own read.
+        assertEquals("B scheduler queries", 0, pc.nextCardCount)
+        assertEquals("B hydrations", 0, pc.hydrateCalls)
+        assertEquals("B rating mutations", 0, pc.physicalCommitCalls)
+        assertEquals("B commit deliveries", 0, pc.commitInvocations)
+        assertEquals("B reviewer actions", 0, pc.reviewerActionBoundaryCrossings)
+        assertEquals("B session handles", 0, pc.endReviewCalls)
+        assertEquals(localId, locks.lockedBackendFor(sessionId))
+        assertEquals(
+            localId,
+            projectSessionOwnership(h.state, locks.locks.value[sessionId]).lockedBackendId
+        )
     }
 }
