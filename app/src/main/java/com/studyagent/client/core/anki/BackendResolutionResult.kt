@@ -28,11 +28,19 @@ sealed interface BackendResolutionResult2 {
         val error: AnkiError
     }
 
-    /** Nothing of any AUTO/requested kind is registered. */
+    /** AUTO has no configured backend of an accepted kind (for example, only test doubles exist). */
     data class NoBackendConfigured(
         override val considered: Set<AnkiBackendId>,
         override val failure: BackendResolutionFailure = BackendResolutionFailure.NO_BACKEND_CONFIGURED,
         override val error: AnkiError = AnkiError.BackendUnavailable("no_backend_configured")
+    ) : Failed
+
+    /** A legacy explicit kind (not an instance pin) names a kind with zero configured instances. */
+    data class ExplicitBackendKindUnavailable(
+        val requestedKind: AnkiBackendKind,
+        override val considered: Set<AnkiBackendId> = emptySet(),
+        override val failure: BackendResolutionFailure = BackendResolutionFailure.EXPLICIT_BACKEND_UNAVAILABLE,
+        override val error: AnkiError = AnkiError.BackendUnavailable("explicit_backend_not_configured")
     ) : Failed
 
     /** Candidates exist, but none passes readiness + capability gating. */
@@ -54,7 +62,8 @@ sealed interface BackendResolutionResult2 {
     /** The explicitly pinned backend is registered but not ready (unavailable / permission / auth / fault). */
     data class ExplicitBackendUnavailable(
         val pinnedId: AnkiBackendId,
-        val reason: AnkiBackendUnavailableReason,
+        /** Null only when availability is still Checking; no unavailable cause is known yet. */
+        val reason: AnkiBackendUnavailableReason?,
         override val considered: Set<AnkiBackendId>,
         override val failure: BackendResolutionFailure = BackendResolutionFailure.EXPLICIT_BACKEND_UNAVAILABLE,
         override val error: AnkiError

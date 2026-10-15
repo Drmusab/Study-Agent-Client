@@ -48,7 +48,7 @@ sealed interface BackendPreference {
      * This exists only so that pre-pin storage (which recorded only `ANKIDROID_LOCAL` / `PC_AGENT`)
      * can be restored deterministically without fabricating an instance identity. Resolution applies
      * the locked N-rule (BACKEND_SELECTION_POLICY §1.1):
-     *   N == 0 configured of that kind → ExplicitBackendUnavailable (not configured)
+     *   N == 0 configured of that kind → ExplicitBackendKindUnavailable (not configured)
      *   N == 1 → that instance
      *   N >= 2 → Ambiguous (the user must pick an instance; policy must not choose for them)
      *
@@ -65,6 +65,31 @@ sealed interface BackendPreference {
             require(kind != AnkiBackendKind.FAKE) { "FAKE is not a user-selectable kind" }
         }
     }
+
+    /**
+     * A persisted value was present but could not be interpreted safely. This is deliberately a
+     * typed, content-free state rather than AUTO or an unpinned kind: malformed storage must not
+     * silently become a different backend choice. The raw token is never retained here because an
+     * invalid string could contain data that is not safe to expose in diagnostics.
+     *
+     * This value is produced only while decoding persisted settings. The data-layer preference
+     * repository refuses to write it; the user must choose a valid preference to clear the error.
+     */
+    @Serializable
+    @SerialName("invalid_stored")
+    data class InvalidStored(
+        val issue: BackendPreferenceInvalidIssue,
+        /** Legacy mode projection only; never used by the resolver. */
+        val legacyMode: AnkiBackendMode? = null
+    ) : BackendPreference
+}
+
+/** Safe, stable reasons for a stored preference that cannot be decoded without guessing. */
+@Serializable
+enum class BackendPreferenceInvalidIssue {
+    UNKNOWN_MODE,
+    INVALID_INSTANCE_PIN,
+    INSTANCE_PIN_KIND_MISMATCH
 }
 
 /**

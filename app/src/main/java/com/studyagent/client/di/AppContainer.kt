@@ -538,12 +538,13 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
         AnkiBackendSelector(ankiBackendRegistry)
     }
 
-    override val ankiBackendPreferenceStore: AnkiBackendPreferenceStore by lazy {
-        DataStoreAnkiBackendPreferenceStore(preferencesDataStore, backendRoutingScope)
-    }
-
     override val backendPreferenceRepository: BackendPreferenceRepository by lazy {
         BackendPreferenceRepository(preferencesDataStore, backendRoutingScope)
+    }
+
+    override val ankiBackendPreferenceStore: AnkiBackendPreferenceStore by lazy {
+        // Legacy mode-only interface delegates to the single GATE 21E preference repository.
+        DataStoreAnkiBackendPreferenceStore(backendPreferenceRepository)
     }
 
     override val ankiBackendResolver: AnkiBackendResolver by lazy {

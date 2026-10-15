@@ -55,9 +55,14 @@ class AnkiBackendSelectorTest {
         assertEquals(AnkiBackendSelector.Resolution.Resolved(localId), select(AnkiBackendMode.AUTO, first, second, backend(localId)))
     }
 
-    @Test fun `only ready profiles participate and unsupported optional features do not block review`() {
-        assertEquals(AnkiBackendSelector.Resolution.Resolved(pcId), select(AnkiBackendMode.PC_AGENT,
+    @Test fun `AUTO filters unavailable profiles and unsupported optional features do not block review`() {
+        // AUTO can choose the one remaining ready remote instance.
+        assertEquals(AnkiBackendSelector.Resolution.Resolved(pcId), select(AnkiBackendMode.AUTO,
             backend(pcId), backend(AnkiBackendId.PcAgent("other"), false)))
+        // A kind-only explicit PC choice must still ask the user when multiple instances are configured.
+        assertTrue(select(AnkiBackendMode.PC_AGENT,
+            backend(pcId), backend(AnkiBackendId.PcAgent("other"), false))
+            is AnkiBackendSelector.Resolution.Ambiguous)
         val minimal = FakeAnkiBackend(pcId, initialCapabilities = AnkiCapabilities(review = true))
         assertEquals(AnkiBackendSelector.Resolution.Resolved(pcId), select(AnkiBackendMode.AUTO, minimal))
     }

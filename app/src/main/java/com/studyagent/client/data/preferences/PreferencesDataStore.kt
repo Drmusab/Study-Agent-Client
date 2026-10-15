@@ -57,6 +57,12 @@ private class AppSettingsDataMigration : DataMigration<Preferences> {
 
 private const val PROFILE_SCHEMA_VERSION = 1
 
+/** One atomic DataStore snapshot of the two fields that together encode backend preference. */
+internal data class StoredAnkiBackendPreference(
+    val modeStableId: String?,
+    val instancePinStableId: String?
+)
+
 /** Profiles got an envelope too, while raw list JSON remains a legacy read path. */
 @Serializable
 private data class PersistedProfiles(
@@ -110,28 +116,34 @@ class PreferencesDataStore(
         .distinctUntilChanged()
 
     /**
-     * GATE 21 — the persisted *preferred* Anki backend mode.
+     * GATE 21E — one atomic snapshot of both persisted preference fields.
      *
-     * An unknown token (a mode removed by a future build, or hand-edited storage) falls back to AUTO
-     * rather than failing: AUTO is the only mode that can still find a usable backend on its own, and
-     * a stale preference must never make the app refuse to study.
+     * The full preference decoder must see `mode` and `instancePin` from the same DataStore
+     * transaction; collecting two independently projected flows can briefly combine fields from
+     * different commits. The raw strings stay inside the data layer and are never logged or exposed
+     * to diagnostics.
+     */
+    internal val backendPreferenceSnapshotFlow: Flow<StoredAnkiBackendPreference> = preferencesFlow
+        .map { prefs ->
+            StoredAnkiBackendPreference(
+                modeStableId = prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_MODE],
+                instancePinStableId = prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_INSTANCE_PIN]
+            )
+        }
+        .distinctUntilChanged()
+
+    /**
+     * GATE 21 — legacy mode-only projection retained for pre-21E UI/diagnostic call sites.
+     *
+     * An unknown mode token projects to AUTO for those legacy consumers, preserving their historical
+     * behavior. New selection must use [BackendPreferenceRepository.preference], whose decoder keeps
+     * invalid persisted values as a typed failure rather than routing through AUTO.
      */
     val ankiBackendModeFlow: Flow<AnkiBackendMode> = preferencesFlow
         .map { prefs ->
             AnkiBackendMode.fromStableId(prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_MODE])
                 ?: AnkiBackendMode.AUTO
         }
-        .distinctUntilChanged()
-
-    /**
-     * GATE 21E — the optional instance-pin stableId, or null when there is no pin.
-     *
-     * The stableId identifies a configured instance (e.g. `pc_agent:<profileId>`) and is content
-     * free; no credentials or endpoints are stored. An unparsable token is kept as-is so resolution
-     * surfaces a typed failure rather than silently rewriting the preference to AUTO.
-     */
-    val ankiBackendPinFlow: Flow<String?> = preferencesFlow
-        .map { prefs -> prefs[AppSettingsPreferencesCodec.Keys.ANKI_BACKEND_INSTANCE_PIN] }
         .distinctUntilChanged()
 
     /**

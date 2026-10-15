@@ -1,4 +1,9 @@
-# GATE 21E — Backend Preference & Deterministic AUTO Resolver (Implementation)
+# GATE 21E — Backend Preference & Deterministic AUTO Resolver (Historical Implementation Report)
+
+> **Historical snapshot:** this report records the original implementation at `afa58cb` on 2026-10-12.
+> It is not the current branch/status record. For the current checkout and the authoritative re-verification,
+> see [`GATE_21E_REVERIFICATION.md`](GATE_21E_REVERIFICATION.md). The current report supersedes any stale
+> branch, file-change, test-count, or gate-lock claim below.
 
 **Status:** implementation complete and harness-verified — PART V Gradle tasks `BLOCKED — environmental limitation`.
 **Repository:** `Drmusab/Study-Agent-Client`
