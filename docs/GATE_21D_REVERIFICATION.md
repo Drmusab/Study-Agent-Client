@@ -23,9 +23,10 @@ READ THIS FIRST (three things that decide what this document may claim)
     never had — is re-EXECUTE the gate's authoritative verification (PART III) and re-derive its
     architecture audit (PART II) at the CURRENT HEAD, so the lock stops being a historical claim.
 
- 2. GRADLE STILL CANNOT RUN IN THIS ENVIRONMENT (fresh attempt, PART V).
+ 2. GRADLE STILL CANNOT RUN IN THIS ENVIRONMENT, AND CI IS RED REPO-WIDE (both freshly verified).
     Executed evidence comes from the repository's Gradle-free JVM harness (Kotlin 2.3/K2).
-    That is equivalence evidence, not CI proof.
+    That is equivalence evidence, not CI proof — and the CI that would provide that proof currently
+    fails before any step runs, on this branch AND on `master` (PART IV).
 
  3. THE PC ANKI BACKEND STILL DOES NOT EXIST.
     Every PC result below is structure-level (`PASS†`), exactly as in the original lock:
@@ -214,12 +215,18 @@ stale health response.
 | `tools/jvm-harness/bin/bootstrap-sandbox.sh` | **PASS**: `main errors: 0 (files: 328)` · `compose errors: 0 (files: 24, stub files: 46)` · `test errors: 0 (files: 250)` |
 | `tools/jvm-harness/bin/run.sh "Gate21d"` | **PASS**: `classes=6 tests=99 passed=99 failed=0 ignored=0 time=1.6s` |
 | `tools/jvm-harness/bin/run.sh` (full) | **PASS**: `classes=218 tests=2629 passed=2629 failed=0 ignored=0 time=48.6s` |
+| GitHub Actions `Android CI` (observed with `gh` while publishing this document) | **BLOCKED — pre-existing repository-wide infrastructure failure.** Run `38781798685` (this branch) and run `38767853139` (`master`, 2026-10-15T16:18Z, i.e. *before* this change) both fail with **0 steps executed** in ~2–3 s per job (`Unit tests + lint + build`, `TTS contract tests`, `Protocol contract tests`), so the failure precedes any Gradle step. Every run since at least 2026-10-14 has failed the same way on `master` and on every feature branch. A docs-only commit cannot cause this. |
 
 `./gradlew clean / lint / assembleDebug / assembleRelease / connectedDebugAndroidTest` are **not
 executable** in this environment for the same reason (no Gradle distribution, no Maven `/ dl.google.com`
 access, no JDK/Android SDK, no device). They are reported as **BLOCKED**, never as passing — identical
-to R-21D-02 and GATE 21C's R-21C-06. CI (`./gradlew testDebugUnitTest`, `lint`, `assembleDebug`,
-`assembleRelease`) remains the precondition for any release-style claim.
+to R-21D-02 and GATE 21C's R-21C-06.
+
+**Additional finding (executed):** the CI that would discharge R-21D-02 is itself red repo-wide. The
+`Android CI` workflow fails **before any step runs** on `master` and on every branch, so the "CI must
+run `testDebugUnitTest`, `lint`, `assembleDebug`, `assembleRelease`" precondition cannot currently be
+satisfied by anyone. This is an infrastructure condition that needs attention independently of GATE 21D
+(tracked as R-21D-02 below); it is neither caused by nor fixable from this Sub-Gate.
 
 ---
 
@@ -417,7 +424,7 @@ See PART IV: harness **PASS** (99/99 focused, 2629/2629 full); Gradle **BLOCKED 
 | ID | Risk | Disposition / owner |
 |---|---|---|
 | R-21D-01 | **No PC Anki backend and no Anki messages in the agent protocol.** All PC results are structure-level; a PC `Ready` is unreachable in production by design. Re-confirmed at this HEAD (0 production references). | Inherits 21B R4/R7; closed only by a PC backend + protocol (not in the 21A–21N series). |
-| R-21D-02 | **Gradle tasks not executed** (fresh proof in PART IV). Harness is Kotlin 2.3/K2, not the Gradle toolchain (Kotlin 1.9.24/K1). | CI must run `testDebugUnitTest`, `lint`, `assembleDebug`, `assembleRelease` before any release claim. |
+| R-21D-02 | **Gradle tasks not executed** (fresh proof in PART IV). Harness is Kotlin 2.3/K2, not the Gradle toolchain (Kotlin 1.9.24/K1). **New (this run):** the `Android CI` workflow that would discharge this is failing repo-wide **before any step executes** (runs `38781798685` on this branch, `38767853139` on `master` pre-change; 0 steps, ~2–3 s per job; every run since at least 2026-10-14). | CI must run `testDebugUnitTest`, `lint`, `assembleDebug`, `assembleRelease` before any release claim — and CI infrastructure must first be repaired. Owner: repository/CI, independent of GATE 21D. |
 | R-21D-03 | AnkiDroid's registry availability is only as fresh as the last `refreshAvailability()`; the foreground hook drives a different owner (`AnkiDroidHealthRepository`), so Settings can show `Checking` until Library/Study refreshes. | Pre-existing; `registry.refresh(id)` is the sanctioned entry point. Still unwired by design in 21D (lifecycle code is not compile-verifiable here). |
 | R-21D-04 | The D-21D-01 fix makes the AnkiDroid study path reachable; rating commits are `IMPLEMENTED`, **not VERIFIED** — GATE 11's real-device mutation verification is outstanding. | Device run against a disposable collection is the release precondition. |
 | R-21D-05 | Two `StateFlow`s cannot be read atomically → a transient disagreement reads `NOT_READY`. | Locked by 21B (fail-closed); consumers must not add a best-effort read. |
