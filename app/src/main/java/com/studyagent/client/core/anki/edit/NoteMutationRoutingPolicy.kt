@@ -12,7 +12,6 @@ import com.studyagent.client.core.anki.AnkiIdentityObservation
 import com.studyagent.client.core.anki.AnkiOperationClass
 import com.studyagent.client.core.anki.AnkiOperationFacts
 import com.studyagent.client.core.anki.AnkiContinuationVerdict
-import com.studyagent.client.core.anki.AnkiUnverifiabilityQualifier
 
 /**
  * GATE 21J — where one note mutation may go, or why it may not go anywhere right now.
@@ -66,21 +65,47 @@ fun NoteMutationRecord.mutationOperationClass(): AnkiOperationClass =
  * (`NoteMutationBackendResult.ConfirmedNotApplied`) and does not rest on collection identity. Under a
  * verified mismatch or a degraded key it is blocked like every other operation.
  *
- * ## DECISION-21J-03 — the family's reconciliation cell (deviates from the generic §3.3 cell, on purpose)
+ * ## DECISION-21J-03 — REJECTED by the 21J audit; `OP-M3` follows locked §3.3 unchanged
  *
- * The generic matrix blocks `OP-M3` on nominal and continuity evidence because continuity cannot prove
- * that a mutation applied. A note reconciliation is not a continuity claim: it is the owning backend's
- * own read-only check of the same note, and the backend returns `Unresolved` when it has no such read
- * (the GATE 17 default; AnkiDroid claims no authoritative reconciliation). The family therefore blocks
- * `OP-M3` **only** on a verified mismatch or a degraded identity, and otherwise lets the owner's own
- * read decide. The coordinator never applies a status on continuity alone. This is the same family-level
- * decision GATE 21I recorded as DECISION-21I-03, stated here instead of inherited silently.
+ * This gate first shipped a family exception that permitted `OP-M3` under nominal and continuity
+ * evidence, on the reasoning that a note reconciliation is the owner's own read rather than a
+ * continuity claim. **The audit rejected it**, and the exception is gone. Two findings decided it:
+ *
+ * 1. **§3.3 is LOCKED and it says Blocked.** `BACKEND_IDENTITY_CONTRACT.md:265` blocks `OP-M3` under
+ *    `SESSION_CONTINUITY_VERIFIED` ("continuity cannot establish whether the mutation applied") and
+ *    under `IDENTITY_UNVERIFIABLE` (nominal), and permits it under `AUTHORITATIVE_MATCH` *only* when
+ *    the family also exposes authoritative reconciliation. `AnkiIdentityContinuation` transcribes that
+ *    cell-for-cell, so the 21C code was already the locked truth; a family branch that re-decided the
+ *    same cell was the deviation. A sub-gate may not unilaterally override a LOCKED matrix.
+ * 2. **The exception bought nothing.** No backend in this repository implements
+ *    `AnkiBackend.reconcileNoteMutation` — the only definition is the interface default returning
+ *    `Unresolved` (`AnkiBackend.kt:396`) — and `authoritativeReconciliation = false` in both
+ *    `NoteMutationSemantics.UNVERIFIED` and `ANKIDROID_V2_24_1`. The permitted route therefore always
+ *    reached a read that answers `Unresolved`, and the record stayed `AMBIGUOUS` either way.
+ *
+ * Conforming is fail-closed and functionally lossless: an ambiguous note mutation stays ambiguous, and
+ * the refusal now names the real reason (`reconciliation_requires_authoritative_match`) instead of
+ * performing a read that cannot resolve anything. When a backend ever does expose an authoritative
+ * reconciliation read *and* a collection key, the locked `AUTHORITATIVE_MATCH` cell permits `OP-M3`
+ * with no exception and no code change here.
+ *
+ * The 21I/21C discrepancy this exposed is **not** resolved by this gate. `DECISION-21I-03`
+ * (`GATE_21I_REVIEWER_ACTION_ROUTING.md:83`) still permits `OP-M3` on nominal/continuity for the
+ * reviewer-action family via its own `reconcileRoute()`. That is a locked gate, so it is left
+ * untouched and referred to the 21B contract owner; see §4.4 of the 21J report.
  *
  * ## Admission (`OP-M1`) and reads
  *
  * A new admission has no prior binding to contradict: the collection observed now is the collection
- * the record is bound to. Only registry existence is checked. Reads that re-check the owner before
- * showing state (`OP-R2`) use the locked matrix unchanged.
+ * the record is bound to. Only registry existence is checked.
+ *
+ * ## One matrix, no family branches
+ *
+ * Every operation class — `OP-M1`, `OP-M2`, `OP-M3`, `OP-R2`, `OP-P` — is answered by
+ * [AnkiIdentityContinuation.continuationVerdict], the pure transcription of locked §3.3. This policy
+ * re-decides no cell of its own. The family's contribution is the [AnkiOperationFacts] it states, not
+ * a private branch: a cell this family wants answered differently must be amended in §3.3 by the
+ * contract owner, not overridden here. That is what DECISION-21J-03 tried and what the audit removed.
  */
 class NoteMutationRoutingPolicy(private val registry: AnkiBackendRegistry) {
 
@@ -118,22 +143,6 @@ class NoteMutationRoutingPolicy(private val registry: AnkiBackendRegistry) {
             return NoteMutationRoute.Blocked(AnkiContinuationBlockReason.FOREIGN_BACKEND.name.lowercase(), operation)
         }
         val assurance = (check as AnkiIdentityCheck.SameBackend).assurance
-
-        if (operation == AnkiOperationClass.OP_M3) {
-            // DECISION-21J-03: only a verified mismatch or a degraded key blocks reconciliation.
-            val blockedReason = when {
-                assurance is AnkiIdentityAssurance.AuthoritativeMismatch -> AnkiContinuationBlockReason.COLLECTION_MISMATCH
-                assurance is AnkiIdentityAssurance.IdentityUnverifiable &&
-                    assurance.qualifier == AnkiUnverifiabilityQualifier.DEGRADED ->
-                    AnkiContinuationBlockReason.IDENTITY_UNVERIFIABLE_DEGRADED
-                else -> null
-            }
-            return if (blockedReason != null) {
-                NoteMutationRoute.Blocked(blockedReason.name.lowercase(), operation, assurance)
-            } else {
-                NoteMutationRoute.Routed(backend, operation, assurance)
-            }
-        }
 
         val facts = AnkiOperationFacts(
             // DECISION-21J-02: the backend's pre-write refusal classification is collection-independent.

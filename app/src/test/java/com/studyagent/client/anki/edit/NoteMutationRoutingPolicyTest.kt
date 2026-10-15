@@ -14,6 +14,7 @@ import com.studyagent.client.core.anki.edit.NoteMutationReason
 import com.studyagent.client.core.anki.edit.NoteMutationRecord
 import com.studyagent.client.core.anki.edit.NoteMutationRoute
 import com.studyagent.client.core.anki.edit.NoteMutationRoutingPolicy
+import com.studyagent.client.core.anki.edit.NoteMutationSemantics
 import com.studyagent.client.core.anki.edit.NoteMutationStatus
 import com.studyagent.client.core.anki.edit.mutationOperationClass
 import org.junit.Assert.assertEquals
@@ -60,9 +61,17 @@ class NoteMutationRoutingPolicyTest {
     /** One registered owner. [collection] is what the live instance reports now. */
     private fun policy(
         owner: AnkiBackendId,
-        collection: AnkiCollectionIdentity?
+        collection: AnkiCollectionIdentity?,
+        authoritativeReconciliation: Boolean = false
     ): NoteMutationRoutingPolicy {
-        val backend = FakeNoteMutationBackend(backendId = owner)
+        val backend = FakeNoteMutationBackend(
+            backendId = owner,
+            // The locked `OP-M3` cell needs BOTH an authoritative match and this claim, so the tests
+            // that exercise a permitted reconciliation must model a backend that honestly makes it.
+            noteMutationSemantics = NoteMutationSemantics.ANKIDROID_V2_24_1.copy(
+                authoritativeReconciliation = authoritativeReconciliation
+            )
+        )
         backend.collectionIdentity = collection
         return NoteMutationRoutingPolicy(AnkiBackendRegistry(listOf(backend)))
     }
@@ -70,6 +79,9 @@ class NoteMutationRoutingPolicyTest {
     private fun NoteMutationRoute.tokenOrNull(): String? = (this as? NoteMutationRoute.Blocked)?.token
 
     private fun NoteMutationRoute.isRouted(): Boolean = this is NoteMutationRoute.Routed
+
+    /** Stable token for the locked `OP-M3` block: no authoritative match, or no authoritative read. */
+    private val RECONCILIATION_BLOCKED = "reconciliation_requires_authoritative_match"
 
     // ---------------------------------------------------------------- operation classes
 
@@ -138,12 +150,25 @@ class NoteMutationRoutingPolicyTest {
     }
 
     @Test
-    fun matchingCollectionRoutesEveryOperation() {
+    fun matchingCollectionRoutesWritesButNotReconciliationWithoutTheFamilyClaim() {
+        // §3.3 `OP-M3` / AUTHORITATIVE_MATCH: permitted *only* if the family also exposes an
+        // authoritative reconciliation read. AnkiDroid's semantics claim none, so it stays blocked.
         val p = policy(pcB, collection = collection1)
         val bound = record(pcB, collection = collection1)
-        for (op in listOf(AnkiOperationClass.OP_M1, AnkiOperationClass.OP_M2, AnkiOperationClass.OP_M3)) {
+        for (op in listOf(AnkiOperationClass.OP_M1, AnkiOperationClass.OP_M2)) {
             assertTrue("op=$op", p.route(bound, op, boundIsLiveInThisProcess = false).isRouted())
         }
+        assertEquals(
+            RECONCILIATION_BLOCKED,
+            p.route(bound, AnkiOperationClass.OP_M3, boundIsLiveInThisProcess = false).tokenOrNull()
+        )
+    }
+
+    @Test
+    fun matchingCollectionRoutesReconciliationWhenTheFamilyExposesAnAuthoritativeRead() {
+        val p = policy(pcB, collection = collection1, authoritativeReconciliation = true)
+        val bound = record(pcB, collection = collection1)
+        assertTrue(p.route(bound, AnkiOperationClass.OP_M3, boundIsLiveInThisProcess = false).isRouted())
     }
 
     @Test
@@ -174,23 +199,30 @@ class NoteMutationRoutingPolicyTest {
         )
     }
 
-    // ---------------------------------------------------------------- DECISION-21J-03
+    // ------------------------------------------------- DECISION-21J-03 REJECTED: locked §3.3 `OP-M3`
 
     @Test
-    fun reconciliationIsRoutedToTheOwnerWhenNeitherSideHasAKey() {
-        // DECISION-21J-03: the owner's own read decides; the matrix's generic NOMINAL-M3 block is not applied.
-        val p = policy(pcB, collection = null)
+    fun reconciliationIsBlockedWhenNeitherSideHasAKeyEvenWithAnAuthoritativeRead() {
+        // §3.3 NOMINAL / `OP-M3` is Blocked. The family claim does not reach this cell: an unknown
+        // collection is not a match, so there is nothing for an authoritative read to be authoritative
+        // about. This is the cell DECISION-21J-03 tried to open; the audit rejected it.
+        val p = policy(pcB, collection = null, authoritativeReconciliation = true)
         val unknownBoth = record(pcB, collection = null)
-        assertTrue(p.route(unknownBoth, AnkiOperationClass.OP_M3, boundIsLiveInThisProcess = false).isRouted())
-        assertTrue(p.route(unknownBoth, AnkiOperationClass.OP_M3, boundIsLiveInThisProcess = true).isRouted())
+        assertEquals(
+            RECONCILIATION_BLOCKED,
+            p.route(unknownBoth, AnkiOperationClass.OP_M3, boundIsLiveInThisProcess = false).tokenOrNull()
+        )
     }
 
     @Test
-    fun reconciliationIsRoutedWhenTheKeyMatches() {
-        val p = policy(pcB, collection = collection1)
-        assertTrue(
-            p.route(record(pcB, collection = collection1), AnkiOperationClass.OP_M3, boundIsLiveInThisProcess = false)
-                .isRouted()
+    fun reconciliationIsBlockedOnInProcessContinuityAlone() {
+        // §3.3 SESSION_CONTINUITY_VERIFIED / `OP-M3`: "continuity cannot establish whether the
+        // mutation applied". Holding the in-process payload is not collection evidence.
+        val p = policy(pcB, collection = null, authoritativeReconciliation = true)
+        val unknownBoth = record(pcB, collection = null)
+        assertEquals(
+            "continuity_is_not_collection_evidence",
+            p.route(unknownBoth, AnkiOperationClass.OP_M3, boundIsLiveInThisProcess = true).tokenOrNull()
         )
     }
 

@@ -245,4 +245,27 @@ class Gate21jArchitectureAuditTest {
             coordinator.contains("NoteMutationRefusal.BackendMismatch")
         )
     }
+
+    @Test
+    fun `AUDIT-21J-15 no operation class is decided outside the locked 3_3 matrix`() {
+        // DECISION-21J-03 was rejected by this gate's audit: a family branch that re-decided the
+        // `OP-M3` cell shadowed locked §3.3 (BACKEND_IDENTITY_CONTRACT.md:265). The branch is gone,
+        // and this test keeps it gone — a per-family `if` here is exactly how a LOCKED cell gets
+        // silently overridden without anyone amending the contract.
+        assertFalse(
+            "the policy must not carry a private OP-M3 branch",
+            routing.contains("operation == AnkiOperationClass.OP_M3")
+        )
+        assertTrue(
+            "every operation class is answered by the shared §3.3 transcription",
+            routing.contains("AnkiIdentityContinuation.continuationVerdict(operation, check, facts)")
+        )
+        // The family's only lever is the facts it states, never a private cell.
+        assertTrue(
+            "the reconciliation claim is read from the backend's own semantics",
+            routing.contains(
+                "authoritativeReconciliationAvailable = backend.noteMutationSemantics.authoritativeReconciliation"
+            )
+        )
+    }
 }

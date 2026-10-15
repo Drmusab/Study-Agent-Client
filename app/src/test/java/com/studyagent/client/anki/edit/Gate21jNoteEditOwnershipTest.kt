@@ -18,7 +18,9 @@ import com.studyagent.client.core.anki.edit.NoteMutationCodec
 import com.studyagent.client.core.anki.edit.NoteMutationId
 import com.studyagent.client.core.anki.edit.NoteMutationIdSource
 import com.studyagent.client.core.anki.edit.NoteMutationOutcome
+import com.studyagent.client.core.anki.edit.NoteMutationReconciliationResult
 import com.studyagent.client.core.anki.edit.NoteMutationRecord
+import com.studyagent.client.core.anki.edit.NoteMutationSemantics
 import com.studyagent.client.core.anki.edit.NoteMutationRecoveryOutcome
 import com.studyagent.client.core.anki.edit.NoteMutationRefusal
 import com.studyagent.client.core.anki.edit.NoteMutationStatus
@@ -41,13 +43,27 @@ class Gate21jNoteEditOwnershipTest {
     private val pcB = AnkiBackendId.PcAgent("profile-b")
 
     /** Two owners whose ids collide on purpose: both have note-1, card-1 and deck-a. */
-    private inner class Owners {
+    private inner class Owners(
+        /**
+         * Models a PC owner that reports a collection key AND exposes an authoritative reconciliation
+         * read — the only combination under which locked §3.3 permits `OP-M3`. Off by default, so the
+         * default fixture is the honest AnkiDroid-shaped one: no key, no authoritative read.
+         */
+        bReconcilesAuthoritatively: Boolean = false
+    ) {
         val events = mutableListOf<String>()
         val a = FakeNoteMutationBackend(backendId = ankiDroid, events = events)
-        val b = FakeNoteMutationBackend(backendId = pcB, events = events).apply {
+        val b = FakeNoteMutationBackend(
+            backendId = pcB,
+            noteMutationSemantics = NoteMutationSemantics.ANKIDROID_V2_24_1.copy(
+                authoritativeReconciliation = bReconcilesAuthoritatively
+            ),
+            events = events
+        ).apply {
             fields[0] = AnkiNoteField(name = "Front", value = "B front", ordinal = 0)
             fields[1] = AnkiNoteField(name = "Back", value = "B back", ordinal = 1)
             tags = listOf("bravo")
+            if (bReconcilesAuthoritatively) collectionIdentity = AnkiCollectionIdentity(pcB, "coll-b")
         }
         val store = InMemoryNoteMutationStore(events)
         private var counter = 0
@@ -68,6 +84,9 @@ class Gate21jNoteEditOwnershipTest {
             return NoteMutationCodec.decode(text)?.firstOrNull { it.mutationId == id }?.status
         }
     }
+
+    /** Stable token for the locked `OP-M3` block under §3.3. */
+    private val RECONCILIATION_BLOCKED = "reconciliation_requires_authoritative_match"
 
     private fun frontEdit(value: String = "edited") = NoteEditDraft(fieldValues = mapOf(0 to value))
 
@@ -151,7 +170,7 @@ class Gate21jNoteEditOwnershipTest {
     }
 
     @Test
-    fun recoveryOfAnAmbiguousAOnlyReconcilesAWhenBIsAlsoPresent() {
+    fun recoveryOfAnAmbiguousANeverTouchesBAndStaysAmbiguousWithoutAnAuthoritativeRead() {
         runBlocking {
             val o = Owners()
             val coordinator = o.coordinator(o.a, o.b)
@@ -160,17 +179,53 @@ class Gate21jNoteEditOwnershipTest {
 
             val recovered = coordinator.recover(ambiguous.mutationId)
 
+            // §3.3 blocks `OP-M3` without an authoritative match AND an authoritative read, so the
+            // record stays AMBIGUOUS and NO backend is read — including its own owner. B is never
+            // touched either, which is the owner-isolation property this test exists for.
             assertTrue("got $recovered", recovered is NoteMutationRecoveryOutcome.StillAmbiguous)
-            assertEquals(1, o.a.reconcileCalls.size)
+            // The record is still in this process, so the assurance is SESSION_CONTINUITY_VERIFIED
+            // and §3.3 blocks `OP-M3` there: continuity cannot establish whether the write applied.
+            recovered as NoteMutationRecoveryOutcome.StillAmbiguous
+            assertEquals(
+                "continuity_is_not_collection_evidence",
+                (recovered.error as AnkiError.BackendUnavailable).message
+            )
+            assertEquals(NoteMutationStatus.AMBIGUOUS, recovered.record.status)
+            assertTrue(o.a.reconcileCalls.isEmpty())
             assertTrue(o.b.reconcileCalls.isEmpty())
             assertTrue(o.b.applyCalls.isEmpty())
+        }
+    }
+
+    @Test
+    fun ambiguousRecordOfBIsReconciledByBAndNeverByAWhenTheOwnerExposesAnAuthoritativeRead() {
+        runBlocking {
+            val o = Owners(bReconcilesAuthoritatively = true)
+            val coordinator = o.coordinator(o.a, o.b)
+            o.b.loseFirstResponse()
+            val ambiguous = coordinator.save(o.b.editableBase(), frontEdit("on B")).recordOrNull()!!
+            assertEquals(NoteMutationStatus.AMBIGUOUS, ambiguous.status)
+            o.b.applyHook = null
+            o.b.reconcileResult = NoteMutationReconciliationResult.ConfirmedApplied
+
+            val recovered = coordinator.recover(ambiguous.mutationId)
+
+            // Owner isolation under the one cell §3.3 permits: B resolves its own ambiguous record,
+            // and A — which holds a colliding note-1/card-1 — is never read or written.
+            assertTrue("got $recovered", recovered is NoteMutationRecoveryOutcome.Resolved)
+            assertEquals(NoteMutationStatus.APPLIED, (recovered as NoteMutationRecoveryOutcome.Resolved).record.status)
+            assertEquals(1, o.b.reconcileCalls.size)
+            assertEquals(pcB, o.b.reconcileCalls.single().noteRef.backendId)
+            assertTrue(o.a.reconcileCalls.isEmpty())
+            assertTrue(o.a.applyCalls.isEmpty())
+            assertEquals(0, o.a.readCount)
         }
     }
 
     // ---------------------------------------------------------------- retry and recovery go to the owner
 
     @Test
-    fun ambiguousRecordOfBIsReconciledOnlyByB() {
+    fun ambiguousRecordOfBIsNeverReconciledByA() {
         runBlocking {
             val o = Owners()
             val coordinator = o.coordinator(o.a, o.b)
@@ -182,9 +237,45 @@ class Gate21jNoteEditOwnershipTest {
             val recovered = coordinator.recover(ambiguous.mutationId)
 
             assertTrue("got $recovered", recovered is NoteMutationRecoveryOutcome.StillAmbiguous)
-            assertEquals(1, o.b.reconcileCalls.size)
+            assertEquals(NoteMutationStatus.AMBIGUOUS, (recovered as NoteMutationRecoveryOutcome.StillAmbiguous).record.status)
+            assertTrue(o.b.reconcileCalls.isEmpty())
             assertTrue(o.a.reconcileCalls.isEmpty())
             assertEquals(0, o.a.readCount)
+        }
+    }
+
+    @Test
+    fun afterRestartAnAmbiguousRecordIsBlockedForWantOfAnAuthoritativeReconciliationRead() {
+        runBlocking {
+            val o = Owners()
+            val first = o.coordinator(o.a, o.b)
+            o.b.loseFirstResponse()
+            val ambiguous = first.save(o.b.editableBase(), frontEdit("on B")).recordOrNull()!!
+            assertEquals(NoteMutationStatus.AMBIGUOUS, ambiguous.status)
+            assertEquals(NoteMutationStatus.AMBIGUOUS, o.persistedStatus(ambiguous.mutationId))
+
+            // Process death: a new coordinator over the same durable ledger, so nothing is in-process.
+            val restarted = o.coordinator(o.a, o.b)
+            val recovered = restarted.recover(ambiguous.mutationId)
+
+            // No collection key on either side means §3.3 NOMINAL, and `OP-M3` is Blocked there. The
+            // record keeps its owner and its ambiguity; it is not silently resolved or reassigned.
+            assertTrue("got $recovered", recovered is NoteMutationRecoveryOutcome.StillAmbiguous)
+            recovered as NoteMutationRecoveryOutcome.StillAmbiguous
+            assertEquals(
+                RECONCILIATION_BLOCKED,
+                (recovered.error as AnkiError.BackendUnavailable).message
+            )
+            // No in-process payload survives the restart, so there is nothing to compare; the record
+            // names the block instead of inventing a comparison.
+            assertEquals(
+                RECONCILIATION_BLOCKED,
+                (recovered.evidence as NoteMutationVerification.Unverifiable).detail
+            )
+            assertEquals(pcB, recovered.record.backendId)
+            assertEquals(NoteMutationStatus.AMBIGUOUS, o.persistedStatus(ambiguous.mutationId))
+            assertTrue(o.b.reconcileCalls.isEmpty())
+            assertTrue(o.a.reconcileCalls.isEmpty())
         }
     }
 
@@ -412,7 +503,8 @@ class Gate21jNoteEditOwnershipTest {
 
             assertTrue("got $outcome", outcome is NoteMutationRecoveryOutcome.StillAmbiguous)
             assertEquals(pcB, (outcome as NoteMutationRecoveryOutcome.StillAmbiguous).record.backendId)
-            assertEquals(1, o.b.reconcileCalls.size)
+            // A legacy record keeps its owner; it is not reassigned, and it is not reconciled by A.
+            assertTrue(o.b.reconcileCalls.isEmpty())
             assertTrue(o.a.reconcileCalls.isEmpty())
         }
     }
