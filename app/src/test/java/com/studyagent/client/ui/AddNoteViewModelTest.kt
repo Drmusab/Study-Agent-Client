@@ -65,7 +65,7 @@ class AddNoteViewModelTest {
         val store = InMemoryNoteCreationStore(events)
         private var counter = 0
         val coordinator = DefaultNoteCreationCoordinator(
-            backend,
+            com.studyagent.client.core.anki.AnkiBackendRegistry(listOf(backend)),
             DefaultNoteCreationLedger(store, nowEpochMs = { 1_000L }),
             NoteCreationIdSource { NoteCreationId("c-${++counter}") },
             nowEpochMs = { 1_000L }

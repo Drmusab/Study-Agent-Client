@@ -2,6 +2,7 @@ package com.studyagent.client.core.anki.create
 
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiNoteModel
+import com.studyagent.client.core.anki.AnkiStoredMediaRef
 
 /** Product limit: one media file. The provider reads whole files into memory (docs/GATE_18 §9). */
 const val MAX_MEDIA_SIZE_BYTES: Long = 25L * 1024L * 1024L
@@ -56,17 +57,33 @@ data class PendingMedia(
  * no mutable UI state may alter an in-flight creation. Field values are keyed by schema ordinal —
  * the only field identity the pinned backend honours (CONTRACT-18-03). The model schema snapshot is
  * carried along, so the coordinator can detect drift with a fresh read before the boundary.
+ *
+ * GATE 21K — the draft is owned by one immutable [AnkiNoteCreationContext] (DECISION-21B-21): the
+ * model, the field schema, the media destination and the creation target all belong to that one
+ * backend/collection context. A draft can never be retargeted by a preference change; creating on
+ * another backend means a new context and a new draft. The pending media are *local attachments*
+ * only — they become backend resources (qualified [AnkiStoredMediaRef]s) solely through a `Stored`
+ * result from this context's own backend.
  */
 data class AddNoteDraft(
-    val backendId: AnkiBackendId,
-    val collectionKey: String?,
+    val context: AnkiNoteCreationContext,
     val model: AnkiNoteModel,
     val fieldValues: Map<Int, String>,
     val tags: List<String>,
     val media: List<PendingMedia>
 ) {
+    /** The exact backend this draft was assembled for. Derived from the context; never reassigned. */
+    val backendId: AnkiBackendId get() = context.backendId
+
+    /** The collection evidence this draft was assembled under; `null` is UNKNOWN, never a wildcard. */
+    val collectionKey: String? get() = context.collectionKey
+
     init {
         require(model.ref.backendId == backendId) { "A draft belongs to one backend" }
+        require(
+            model.ref.collectionKey == null || collectionKey == null ||
+                model.ref.collectionKey == collectionKey
+        ) { "A draft's model must not contradict its creation context's collection" }
         require(fieldValues.isNotEmpty()) { "A draft needs field values" }
         require(media.size <= MAX_MEDIA_PER_CREATION) { "Too many media attachments" }
         require(media.map { it.targetFieldOrdinal }.all { it < model.fieldCount }) {
@@ -87,19 +104,30 @@ data class AddNoteDraft(
  *
  * References use exactly Anki's public syntax (CONTRACT-18-26): `<img src="NAME">` for images and
  * `[sound:NAME]` for sounds. They are appended to the target field; nothing else in the draft is
- * touched. No path is invented: [storedNames] is indexed by media step and must be complete.
+ * touched. No path is invented: [storedMedia] is indexed by media step and must be complete.
+ *
+ * GATE 21K — the stored media arrive as qualified [AnkiStoredMediaRef]s and every one must belong
+ * to the draft's own creation backend (and not contradict its known collection): a name stored on
+ * another backend is never referenced from this note, even when the names are identical strings.
  */
 object NoteCreationFieldAssembly {
 
-    fun assemble(draft: AddNoteDraft, storedNames: List<String>): List<String>? {
-        if (storedNames.size != draft.media.size) return null
-        if (storedNames.any { it.isBlank() }) return null
+    fun assemble(draft: AddNoteDraft, storedMedia: List<AnkiStoredMediaRef>): List<String>? {
+        if (storedMedia.size != draft.media.size) return null
+        if (storedMedia.any { it.backendId != draft.backendId }) return null
+        if (storedMedia.any {
+                it.collectionKey != null && draft.collectionKey != null &&
+                    it.collectionKey != draft.collectionKey
+            }
+        ) {
+            return null
+        }
         if (draft.model.fields.any { !draft.fieldValues.containsKey(it.ordinal) }) return null
         val base = draft.orderedFields().toMutableList()
         draft.media.forEachIndexed { index, pending ->
             val reference = when (pending.kind) {
-                CreationMediaKind.IMAGE -> "<img src=\"${storedNames[index]}\">"
-                CreationMediaKind.AUDIO -> "[sound:${storedNames[index]}]"
+                CreationMediaKind.IMAGE -> "<img src=\"${storedMedia[index].mediaName}\">"
+                CreationMediaKind.AUDIO -> "[sound:${storedMedia[index].mediaName}]"
             }
             val current = base[pending.targetFieldOrdinal]
             base[pending.targetFieldOrdinal] = if (current.isBlank()) reference else "$current<br>$reference"

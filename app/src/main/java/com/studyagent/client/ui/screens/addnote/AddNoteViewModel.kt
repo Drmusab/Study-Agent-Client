@@ -382,8 +382,13 @@ class AddNoteViewModel(
             is TagNormalization.Invalid -> editor.tags
         }
         return AddNoteDraft(
-            backendId = backend.id,
-            collectionKey = null,
+            // GATE 21K — the draft is owned by this screen's immutable creation context: the exact
+            // backend + collection evidence the models were read under, with this binding lifetime's
+            // generation. It is stamped from the binding, never re-derived from the preference.
+            context = com.studyagent.client.core.anki.create.AnkiNoteCreationContext(
+                backendContext = binding.context.backendContext,
+                generation = binding.context.generation
+            ),
             model = model,
             fieldValues = editor.fieldValues,
             tags = tags,
@@ -482,6 +487,8 @@ class AddNoteViewModel(
             AddNoteMapper.refusalMessage("UnknownCreation")
         is com.studyagent.client.core.anki.create.NoteCreationRefusal.RetryNotAllowed ->
             "This attempt cannot be retried."
+        is com.studyagent.client.core.anki.create.NoteCreationRefusal.BackendRouteBlocked ->
+            AddNoteMapper.refusalMessage("BackendRouteBlocked")
     }
 
     private fun refusalTokenFor(error: AnkiError): String = when (error) {

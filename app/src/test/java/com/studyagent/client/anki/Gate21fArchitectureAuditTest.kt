@@ -126,9 +126,15 @@ class Gate21fArchitectureAuditTest {
         assertTrue(nav.contains("AnkiRequiredCapability.DECKS"))
         assertTrue(nav.contains("AnkiRequiredCapability.CARD_BROWSER"))
         assertTrue(nav.contains("AnkiRequiredCapability.CARD_DETAILS"))
-        assertTrue(nav.contains("AnkiRequiredCapability.NOTE_MODEL_LISTING"))
-        assertTrue(nav.contains("container.ankiDroidBackend.id"))
-        assertTrue(nav.contains("addNoteBackend !== container.ankiDroidBackend"))
+        // GATE 21K amendment — the 21F interim Add Note pin ("creation destination stays explicitly
+        // AnkiDroid"; `container.ankiDroidBackend.id` seed and the `!== container.ankiDroidBackend`
+        // route guard) is lifted by its owning gate per DECISION-21B-21 and identity contract
+        // §4.4: the route is now seeded from GATE 21E resolution for the new creation context and
+        // binds that exact backend through the registry, with the creation capability set.
+        assertTrue(nav.contains("container.resolveAddNoteSeedBackendId()"))
+        assertTrue(nav.contains("addNoteBackendId?.let(container.ankiBackendRegistry::find)"))
+        assertTrue(nav.contains("CREATION_CONTEXT_REQUIREMENTS"))
+        assertFalse(nav.contains("container.ankiDroidBackend"))
         assertTrue(nav.contains("coordinator = container.noteCreationCoordinator"))
         assertTrue(nav.contains("studyStarter = container.ankiLocalStudyStarter"))
     }

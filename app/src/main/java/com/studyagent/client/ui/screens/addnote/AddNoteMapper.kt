@@ -208,6 +208,8 @@ object AddNoteMapper {
     fun refusalMessage(reason: String): String = when (reason) {
         "BackendMismatch" -> "The selected backend changed. Close Add Note and open it again."
         "BackendUnavailable" -> "The Anki backend is not reachable right now."
+        "BackendRouteBlocked" ->
+            "This note belongs to a backend that is not available right now. Nothing was created elsewhere."
         "ModelMissing" -> "The selected note type no longer exists. Choose another note type."
         "SchemaDrifted" -> "The note type changed while you were writing. Review the fields and save again."
         "PayloadUnavailable" -> "The saved attempt expired after the app restarted. Start a new note."

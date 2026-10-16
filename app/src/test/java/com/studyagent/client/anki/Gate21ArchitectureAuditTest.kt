@@ -215,6 +215,10 @@ class Gate21ArchitectureAuditTest {
         // binding boundary, and the two GATE 21G session-start pre-binding sites are the only
         // request construction/delegation sites. Reference/continued reads and bound study work
         // never resolve.
+        // GATE 21K amendment: `AppContainer.kt` joins the list as the composition root's single
+        // creation-seed pre-binding site (DECISION-21B-21) — it resolves one exact backend for a
+        // NEW, unbound Add Note context. Bound creations and durable creation records never reach
+        // it (the coordinator and routing policy stay resolution-free).
         assertEquals(
             listOf(
                 "AnkiBackendResolver.kt",
@@ -222,7 +226,8 @@ class Gate21ArchitectureAuditTest {
                 "AnkiBackendStatus.kt",
                 "AnkiLocalStudyStarter.kt",
                 "AnkiReadContextController.kt",
-                "AnkiStudyEffectExecutor.kt"
+                "AnkiStudyEffectExecutor.kt",
+                "AppContainer.kt"
             ),
             callers
         )

@@ -430,7 +430,11 @@ class AnkiDroidBackend(
         }
         val authority = currentAuthority()
             ?: return MediaStoreBackendResult.ConfirmedNotStored(AnkiError.QueryFailure("authority-unknown"))
-        return AnkiDroidCreationMapper.classifyMediaInsert(writer.submitMediaStore(authority, values))
+        return AnkiDroidCreationMapper.classifyMediaInsert(
+            backendId = id,
+            collectionKey = currentCollectionIdentity?.takeIf { it.backendId == id }?.collectionKey,
+            dispatch = writer.submitMediaStore(authority, values)
+        )
     }
 
     /**
@@ -456,7 +460,11 @@ class AnkiDroidBackend(
         }
         val authority = currentAuthority()
             ?: return CreateNoteBackendResult.ConfirmedNotCreated(AnkiError.QueryFailure("authority-unknown"))
-        return AnkiDroidCreationMapper.classifyNoteInsert(writer.submitNoteCreate(authority, values))
+        return AnkiDroidCreationMapper.classifyNoteInsert(
+            backendId = id,
+            collectionKey = currentCollectionIdentity?.takeIf { it.backendId == id }?.collectionKey,
+            dispatch = writer.submitNoteCreate(authority, values)
+        )
     }
 
     /**

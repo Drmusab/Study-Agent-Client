@@ -1,14 +1,19 @@
 package com.studyagent.client.di
 
 import android.content.Context
+import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiBackendPreferenceStore
 import com.studyagent.client.core.anki.AnkiBackendRegistry
+import com.studyagent.client.core.anki.AnkiBackendResolver2
 import com.studyagent.client.core.anki.AnkiBackendResolver
 import com.studyagent.client.core.anki.AnkiBackendStatusCenter
 import com.studyagent.client.core.anki.AnkiStudyBackendLockTracker
 import com.studyagent.client.core.anki.AnkiTransactionRecoveryPlanner
 import com.studyagent.client.core.anki.STUDY_SESSION_REQUIREMENTS
+import com.studyagent.client.core.anki.BackendResolutionRequest2
 import com.studyagent.client.core.anki.BackendResolutionResult
+import com.studyagent.client.core.anki.BackendResolutionResult2
+import com.studyagent.client.core.anki.CREATION_CONTEXT_REQUIREMENTS
 import com.studyagent.client.core.anki.AnkiBackendRoutingDiagnostics
 import com.studyagent.client.core.anki.AnkiBackendSelector
 import com.studyagent.client.core.anki.ReviewCommitLedger
@@ -257,6 +262,14 @@ interface AppContainer {
     val noteMutationCoordinator: NoteMutationCoordinator
     val noteCreationCoordinator: NoteCreationCoordinator
     val addNoteMediaProbe: MediaSourceProbe
+
+    /**
+     * GATE 21K — the seed for a **new** Add Note creation context (DECISION-21B-21): one exact
+     * backend chosen by GATE 21E resolution for an as-yet-unbound operation, or `null` when no
+     * creation-capable backend resolves. The Add Note route carries this id and binds it exactly;
+     * it is never consulted for an already-bound creation context or a durable creation record.
+     */
+    fun resolveAddNoteSeedBackendId(): AnkiBackendId?
 }
 
 /**
@@ -496,11 +509,29 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
      */
     override val noteCreationCoordinator: NoteCreationCoordinator by lazy {
         DefaultNoteCreationCoordinator(
-            backend = ankiDroidBackend,
+            // GATE 21K: exact registry routing per creation/record; no pinned instance, no
+            // preference lookup. A record owned by any registered backend is recoverable through it.
+            backends = ankiBackendRegistry,
             ledger = noteCreationLedger,
             nowEpochMs = System::currentTimeMillis
         )
     }
+
+    /**
+     * GATE 21K — the composition root's single creation-seed pre-binding site. Resolution is the
+     * pure GATE 21E policy over a preference snapshot and fresh descriptors; the exact destination
+     * binding (refresh, capability and identity checks) still happens at the route. A resolution
+     * failure seeds nothing — the caller simply does not navigate.
+     */
+    override fun resolveAddNoteSeedBackendId(): AnkiBackendId? =
+        (AnkiBackendResolver2.resolve(
+            BackendResolutionRequest2(
+                preference = backendPreferenceRepository.preference.value,
+                requiredCapabilities = CREATION_CONTEXT_REQUIREMENTS,
+                purpose = "add_note_seed"
+            ),
+            ankiBackendRegistry.descriptors()
+        ) as? BackendResolutionResult2.Resolved)?.backendId
 
     /**
      * GATE 18 — local media preparation. The only component allowed to read a user-picked media URI

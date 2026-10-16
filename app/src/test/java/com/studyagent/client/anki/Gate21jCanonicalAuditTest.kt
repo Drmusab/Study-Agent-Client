@@ -166,9 +166,12 @@ class Gate21jCanonicalAuditTest {
         assertTrue(refs.contains("data class AnkiNoteRef"))
         assertTrue(refs.contains("data class AnkiCardRef"))
         assertTrue(refs.contains("data class AnkiDeckRef"))
-        // Three references plus the collection identity itself, which is the fourth owner-bearing type.
-        assertEquals("every reference carries its owner", 4, Regex("""val backendId: AnkiBackendId""").findAll(refs).count())
-        assertEquals("every reference carries its collection evidence", 3, Regex("""val collectionKey: String\? = null""").findAll(refs).count())
+        // Four references (note, card, deck, and — since GATE 21K landed the DECISION-21B-04 media
+        // qualification — stored media) plus the collection identity itself, the fifth owner-bearing
+        // type. Every one of them carries its owner and its collection evidence.
+        assertTrue(refs.contains("data class AnkiStoredMediaRef"))
+        assertEquals("every reference carries its owner", 5, Regex("""val backendId: AnkiBackendId""").findAll(refs).count())
+        assertEquals("every reference carries its collection evidence", 4, Regex("""val collectionKey: String\? = null""").findAll(refs).count())
         assertTrue(refs.contains("identityKey(backendId.stableId, collectionKey"))
 
         val pair = Gate21jBackends()

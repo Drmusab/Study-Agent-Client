@@ -3,6 +3,8 @@ package com.studyagent.client.core.anki.create
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiNoteModelRef
+import com.studyagent.client.core.anki.AnkiNoteRef
+import com.studyagent.client.core.anki.AnkiStoredMediaRef
 
 /**
  * GATE 18 — the backend-facing creation contract (CONTRACT-18-38/39/40, locked).
@@ -47,9 +49,15 @@ sealed interface CreateNoteBackendResult {
      * The backend returned the new note's authoritative id (rslib `AddNoteResponse.note_id` through
      * the provider URI). Proof the note exists; generated cards are still discovered by the
      * hydration read, never assumed here (CONTRACT-18-31).
+     *
+     * GATE 21K — the id travels as a backend-qualified [AnkiNoteRef] (DECISION-21B-04): a bare note
+     * id must never cross the backend boundary unqualified. The adapter stamps its own instance and
+     * its live collection evidence; the durable record remains the qualification of record, and the
+     * coordinator refuses to claim creation under a foreign identity.
      */
-    data class ConfirmedCreated(val noteId: String) : CreateNoteBackendResult {
-        init { require(noteId.isNotBlank()) { "A created note must carry its id" } }
+    data class ConfirmedCreated(val noteRef: AnkiNoteRef) : CreateNoteBackendResult {
+        /** The backend-local note id, exactly as returned. Never synthesized. */
+        val noteId: String get() = noteRef.noteId
     }
 
     /** Proven: nothing was created (refusal before the irreversible write). */
@@ -87,11 +95,17 @@ data class StoreMediaBackendRequest(
  * CONTRACT-18-40 — what one media-store dispatch reported. [Stored.mediaName] is the authoritative
  * name the backend chose (collision-renamed, NFC-normalized, deduplicated by content hash); no
  * richer reference is invented because the backend returns a name.
+ *
+ * GATE 21K — the name travels inside a backend-qualified [AnkiStoredMediaRef] (DECISION-21B-04):
+ * a bare media name is backend-local and must never cross the backend boundary unqualified. The
+ * adapter stamps the instance that performed the store; the coordinator persists the name into
+ * the durable record, where the record's own backend/collection qualification takes over.
  */
 sealed interface MediaStoreBackendResult {
 
-    data class Stored(val mediaName: String) : MediaStoreBackendResult {
-        init { require(mediaName.isNotBlank()) { "Stored media must carry the backend's name" } }
+    data class Stored(val media: AnkiStoredMediaRef) : MediaStoreBackendResult {
+        /** The backend-local stored name, exactly as returned. */
+        val mediaName: String get() = media.mediaName
     }
 
     data class ConfirmedNotStored(val error: AnkiError) : MediaStoreBackendResult

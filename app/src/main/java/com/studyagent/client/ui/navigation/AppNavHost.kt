@@ -15,6 +15,7 @@ import androidx.navigation.navArgument
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.studyagent.client.core.anki.AnkiRequiredCapability
+import com.studyagent.client.core.anki.CREATION_CONTEXT_REQUIREMENTS
 import com.studyagent.client.data.anki.context.AnkiReadContextRequest
 import com.studyagent.client.data.anki.context.AnkiReadContextUiState
 import com.studyagent.client.data.anki.context.AnkiReadContextViewModel
@@ -115,10 +116,17 @@ fun AppNavHost(
                         onOpenDeck = { deckRef, readContext ->
                             navController.navigate(Screen.DeckDetails.createRoute(deckRef, readContext))
                         },
-                        // The existing creation destination stays explicitly AnkiDroid; the read
-                        // context below only scopes its model/deck seed reads, never creation.
+                        // GATE 21K — a NEW creation context is seeded from GATE 21E resolution
+                        // (DECISION-21B-21), performed at the composition root: one exact backend
+                        // for the new context — never the Library's own backend by substitution,
+                        // never a hard-coded instance. The route carries that exact id; the
+                        // destination binds it exactly and never re-resolves. If no
+                        // creation-capable backend resolves, there is nothing to seed and the
+                        // tap does not navigate (the Library already surfaces backend state).
                         onOpenAddNote = {
-                            navController.navigate(Screen.AddNote.createRoute(container.ankiDroidBackend.id))
+                            container.resolveAddNoteSeedBackendId()?.let { seedBackendId ->
+                                navController.navigate(Screen.AddNote.createRoute(seedBackendId))
+                            }
                         }
                     )
                 }
@@ -378,10 +386,13 @@ fun AppNavHost(
                 backStackEntry.arguments?.getString(Screen.AddNote.ARG_BACKEND_ID)
             )
             val addNoteBackend = addNoteBackendId?.let(container.ankiBackendRegistry::find)
-            if (addNoteBackend == null || addNoteBackend !== container.ankiDroidBackend) {
+            if (addNoteBackend == null) {
+                // GATE 21K — the route carries the exact backend a fresh resolution seeded for this
+                // new creation context. It binds exactly (no AUTO, no sibling fallback): an
+                // unregistered seed is a typed failure placeholder, never a guess.
                 ReadContextBindingPlaceholder(
                     title = "New note",
-                    message = "The existing note-creation target is not registered as the exact AnkiDroid backend.",
+                    message = "The note-creation backend for this screen is not registered.",
                     onNavigateBack = { navController.popBackStack() }
                 )
             } else {
@@ -391,10 +402,7 @@ fun AppNavHost(
                         ?.takeIf { it.backendId == addNoteBackend.id }
                         ?.collectionKey,
                     purpose = "add_note_model_reads",
-                    requiredCapabilities = setOf(
-                        AnkiRequiredCapability.DECKS,
-                        AnkiRequiredCapability.NOTE_MODEL_LISTING
-                    )
+                    requiredCapabilities = CREATION_CONTEXT_REQUIREMENTS
                 )
                 val contextOwner: AnkiReadContextViewModel = viewModel(
                     key = "add-note-read-context:${addNoteBackend.id.stableId}"
@@ -418,7 +426,8 @@ fun AppNavHost(
                         ) {
                             AddNoteViewModel(
                                 binding = binding,
-                                // All writes remain owned by the existing AnkiDroid creation coordinator.
+                                // GATE 21K — the coordinator routes every write to the draft's /
+                                // record's own registered backend; the binding scopes the reads.
                                 coordinator = container.noteCreationCoordinator,
                                 mediaProbe = container.addNoteMediaProbe
                             )
