@@ -41,7 +41,21 @@ class FakeNoteMutationBackend(
     capabilities: AnkiCapabilities = defaultCapabilities(),
     override val noteMutationSemantics: NoteMutationSemantics = NoteMutationSemantics.ANKIDROID_V2_24_1,
     /** Shared with the store/harness so cross-component ordering can be asserted. */
-    val events: MutableList<String> = mutableListOf()
+    val events: MutableList<String> = mutableListOf(),
+    /**
+     * GATE 21J (CHECKPOINT 21J-30) — the note/card/deck ids this instance exposes. The defaults are
+     * the GATE 17 fixture. The 21J gate sets them to the *same numeric ids* on two different
+     * backends, which is the collision the ownership rules exist for.
+     */
+    private val noteId: String = "note-1",
+    private val cardId: String = "card-1",
+    /**
+     * Deck ids in listing order. [deckIds] `[0]` is the source deck; `[1]` is a ordinary target.
+     * [filteredDeckId] and [unverifiableDeckId] keep the GATE 17 refusal cases.
+     */
+    private val deckIds: List<String> = listOf("deck-a", "deck-b"),
+    private val filteredDeckId: String = "deck-filtered",
+    private val unverifiableDeckId: String = "deck-unknown"
 ) : AnkiBackend {
 
     val caps = MutableStateFlow(capabilities)
@@ -61,13 +75,37 @@ class FakeNoteMutationBackend(
         AnkiNoteField(name = "Back", value = "back text", ordinal = 1)
     )
     var tags: List<String> = listOf("alpha")
-    var deckId: String = "deck-a"
+    var deckId: String = deckIds[0]
     val decks: MutableList<AnkiDeck> = mutableListOf(
-        AnkiDeck(ref = AnkiDeckRef(backendId, "deck-a"), name = "A", isFiltered = false),
-        AnkiDeck(ref = AnkiDeckRef(backendId, "deck-b"), name = "B", isFiltered = false),
-        AnkiDeck(ref = AnkiDeckRef(backendId, "deck-filtered"), name = "F", isFiltered = true),
-        AnkiDeck(ref = AnkiDeckRef(backendId, "deck-unknown"), name = "U", isFiltered = null)
+        AnkiDeck(ref = AnkiDeckRef(backendId, deckIds[0]), name = "A", isFiltered = false),
+        AnkiDeck(ref = AnkiDeckRef(backendId, deckIds[1]), name = "B", isFiltered = false),
+        AnkiDeck(ref = AnkiDeckRef(backendId, filteredDeckId), name = "F", isFiltered = true),
+        AnkiDeck(ref = AnkiDeckRef(backendId, unverifiableDeckId), name = "U", isFiltered = null)
     )
+
+    /**
+     * GATE 21J (CHECKPOINT 21J-10/11) — the other cards the same note generates, and the deck each
+     * one currently sits in. Empty by default, which is the GATE 17 one-card fixture. A note is not
+     * a card: a deck write is card-scoped, so a sibling must never move because the edited card did.
+     */
+    val siblingCards: MutableList<AnkiCardRef> = mutableListOf()
+    private val siblingDeckIds: MutableMap<String, String> = mutableMapOf()
+
+    /** Registers one further card of this note, in [deckId]. Returns the ref for direct assertions. */
+    fun addSiblingCard(id: String, ord: Int, deckId: String): AnkiCardRef {
+        val ref = AnkiCardRef(backendId, cardId = id, noteId = noteId, cardOrd = ord)
+        siblingCards += ref
+        siblingDeckIds[id] = deckId
+        return ref
+    }
+
+    /** The deck a card of this note currently sits in, by card id. Null when the card is unknown. */
+    fun deckOfCard(id: String): String? = when (id) {
+        cardId -> deckId
+        else -> siblingDeckIds[id]
+    }
+
+    val otherDeckIds: List<String> get() = listOf(deckIds[1])
 
     // ---- scripting ------------------------------------------------------------------------------
     /** Replaces the default behaviour of [applyNoteMutation] when non-null. */
@@ -84,8 +122,8 @@ class FakeNoteMutationBackend(
     val reconcileCalls = mutableListOf<NoteMutationReconciliationRequest>()
     var readCount = 0
 
-    fun cardRef(): AnkiCardRef = AnkiCardRef(backendId, cardId = "card-1", noteId = "note-1", cardOrd = 0)
-    fun noteRef(): AnkiNoteRef = AnkiNoteRef(backendId, "note-1")
+    fun cardRef(): AnkiCardRef = AnkiCardRef(backendId, cardId = cardId, noteId = noteId, cardOrd = 0)
+    fun noteRef(): AnkiNoteRef = AnkiNoteRef(backendId, noteId)
 
     /** The exact details a read returns for the current state. */
     fun details(): AnkiCardDetails = AnkiCardDetails(
@@ -113,19 +151,38 @@ class FakeNoteMutationBackend(
         noteModifiedEpochSeconds = null
     )
 
-    /** Applies [step] to the collection state exactly as a correct backend would. */
+    /** Applies [step] to the collection state exactly as a correct backend would, for the primary card. */
     fun applyFaithfully(step: NoteMutationStep) {
         when (step) {
-            is NoteMutationStep.UpdateNoteContent -> {
-                step.fieldValues?.let { values ->
-                    values.forEachIndexed { index, value ->
-                        fields[index] = fields[index].copy(value = value)
-                    }
-                }
-                step.tags?.let { tags = it }
-            }
-            is NoteMutationStep.ChangeDeck -> deckId = step.toDeck.deckId
+            is NoteMutationStep.UpdateNoteContent -> applyContentFaithfully(step)
+            is NoteMutationStep.ChangeDeck -> setDeckFor(cardRef(), step.toDeck.deckId)
         }
+    }
+
+    /**
+     * GATE 21J — the same, but honouring the *step's own card*. A deck write is card-scoped
+     * (CONTRACT-03), so the card in the request moves and its siblings do not.
+     */
+    fun applyFaithfully(request: BackendNoteMutationRequest) {
+        when (val step = request.step) {
+            is NoteMutationStep.UpdateNoteContent -> applyContentFaithfully(step)
+            is NoteMutationStep.ChangeDeck -> setDeckFor(request.cardRef, step.toDeck.deckId)
+        }
+    }
+
+    private fun applyContentFaithfully(step: NoteMutationStep.UpdateNoteContent) {
+        step.fieldValues?.let { values ->
+            values.forEachIndexed { index, value ->
+                fields[index] = fields[index].copy(value = value)
+            }
+        }
+        step.tags?.let { tags = it }
+    }
+
+    /** One card moves. Nothing here can move the note's other cards. */
+    fun setDeckFor(target: AnkiCardRef, deckId: String) {
+        if (target.cardId == null || target.cardId == this.cardId) this.deckId = deckId
+        else siblingDeckIds[target.cardId] = deckId
     }
 
     override val id: AnkiBackendId get() = backendId
@@ -167,7 +224,7 @@ class FakeNoteMutationBackend(
         events += "backend:apply:${request.stepIndex}"
         val hook = applyHook
         if (hook != null) return hook(request, this)
-        applyFaithfully(request.step)
+        applyFaithfully(request)
         return NoteMutationBackendResult.ConfirmedApplied
     }
 

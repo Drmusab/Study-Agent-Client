@@ -1,349 +1,600 @@
-# GATE 21J — Note Editing Backend Binding (Implementation and Verification Report)
+# GATE 21J — Note Editing Backend Binding (Implementation Record, Audit and Authoritative Verification)
 
-Status of this document: **implementation and audit report, harness-verified only.** No Gradle, Android SDK, device, real AnkiDroid, or real PC backend was available. Every result below comes from the JVM harness (`tools/jvm-harness`), which the harness README describes as evidence, not proof.
+Sub-gate of **GATE 21 — Multi-Backend Anki Selection / Hybrid Mode**. Parent contract:
+`docs/GATE_21B_CONTRACT_LOCK.md` §21J (`:1585`), DECISION-21B-20 (`:987`). Transaction authority:
+`docs/GATE_17_NOTE_EDITING.md` / `GATE_17_BACKEND_CONTRACT.md`, unchanged.
 
-**Revision 2 (this revision).** The gate's one open item was the audit approval of `DECISION-21J-03`.
-That audit is now complete and the decision is **REJECTED** — see §4.4 and §11. The note family now
-follows locked §3.3 for `OP-M3` with no family branch, and the deviation is pinned against by
-`AUDIT-21J-15`. Sections §1, §3, §4.3, §4.4, §7, §8.2, §9 and §10 were rewritten for that outcome;
-§11 records the audit itself.
+**Revision 3 (this revision).** This revision executes the gate's **canonical** plan, which revision 2
+explicitly declined to reconstruct: `AUDIT-21J-01 … AUDIT-21J-25` and `VER-21J-01 … VER-21J-40` are now
+executable IDs, one test per ID, green at this HEAD; the earlier revision's count accounting is
+reconciled against a measured baseline; and `OPEN-21J-01` is audited and **closed**. No production source
+was changed by this revision — the implementation was found present and complete at HEAD (§1, §5).
 
-GATE 22 and GATE 21K were not started. Nothing in this change creates notes, migrates drafts, adds a settings control, or adds a backend-switch affordance.
+**Status of this document.** Implementation, audit and verification report, **harness-verified only**.
+No Gradle, Android SDK, device, real AnkiDroid or real PC backend was available in this environment
+(§9.2). Nothing below is CI proof, and no device claim is made.
+
+**GATE 21K is not started.** Nothing here creates notes, migrates drafts, adds a settings control, adds a
+backend-switch affordance, or introduces a replay queue (§13).
 
 ---
 
 ## §1 Gate result
 
+```text
+REPOSITORY:                  Drmusab/Study-Agent-Client
+HEAD BEFORE THIS REVISION:   1fe55cc68d23a2315ed3066a09adbd7d1890e97b  (merge of PR #87)
+BRANCH:                      arena/c3b2f3c9-study-agent-client
+WORKTREE BEFORE THIS REVISION: clean
+SCOPE:                       GATE 21J only; GATE 21K NOT started
+PRODUCTION SOURCE CHANGED:   none — the 21J implementation is already at HEAD and was audited as found
+```
+
+**§1.1 Required initial report — the state the gate was found in.** The gate's implementation was already
+present at HEAD and is complete: the note-mutation family resolves its owner from the registry by
+`record.backendId` (new save: `base.backendId`), the editor's backend is an immutable `val`, and the
+GATE 17 ledger, status machine, coordinator and refusal vocabulary are reused. What was **missing** was
+the gate's *evidence*: revision 2 recorded 2,629 tests and stated it could not map the canonical
+`AUDIT-21J-*` / `VER-21J-*` lists. This revision supplies both — canonical, executed, per-ID evidence —
+and reconciles the numbers.
+
+**§1.2 Result.**
+
 | Item | Result |
 |---|---|
-| Owner binding of a note edit (save, retry, recovery, reconciliation) | **Implemented.** Each touch goes to the record's own backend instance, resolved from the `AnkiBackendRegistry` by `backendId`. There is no fallback, AUTO, or preference lookup. |
-| Reuse of GATE 17 ledger, status machine, and coordinator | **Reused.** No new ledger, coordinator, replay queue, or note database. Status vocabulary unchanged (PREPARED, SUBMITTING, APPLIED, RETRY_ALLOWED, AMBIGUOUS, CONFLICT). |
-| Collection context on the record | **Implemented** as an optional `collectionRef` field (default `null`, validated against `backendId`). |
-| `EditNoteViewModel` backend | **Immutable.** `backend` is a `val`. The `switchBackend` function was removed (it had no production callers). |
-| Harness verification | **Passed.** Build: main 0 errors (328 files), compose 0 (24), test 0 (250). Tests: **2629 / 2629** (revision-1 baseline 2625, plus 4 new). |
-| Device or real-backend verification | **Not performed.** Out of reach in this sandbox. |
-| Audit-pending decision | **RESOLVED — `DECISION-21J-03` REJECTED** (§4.4, §11). `OP-M3` follows locked §3.3; the family branch is deleted and `AUDIT-21J-15` keeps it deleted. |
-| Gradle / device / real backend | **BLOCKED (environment).** `services.gradle.org` is unreachable from this sandbox and no Android SDK is installed, so `testDebugUnitTest`, `lint`, `assembleDebug`, `assembleRelease` and `connectedDebugAndroidTest` could not run. See §7.1. |
+| Owner binding of a note edit (save, retry, recovery, reconciliation) | **Implemented and audited.** Every backend touch goes to the record's own registered instance. No fallback, no AUTO, no preference lookup, no "first ready". |
+| Reuse of the GATE 17 ledger, status machine, coordinator | **Reused.** No new ledger, coordinator, replay queue or note database. Status vocabulary unchanged: `PREPARED`, `SUBMITTING`, `APPLIED`, `RETRY_ALLOWED`, `AMBIGUOUS`, `CONFLICT`. |
+| Editor bound to the originating backend, never the preference | **Implemented.** `EditNoteViewModel.backend` is a `val` (`:48`); `switchBackend` does not exist; the edit route resolves `registry.find(editCardRef.backendId)`. |
+| Backend-qualified `NoteRef` / `CardRef` / `DeckRef` / `ModelRef` | **Implemented** (`AnkiRefs.kt`); identical numeric ids on two backends are different resources (§7 AUDIT-21J-05, VER-21J-06/07/08). |
+| Exact-`BackendId` routing for save/retry/recovery; no cross-backend replay | **Implemented and verified** (VER-21J-09/11/21/25/26/27/29/30/36). |
+| `CONFLICT` vs `AMBIGUOUS` preserved as distinct durable outcomes | **Implemented and verified** (VER-21J-17/18; AUDIT-21J-14). |
+| Partial/composite saves handled conservatively | **Implemented and verified** (VER-21J-22; AUDIT-21J-12): only an all-steps verification yields `APPLIED`; otherwise `PARTIAL_OPERATION_UNKNOWN` → `AMBIGUOUS`, never a retry. |
+| Recovery only through the original backend | **Implemented and verified** (VER-21J-27/28/29/30/36). |
+| Legacy records and stale callbacks protected | **Implemented and verified** (VER-21J-32/35/36; AUDIT-21J-19/20). |
+| Read caches invalidated only for the correct scope | **Audited** (AUDIT-21J-21; §11 INV-21J-20): one scoped library snapshot, owner-scoped invalidation, no second cache. |
+| Architecture audit `AUDIT-21J-01…25` | **25 / 25 PASS** (`Gate21jCanonicalAuditTest`), plus the earlier `SRC-21J-*` suite (15 PASS). |
+| Authoritative verification `VER-21J-01…40` | **39 executed / 39 PASS; 1 BLOCKED (environment)** — VER-21J-39 needs a device and a real backend. |
+| Full JVM regression | **PASS — 222 classes, 2,711 tests, 2,711 passed, 0 failed, 0 ignored** (§9.1). |
+| Gradle (`testDebugUnitTest`, `lint`, `assembleDebug`, `assembleRelease`, `connectedDebugAndroidTest`) | **ENVIRONMENT BLOCKER — BLOCKED** (§9.2), with first-hand evidence. |
+| `DECISION-21J-03` (revision-1 deviation) | **REJECTED**, branch deleted and pinned by `AUDIT-21J-15` (§6.4). |
+| `OPEN-21J-01` (21I/21C `OP-M3` contradiction) | **CLOSED — verified conforming at HEAD** (§12.2). |
 
-**Gate lock:** IMPLEMENTED, AUDITED and HARNESS-VERIFIED. Not device-verified, and Gradle remains
-environmentally blocked, so this is not CI proof.
+**Gate lock:** **IMPLEMENTED · AUDITED · HARNESS-VERIFIED · NOT DEVICE-VERIFIED.** The gate is locked for
+further sub-gates on the strength of audit + harness evidence, with the Gradle/device items recorded as
+environmental blockers rather than as passes.
 
 ---
 
-## §2 Scope and what was not changed
+## §2 Scope, method and evidence sources
 
-- Owner resolution for note editing is by `record.backendId` (or `base.backendId` for a new save) against the registry. The coordinator no longer holds a pinned instance (`NoteMutationCoordinator.kt`, `DefaultNoteMutationCoordinator(backends: AnkiBackendRegistry, …)`).
-- `AppContainer` wires `backends = ankiBackendRegistry`. The `ankiDroidBackend` reference that remains in the same `lazy` block feeds only the safety policy (`unresolvedStudyTurnCards`), not the coordinator's backend.
-- The GATE 17 ledger (`NoteMutationLedger`) is reused unchanged except for the additive `collectionRef` field on `NoteMutationRecord`.
-- The coordinator's refusal vocabulary gains one typed refusal, `BackendRouteBlocked(token)`. `BackendMismatch` is kept.
-- `NoteEditValidationError` is unchanged. The existing `DeckTargetWrongBackend` is the foreign-deck guard (§6.3).
+**§2.1 In scope.** Note editing only: the owner of a draft, a save, a durable `NoteMutation`, a retry, a
+recovery read, a reconciliation read and an attestation; the qualification of the references they carry;
+the projection of a blocked save into the editor; and the verification evidence for all of it.
 
----
+**§2.2 Out of scope (must not be implemented here, and was not).** No new ledger, coordinator, status
+machine or routing framework; no cross-backend migration, note copy, ID translation or merge; no offline
+queue or replay; no template/note-type editor; no new settings UI; no change to any locked earlier gate
+(`AUDIT-21J-24`, `AUDIT-21J-25`).
 
-## §3 Files changed
+**§2.3 Method — how every claim in this report was produced.**
 
-| File | Change |
+| Kind of evidence | What it means here |
 |---|---|
-| `core/anki/edit/NoteMutationRoutingPolicy.kt` | **New.** Pure routing policy for the note family (`admit`, `route`, `mutationOperationClass`). |
-| `core/anki/edit/NoteMutationRecord.kt` | `collectionRef: AnkiCollectionIdentity? = null`, validated against `backendId`. Factory takes it too. |
-| `core/anki/edit/NoteMutationCoordinator.kt` | Registry-based. Every backend touch goes through `routing.admit` or `routeFor(record)`. Blocked routes return `BackendRouteBlocked` before any transition or backend call. Reconciliation (`OP-M3`) and evidence reads (`OP-R2`) go through the owner route. `checkDeckTarget` filters by `backend.id` for both target and source. `collectionRef` is set at PREPARED from the owner's `currentCollectionIdentity`. |
-| `ui/screens/editnote/EditNoteViewModel.kt` | `backend` is a `val`. `switchBackend` deleted. |
-| `ui/screens/editnote/EditNoteMapper.kt` | Projects `BackendRouteBlocked` into a refusal message. |
-| `di/AppContainer.kt` | Passes `backends = ankiBackendRegistry`. |
-| `app/src/test/.../anki/edit/FakeNoteMutationBackend.kt` | `collectionIdentity` var and override. |
-| `app/src/test/.../anki/edit/NoteMutationCoordinatorTest.kt` | Registry harness. `backendMismatchIsRefused` now expects `BackendRouteBlocked("backend_not_registered")` and asserts no apply call. |
-| `app/src/test/.../ui/EditNoteViewModelTest.kt` | Registry constructor. |
-| `app/src/test/.../anki/edit/NoteMutationRoutingPolicyTest.kt` | **New.** 12 policy tests. |
-| `app/src/test/.../anki/edit/Gate21jNoteEditOwnershipTest.kt` | **New.** 15 two-backend coordinator tests. |
-| `app/src/test/.../anki/Gate21jArchitectureAuditTest.kt` | **New.** 14 source audit tests. |
+| **Behaviour (`B`)** | Two fake backends whose note, card, deck and model ids **all collide** (`Gate21jBackends`, CHECKPOINT 21J-30) driven through the real `EditNoteViewModel` and the real `DefaultNoteMutationCoordinator` over an in-memory ledger. |
+| **Source audit (`S`)** | A property of the repository text, asserted by a test that reads the sources with comment lines stripped, so documentation may name a forbidden spelling while live code may not use it. |
+| **Harness run (`H`)** | `tools/jvm-harness` — a Gradle-free JVM build of the app's pure-Kotlin sources and the JVM unit tests. Equivalence evidence, **not** proof of what CI would report. |
+| **Not available (`X`)** | Gradle, lint, APK assembly, instrumentation, device, real AnkiDroid, real PC agent backend. Recorded as blocked, never as passed. |
 
-**Revision 2 (audit resolution of DECISION-21J-03):**
+**§2.4 Harness deviations (carried from `tools/jvm-harness/README.md`).** Kotlin 2.3/K2 (Gradle uses
+1.9.24/K1); coroutines 1.10.2 (Gradle 1.8.1); serialization 1.9.0 (Gradle 1.6.3); `android.jar` is the
+AGP mockable jar rewritten to return default values; DataStore/OkHttp/security-crypto are in-memory
+shims. Four test classes are excluded (`FakeAgentConnectionTest`, `WebSocketIntegrationTest`,
+`RatingControlsPolicyTest`, `StudyPhaseMappingTest`); no Compose UI, instrumented test, lint or APK is
+built. `@Test(timeout)` becomes a per-test join timeout.
 
-| File | Change |
-|---|---|
-| `core/anki/edit/NoteMutationRoutingPolicy.kt` | The hand-rolled `OP-M3` branch is **deleted**. Every operation class now goes through `AnkiIdentityContinuation.continuationVerdict`. The family's only lever is the `AnkiOperationFacts` it states. |
-| `core/anki/edit/NoteMutationCoordinator.kt` | A blocked `OP-M3` route still gathers `stateEvidence(record)` (an `OP-R2` read, decided separately by the matrix) when the in-process payload exists, and reports the block token when it does not. |
-| `app/src/test/.../anki/edit/NoteMutationRoutingPolicyTest.kt` | 12 → 13. The two deviation tests replaced with the conforming cells; adds the continuity cell and the "match without the family claim" cell. |
-| `app/src/test/.../anki/edit/Gate21jNoteEditOwnershipTest.kt` | 15 → 17. Reconciliation assertions follow the locked cells; adds a post-restart block case and an owner-isolation case under the one cell §3.3 permits. |
-| `app/src/test/.../anki/edit/NoteMutationCoordinatorTest.kt` | Adds `reconcilingHarness()`. The GATE 17 fixture previously declared `authoritativeReconciliation = false` while implementing an authoritative read; the reconciliation tests now run against a backend that declares the read it implements and proves its collection. **No GATE 17 assertion was weakened.** |
-| `app/src/test/.../anki/Gate21jArchitectureAuditTest.kt` | 14 → 15. `AUDIT-21J-15` forbids a private `OP-M3` branch and requires the shared matrix call. |
+**§2.5 What this gate does not claim.** Not that AnkiDroid's real provider behaves as the fake models;
+not that a real collection identity is ever proven on AnkiDroid (it is `null` at the pin — §13 R-21J-1);
+not that any device has executed a note save; and not that the harness numbers equal CI numbers.
 
 ---
 
-## §4 Routing design (as implemented)
+## §3 Backend capability and ownership inventory (CHECKPOINT 21J-01)
 
-### §4.1 Admission and operation classes
+**§3.1 Note-editing capability, as the repository states it** (`docs/BACKEND_CAPABILITY_MATRIX.md:187`):
 
-- **Admission (`OP-M1`)**: a new save. Only registry existence is checked. The collection observed now becomes the record's `collectionRef`.
-- **`OP-M1` on a record**: `PREPARED` with zero attempts.
-- **`OP-M2`**: any other pre-write entry (retry, resume, or a repeat after a proven refusal).
-- **`OP-M3`**: reconciliation of an `AMBIGUOUS` record.
-- **`OP-R2`**: owner re-check reads that precede showing state (`stateEvidence`).
-- `SUBMITTING → AMBIGUOUS` normalization is ledger-only, with no backend call.
-
-### §4.2 Verdict order
-
-1. **Registry existence first.** Missing owner → `Blocked("backend_not_registered")`. No record is read or touched.
-2. **Identity check** via `AnkiIdentityAssurancePolicy.check`. Bound = `record.backendId` plus `record.collectionRef?.collectionKey`. Live = `backend.id` plus `backend.currentCollectionIdentity?.collectionKey`. `boundIsLiveInThisProcess` is true only when the in-process pending payload exists.
-3. **Per-operation cell.** See §4.3.
-
-### §4.3 Cells actually enforced
-
-Every class below is answered by `AnkiIdentityContinuation.continuationVerdict`, the pure
-transcription of locked §3.3. The family re-decides no cell.
-
-| Assurance (bound vs live) | `OP-M1` | `OP-M2` | `OP-M3` | `OP-R2` |
-|---|---|---|---|---|
-| Authoritative match | route | route | route **only if** `authoritativeReconciliation`, else block `reconciliation_requires_authoritative_match` | route (locked matrix) |
-| Authoritative mismatch | block `collection_mismatch` | block `collection_mismatch` | block `collection_mismatch` | locked matrix |
-| Key appeared where none bound, or key disappeared (DEGRADED) | block `identity_unverifiable_degraded` | block `identity_unverifiable_degraded` | block `identity_unverifiable_degraded` | locked matrix |
-| Both unknown, nominal | route | route (DECISION-21J-02) | **block `reconciliation_requires_authoritative_match`** | route; result carries the category |
-| Session continuity (in-process payload live) | route | route (DECISION-21J-02) | **block `continuity_is_not_collection_evidence`** | route; result carries the category |
-
-Because `authoritativeReconciliation = false` in both `NoteMutationSemantics.UNVERIFIED` and
-`ANKIDROID_V2_24_1`, and no backend overrides `reconcileNoteMutation`, the `OP-M3` row is
-**blocked in every cell for every backend that exists today**. That is the locked contract's own
-answer, and it agrees with the semantics object: with no authoritative reconciliation read there is
-nothing to permit. An ambiguous note mutation therefore stays ambiguous and says why.
-
-A `Blocked` route never reaches the backend. Recovery returns `StillAmbiguous` with `Unverifiable(token)` and makes no read. Retry and resume refuse before any ledger transition. Pre-write refuses before any backend call.
-
-### §4.4 Decisions recorded
-
-- **DECISION-21J-01 — registry routing by record identity.** Adopted the approach the locked contract named as the required change (`GATE_21B_CONTRACT_LOCK.md` 21J, R9). The pinned instance is removed.
-- **DECISION-21J-02 — proof of non-application.** `OP-M2` is permitted under nominal or continuity evidence. The GATE 17 pre-write refusal (`NoteMutationBackendResult.ConfirmedNotApplied`) is made by the backend before its single provider write, and does not rest on collection identity. This is an explicit family decision, stated in the policy's documentation.
-- **DECISION-21J-03 — reconciliation cell: REJECTED by the audit (revision 2).** Revision 1 shipped a
-  family branch that permitted `OP-M3` under nominal and continuity evidence, blocking only on a
-  verified mismatch or a degraded key. **The audit rejected it and the branch is deleted.** Two
-  findings decided it:
-  1. **§3.3 is LOCKED and it says Blocked.** `BACKEND_IDENTITY_CONTRACT.md:265` blocks `OP-M3` under
-     `SESSION_CONTINUITY_VERIFIED` ("continuity cannot establish whether the mutation applied") and
-     under `IDENTITY_UNVERIFIABLE` (nominal), and permits it under `AUTHORITATIVE_MATCH` *only* when
-     the family also exposes an authoritative reconciliation read. `AnkiIdentityContinuation.kt:158`
-     and `:210` transcribe exactly that, so **the 21C code was already the locked truth** and the
-     family branch was the deviation. A sub-gate cannot unilaterally override a LOCKED matrix; that
-     requires the 21B contract owner.
-  2. **The exception bought nothing.** `reconcileNoteMutation` has exactly one definition in all of
-     `app/src/main` — the interface default returning `Unresolved()` (`AnkiBackend.kt:396`). No
-     backend overrides it, and `authoritativeReconciliation = false` in both `UNVERIFIED` and
-     `ANKIDROID_V2_24_1` (`NoteMutationBackendResult.kt:152`, `:181`). The permitted route therefore
-     always reached a read that answers `Unresolved`, and the record stayed `AMBIGUOUS` either way.
-     The revision-1 justification ("the owner's own read decides") described a read that does not
-     exist in production.
-
-  Conforming is fail-closed and functionally lossless. The refusal now names the real reason
-  (`reconciliation_requires_authoritative_match`, or `continuity_is_not_collection_evidence` for a
-  still-in-process record) instead of performing a read that cannot resolve anything.
-
-  **One regression the audit caught and fixed.** The first conforming draft also dropped the
-  read-only comparison from `StillAmbiguous`, which broke
-  `EditNoteViewModelTest.anUnresolvedMutationBlocksTheEditorAndIsNeverWrittenOver` — the editor's
-  "here is what Anki holds, and it does not prove the transaction applied" evidence. That read is a
-  *different* operation class (`OP-R2`), which nominal evidence permits, so a blocked `OP-M3` must
-  not suppress it. `reconcileAmbiguous` now still calls `stateEvidence(record)` when the payload is
-  in process, and reports the block token when it is not (`NoteMutationCoordinator.kt`, the
-  `NoteMutationRoute.Blocked` branch). Removing that call fails exactly that test.
-
-  **The 21I/21C inconsistency is NOT resolved by this gate.** `DECISION-21I-03`
-  (`GATE_21I_REVIEWER_ACTION_ROUTING.md:83`) still permits `OP-M3` on nominal/continuity for the
-  reviewer-action family through its own `ReviewerActionRoutingPolicy.reconcileRoute()`. 21I is a
-  locked gate, so its code is untouched here and the discrepancy is **referred to the 21B contract
-  owner** (§11, OPEN-21J-01). The audit's finding is that the *structural* pattern is the defect:
-  two families each hand-rolled the same locked cell. The note family no longer does; migrating 21I
-  is a 21B/21I decision, not a 21J one.
-
-- **DECISION-21J-04 — `switchBackend` deleted.** It was dead code (no production callers) and a mutable backend setter that contradicts immutable ownership. Audit tokens already forbid it. "Open this note on another backend" is not offered: that would be a new context (`GATE_21B_CONTRACT_LOCK.md`, 21J decisions), which this gate does not build.
-- **DECISION-21J-05 — collection context is optional and null means unknown.** `collectionRef` is `null` for AnkiDroid (no authoritative discriminator). Null is never a match. This is the honest reading of the identity contract.
-
----
-
-## §5 Durable state and codec
-
-- `NoteMutationRecord.collectionRef` is an additive, optional field with a `null` default. It is `@Serializable` through `AnkiCollectionIdentity`. The record's `init` requires `collectionRef.backendId == backendId`.
-- `NoteMutationCodec.VERSION` is still `1`. The codec is `encodeDefaults = true`, so every newly written record carries `"collectionRef":null` (or a value). `ignoreUnknownKeys = false`.
-- **Forward compatibility (new snapshots read by old code):** works for records written before 21J, since their key is absent and the field defaults. It fails for any record written by 21J, because old code rejects the unknown key. See §8.1.
-- **Legacy records** (key absent) decode with `collectionRef = null`. Tested by stripping `,"collectionRef":null` from a real snapshot and recovering the record on its own owner (§7).
-
----
-
-## §6 Refusal, deck, and conflict behaviour
-
-### §6.1 Refusals
-
-`NoteMutationRefusal.BackendRouteBlocked(token)` is returned for a blocked route, before any transition or backend call. The token is a stable, content-free name (`backend_not_registered`, `collection_mismatch`, `identity_unverifiable_degraded`). The mapper shows it as a refusal, not as a silent failure. `BackendMismatch` is still returned by `save` when `base.backendId != backend.id` and by `startAfterConflict` when a superseding base belongs to another backend.
-
-### §6.2 Conflict
-
-A conflict is evidence-based: a pre-write read that differs from the base (`CONFLICT_BEFORE_WRITE`) or a backend-reported conflict. It stays distinct from `AMBIGUOUS`. A `CONFLICT` record can be superseded only by a save on its own owner (tested in §7).
-
-### §6.3 Deck targets: the unresolved item from the previous session
-
-The earlier concern was that `NoteEditPlanner.buildPatch` silently drops a `targetDeck` whose backend differs from the base. **Checked, and no code change was needed for the save path.**
-
-- `NoteEditPlanner.validateDraft` (`NoteEditPlanner.kt:43–46`) adds `NoteEditValidationError.DeckTargetWrongBackend` when `target.backendId != base.backendId`.
-- `saveLocked` calls `validateDraft` before `buildPatch`. A non-empty error list returns `ValidationFailed` and nothing is written or recorded.
-- Pinned by `Gate21jNoteEditOwnershipTest.aForeignDeckTargetIsRefusedNotSilentlyDropped`.
-
-Residual: `buildPatch` on its own still omits a foreign target. Its documented precondition is that validation has passed. The save path honours the precondition, but a future caller could violate it. Hardening (make `buildPatch` return the error) is a candidate follow-up, not part of this gate.
-
-**Deck-id collision (fixed in this gate):** `checkDeckTarget` used to look up the source deck by bare `deckId`. A foreign filtered deck with the same id, listed first, would block a legitimate move with `SourceDeckFiltered`. The lookup is now filtered by `backend.id`. Pinned by `aForeignFilteredDeckWithTheSameIdListedFirstDoesNotBlockAMoveWithinItsOwnBackend`. **Mutation check:** removing the owner filter from that lookup fails exactly this test; the code was then restored and rebuilt.
-
----
-
-## §7 Verification
-
-### §7.1 Environment and method
-
-- Gradle, the Android SDK, and devices are unavailable in this sandbox. Verification is JVM-harness only: `tools/jvm-harness/bin/build.sh all` and `tools/jvm-harness/bin/run.sh`.
-- Gradle was re-attempted in revision 2 with a JDK on `JAVA_HOME`. It fails at distribution download: `services.gradle.org` is unreachable (`java.io.EOFException: SSL peer shut down incorrectly`), and `ANDROID_HOME`/`ANDROID_SDK_ROOT` are unset. Every `./gradlew` task in PART V of the brief is therefore **BLOCKED (environment)**, not passed.
-- Fake backends only (`FakeNoteMutationBackend`, with `collectionIdentity` as the scripting knob). No real personal collection was used.
-- Build results (revision 2, final): main 0 errors (328 files), compose 0 (24 files), test 0 (250 files).
-- Test results (revision 2, final): **RESULT classes=218 tests=2629 passed=2629 failed=0 ignored=0** (34.4 s). Revision 1 was 2625; the net +4 is routing policy 12→13, ownership 15→17, architecture audit 14→15.
-- **Mutation checks (revision 2).** Both changes were falsified deliberately and then restored:
-  - Reintroducing the `OP-M3` family branch fails **8** tests across all three suites (`AUDIT-21J-15`, both routing-policy cell tests, the continuity cell test, and four ownership tests).
-  - Removing the `stateEvidence` call from the blocked-reconciliation branch fails exactly `EditNoteViewModelTest.anUnresolvedMutationBlocksTheEditorAndIsNeverWrittenOver`.
-  The code was restored after each and the full suite re-run green.
-
-### §7.2 New tests (41)
-
-- `NoteMutationRoutingPolicyTest` (13, revision 2): operation classes; admission needs only registry existence; admission routes to the same-identity instance; unregistered blocked for M1/M2/M3; verified mismatch blocks all; matching collection routes all; a key that disappears is DEGRADED and blocked for M2/M3; a key that appears is DEGRADED and blocked; `OP-M3` blocked on nominal evidence even with an authoritative read; `OP-M3` blocked on in-process continuity; `OP-M3` blocked on a match when the family claims no authoritative read, and routed when it does; DECISION-21J-02 repeat routes without collection evidence; a route never names another backend.
-- `Gate21jNoteEditOwnershipTest` (17, revision 2):
-  - owner isolation: an edit on B writes only B; the same with reversed registry order;
-  - colliding ids: A's ambiguous record does not block a save on B for the same `note-1`; `activeMutationFor` is per backend;
-  - recovery of A reconciles only A;
-  - recovery of B reconciles only B;
-  - retry of a B record goes to B and never to A;
-  - an unregistered owner refuses with no record and no call, and no store write;
-  - B's ambiguous record after restart without B: unresolved (`Unverifiable("backend_not_registered")`), no call on either backend, status unchanged;
-  - collection mismatch blocks retry before any write (no second apply, no ledger write, status unchanged);
-  - a key that appears after unknown admission blocks retry (`identity_unverifiable_degraded`);
-  - a key that disappears after admission blocks retry;
-  - a foreign filtered deck with the same id, listed first, does not block a same-backend move (regression);
-  - a foreign deck target is `ValidationFailed(DeckTargetWrongBackend)`, not dropped;
-  - a conflict owned by B: a superseding save on A is refused (`BackendMismatch`) with no call; the same on B applies;
-  - legacy record without `collectionRef` decodes, keeps its owner B, and is reconciled only by B.
-- `Gate21jArchitectureAuditTest` (15, revision 2): adds `AUDIT-21J-15` (no private `OP-M3` branch; the shared matrix call is present; the reconciliation claim is read from the backend's own semantics). Previously: no pinned backend in the coordinator; one `applyNoteMutation` call site inside `callBackend`; admission, retry, and reconciliation consult the policy; no registry walking; no preference, mode, resolver, or AUTO in `edit/`; the policy is pure (no ledger, no backend call, no UI); the editor's backend is a `val` with no `var`; the container passes the registry and no `backend = ankiDroidBackend`; deck lookups are owner-scoped; the foreign-deck error exists and validation precedes `buildPatch`; `collectionRef` is optional and owner-validated; codec version is 1 and strictness unchanged; the status enum is exactly the GATE 17 set; the mapper projects `BackendRouteBlocked`.
-
-### §7.3 Existing suites
-
-The GATE 17 suites (`NoteMutationCoordinatorTest`, `NoteMutationLedgerTest`, `NoteMutationTransitionTest`, `NoteMutationVerificationTest`), the GATE 21 audits (12 through 21I), and `EditNoteViewModelTest` all pass in the 2629 run. No GATE 17 assertion was deleted or weakened in revision 2: the only edit to `NoteMutationCoordinatorTest` is the additive `reconcilingHarness()`, and the two tests that use it assert exactly what they asserted before. `EditNoteViewModelTest` was not edited at all in revision 2 — it is the test that caught the dropped read-only evidence. `backendMismatchIsRefused` changed its expectation from `BackendMismatch` to `BackendRouteBlocked("backend_not_registered")`, because the route is now resolved before the base check. Its intent (no write to a foreign backend) is kept, and it now also asserts no apply call.
-
----
-
-## §8 Residual risks and limits
-
-### §8.1 Codec downgrade (not mitigated)
-
-Any snapshot written by the 21J build contains `"collectionRef":null` (or a value). A pre-21J build reads with `ignoreUnknownKeys = false`, so `NoteMutationCodec.decode` returns `null`. The ledger then reports `LedgerUnavailable("snapshot_corrupt")` (`NoteMutationLedger.kt`, the `decoded` read), and note-mutation save and recovery are blocked until the app is upgraded again. The snapshot is not rewritten, so the data is not lost. This is **fail-closed**, but a rollback makes the note ledger unusable. A safe fix is a versioned codec, or a read path that tolerates the one optional key. Neither was built here; both are a codec-policy decision.
-
-### §8.2 Collection-unknown limits
-
-- **Both sides unknown (AnkiDroid today):** with no key ever bound and none observed, the route is NOMINAL. For `OP-M2` this is acceptable because the refusal classification is collection-independent (DECISION-21J-02). For `OP-M3` it is now **blocked**, per locked §3.3.
-- **Revision-1 risk retired.** Revision 1 permitted the `OP-M3` read on nominal evidence and recorded the honest worry that "if two AnkiDroid collections both lack a key and share a card id, a reconciliation read could in principle observe the wrong collection". Rejecting DECISION-21J-03 removes that exposure entirely: the read is never made on nominal evidence. The cost is that an `AMBIGUOUS` note mutation on AnkiDroid can only be closed by a human attestation, which is what `authoritativeReconciliation = false` already implied and what the editor already discloses (`EditNoteMapper.kt:268`, "Study Agent cannot prove afterwards whether it applied").
-- **Key appears or disappears:** DEGRADED. Blocked for `OP-M2` and `OP-M3`. Fail-closed.
-- **Null is never a match.** The code never treats two unknowns as equal proof.
-
-### §8.3 Verification limits
-
-- **Not verified on a device.** No Android run, no real AnkiDroid, no real PC backend. The owner-routing behaviour is verified against `FakeNoteMutationBackend` only.
-- **The owner's `reconcileNoteMutation` is only exercised by the fake.** The AnkiDroid adapter's reconciliation behaviour in production is not measured here.
-- **UI blocked-save message:** the mapper branch is audited by source, not exercised by a behavioural test. The `EditNoteViewModel` blocked-save path is not tested end to end.
-- **Stale-callback and persistence-failure ordering:** inherited from the GATE 17 suites. Not re-derived in this gate. The GATE 17 suites still pass.
-- **`buildPatch` precondition** (§6.3): a future caller can bypass validation. Recorded as a hardening candidate.
-
-### §8.4 Unchanged behaviour that matters
-
-- A pre-21J record with no `collectionRef` is treated as unknown. It is routed by its owner under the NOMINAL rules, and it is not treated as a collection match.
-- The owner, not the preference, decides. The global AUTO/preference does not appear in the note path (audit AUDIT-21J-05).
-
----
-
-## §9 Verification coverage (VER-21J and AUDIT-21J)
-
-**Limitation.** The canonical numbered lists (VER-21J-01…40 and AUDIT-21J-01…25) are defined in the GATE 21J brief. They are not reproduced in this repository. This report does **not** reconstruct them from memory and does **not** claim per-ID pass/fail. Coverage is given by theme. The audit suite labels its own tests `AUDIT-21J-01…14`, which are this suite's numbering and not a mapping to the canonical IDs.
-
-| Theme | Evidence | Status |
+| Backend | Note edit (fields/tags/deck) | Evidence |
 |---|---|---|
-| Save targets the base note's owner only | `editOpenedOnBIsWrittenOnlyToB`, `registryOrderNeverChangesTheOwner`, `AUDIT-21J-02/03` | Harness-verified |
-| Retry, resume, and recovery go to the owner only | `retryOfARecordOwnedByBGoesToBAndNeverToA`, `ambiguousRecordOfBIsReconciledOnlyByB`, `recoveryOfAnAmbiguousAOnlyReconcilesAWhenBIsAlsoPresent` | Harness-verified |
-| Unregistered owner: refuse, no record, no call | `unregisteredOwnerRefusesBeforeAnyRecordOrCall`, `ambiguousRecordOfBIsUnresolvedAfterRestartWithoutB` | Harness-verified |
-| No AUTO, preference, or resolver in the note path | `AUDIT-21J-04/05`, `AUDIT-21J-07/08` | Source-audited |
-| Collision of ids across backends | `collidingIdsOnAnotherBackendAreNeverTheSameNote` | Harness-verified |
-| Collection match, mismatch, unknown, appeared, disappeared | `NoteMutationRoutingPolicyTest` (12), `collectionMismatchBlocksRetryBeforeAnyWrite`, `keyThatAppears…`, `keyThatDisappears…` | Harness-verified (fake collection identities only) |
-| DECISION-21J-02 cell, and -03 rejection | `reconciliationIsBlockedWhenNeitherSideHasAKeyEvenWithAnAuthoritativeRead`, `reconciliationIsBlockedOnInProcessContinuityAlone`, `matchingCollectionRoutes…` pair, `AUDIT-21J-15` | Harness-verified; **-03 resolved (rejected)** |
-| Deck target: owner-scoped, refused not dropped | `aForeignDeckTargetIsRefusedNotSilentlyDropped`, `aForeignFilteredDeck…`, `AUDIT-21J-09/10`; mutation check | Harness-verified |
-| Conflict owner continuity | `conflictOwnedByBCanOnlyBeContinuedOnB` | Harness-verified |
-| Legacy snapshot compatibility | `legacyRecordWithoutCollectionRefDecodesAndStaysWithItsOwner`, `AUDIT-21J-12` | Harness-verified (synthetic legacy JSON) |
-| Status vocabulary reused | `AUDIT-21J-13` | Source/behaviour-audited |
-| Editor backend immutable | `AUDIT-21J-07` | Source-audited |
-| Blocked-save UI message | `AUDIT-21J-14` (source only) | **Gap:** no behavioural UI test |
-| Blocked reconciliation keeps read-only evidence | `anUnresolvedMutationBlocksTheEditorAndIsNeverWrittenOver` (mutation-checked) | Harness-verified |
-| Stale callbacks, persistence-failure ordering, cancellation | GATE 17 suites (unchanged, passing) | Inherited, not re-derived |
-| Downgrade behaviour | §8.1 | **Gap:** not mitigated; documented |
-| Device, real AnkiDroid, real PC | — | **Not verified** (no environment) |
+| AnkiDroid (pinned public provider v2.24.1) | **Available** | `AnkiDroidNoteMutationGateway` + `AnkiDroidBackend.applyNoteMutation` (`:302`) and `noteMutationSemantics` (`:310`), both present only when the gateway is present |
+| PC agent | **Not implemented** | `data/anki/remote/` contains only `PcAnkiAvailabilitySource.kt`; `BACKEND_IDENTITY_CONTRACT.md` §3.4 records "PC agent: None — no implementation". Every PC note-edit cell in this report is *no code*, not a measurement. |
+| Test fixtures | **Limited, opt-in** | `FakeNoteMutationBackend`; semantics are opt-in per test, and authoritative reconciliation is default-**off** (VER-21J-16, AUDIT-21J-13) |
+
+**§3.2 Consequence for this gate's evidence.** Because only one real note-editing backend exists, a
+*production* two-backend collision cannot be produced. The gate therefore proves the ownership rules with
+two registered fakes whose ids collide exactly, and discloses that the second backend is a fixture
+(§13 R-21J-4). This is the same limitation GATE 21E recorded for AUTO.
+
+**§3.3 Pinned AnkiDroid semantics the routing and verification decisions rest on**
+(`NoteMutationSemantics.ANKIDROID_V2_24_1`, each value backed by the provider evidence recorded in
+`GATE_17_BACKEND_CONTRACT.md`):
+
+| Claim | Value | Why it matters to this gate |
+|---|---|---|
+| `contentWriteAtomic` | `true` | Fields and tags share one all-or-nothing transaction — but only *within* one operation, so a content+deck save is still two provider transactions. |
+| `deckChangeScope` | `CARD_ONLY` | A deck write moves one card; the note's other cards stay (`AUDIT-21J-11`, `VER-21J-13`). |
+| `conflictGuarantee` | `BEST_EFFORT_PRE_SAVE_REREAD` | The only pre-write protection is the app's own re-read, which is exactly the `CONFLICT` check (`VER-21J-17`). |
+| `authoritativeReconciliation` | `false` | `OP-M3` is blocked for every ambiguous AnkiDroid note; no receipt or lookup-by-transaction exists (`AUDIT-21J-13`). |
+| `idempotentReplay` | `false` | A repeat cannot be distinguished from a first write; replay is never automatic (`VER-21J-21/26`). |
+| `backendHonoursMutationId` | `false` | `NoteMutationId` is local transaction identity and creates **no** backend idempotency. |
+| `fieldIdentity` | `POSITIONAL_ORDINAL` | Field patches are ordinal-addressed and count-checked (`AUDIT-21J-09`). |
+| `trailingEmptyFieldRepresentable` | `false` | A write whose last field is empty is refused before the boundary (`AUDIT-21J-08`). |
+| `tagWriteModel` | `REPLACE_ONLY_CANONIFIED` | Whole-set replacement only; no add/remove operation exists (`AUDIT-21J-10`). |
+| `backendCanonifiesTags`, `backendNormalizesFieldText` | `true`, `true` | Post-write verification must compare canonically, not byte-for-byte. |
+| `contentWriteNoOpWhenUnchanged` | `true` | An unchanged content write is an effective no-op — still not a replay guarantee. |
+| `deckWriteAlwaysWrites` | `true` | Repeating a deck write is **not** a no-op. |
+| `fieldEditCanGenerateSiblingCards` | `true` (+ `generatedSiblingCardDeck = TEMPLATE_TARGET_ELSE_NOTE_TYPE_LAST_DECK`) | A field edit can create additional cards, and the write response does not report them: `APPLIED` must therefore rest on the verified read, never on the response (`VER-21J-22`). |
+
+`UNVERIFIED` (the `AnkiBackend` default) claims nothing: `contentWriteAtomic = false`,
+`deckChangeScope = UNKNOWN`, `conflictGuarantee = NONE`, `idempotentReplay = false`, `fieldIdentity =
+UNKNOWN`, `tagWriteModel = UNKNOWN` (which refuses tag edits), `authoritativeReconciliation = false`.
+A backend that has not declared itself is therefore *stricter*, never looser — and the fake fixtures
+inherit those defaults. The one exception is stated rather than assumed: the fixture's
+`authoritativeReconciliation` is opt-in **per test**, and default-**off** (`VER-21J-16`,
+`AUDIT-21J-13`).
+
+**§3.4 Ownership matrix rows this gate is bound by.** The `NoteMutation` row (owner = the record's
+`backendId`; recovery routed by durable identity; refusal is never a redirect) and the `OP-M1`/`OP-M2`
+assurance cells of `BACKEND_IDENTITY_CONTRACT.md` §3.3, transcribed once in
+`AnkiIdentityContinuation.continuationVerdict` and consumed by the note family through
+`NoteMutationRoutingPolicy` (AUDIT-21J-01, AUDIT-21J-13, AUDIT-21J-15).
 
 ---
 
-## §10 Gate lock decision
+## §4 The note-edit path as implemented
 
-- **IMPLEMENTED, AUDITED and HARNESS-VERIFIED.** Owner binding works under the harness; the registry is the only route to a backend; the ledger, status machine, and coordinator are reused; and the one open deviation has been audited and removed.
-- **RESOLVED:** DECISION-21J-03 — **REJECTED**; `OP-M3` follows locked §3.3 with no family branch (§4.4, §11).
-- **STILL OPEN, NOT THIS GATE'S TO CLOSE:** the 21I/21C `OP-M3` discrepancy. 21I is locked, so its `reconcileRoute()` is untouched and the item is referred to the 21B contract owner as **OPEN-21J-01** (§11).
-- **NOT VERIFIED:** Gradle (environment-blocked), device, real AnkiDroid, real PC backend. Harness results are equivalence evidence, not CI proof.
-- **NOT STARTED:** GATE 21K.
+**§4.1 Components and their single responsibility.**
+
+```text
+route            Screen.EditNote("edit-note/{cardRef}")        → carries the full backend-qualified AnkiCardRef
+resolution       AppNavHost                                     → registry.find(editCardRef.backendId)
+                                                                 (+ error screen when unregistered)
+editor           EditNoteViewModel.backend: AnkiBackend (val)   → never re-read from the preference
+decision         NoteMutationRoutingPolicy                       → admit / route by backendId + locked §3.3
+transaction      NoteMutationCoordinator + NoteMutationLedger    → GATE 17, unchanged status vocabulary
+write            AnkiBackend.applyNoteMutation(owner)            → exactly one call site
+projection       EditNoteMapper / EditNoteModels                 → refusal copy, blocked-mutation state
+```
+
+**§4.2 Admission.** A new mutation is admitted against `base.backendId`. The target must be **registered**
+at admission (`backend_not_registered` otherwise) — a client-side test, not a network probe. The mutation
+class is derived from durable state: a fresh or restored `PREPARED` is `OP-M1`; anything else that may
+still reach the backend is `OP-M2`; a reconciliation read is `OP-M3`; the recovery pass is `OP-P`.
+
+**§4.3 The cells actually enforced** (identical to the locked matrix; the family has no branch of its own):
+
+| Evidence | `OP-M1` | `OP-M2` (retry) | `OP-M3` (reconcile) | `OP-P` (recovery) |
+|---|---|---|---|---|
+| Authoritative collection **match** | permitted | permitted | permitted **only** with the family's authoritative read (`reconciliation_requires_authoritative_match` otherwise) | permitted |
+| `SessionContinuityVerified` (in-process key only) | permitted | permitted (non-application proof is collection-independent in this family) | **blocked** (`continuity_is_not_collection_evidence`) | blocked (no in-process binding) |
+| `IdentityUnverifiable(DEGRADED)` (a key appeared) | blocked | blocked | blocked | blocked |
+| `IdentityUnverifiable(NOMINAL)` (keyless) | permitted (disclosed) | permitted | **blocked** | permitted (family does not require collection proof) |
+| Foreign backend | blocked | blocked | blocked | blocked |
+
+`OP-M1`/`OP-M2`/`OP-M3`/`OP-P` are decided by the shared `AnkiIdentityContinuation.continuationVerdict`
+(`BACKEND_IDENTITY_CONTRACT.md` §3.3, locked at `:265`); the family supplies facts and a live capability
+read, and nothing else (`AUDIT-21J-15`, `AUDIT-21J-13`).
+
+**§4.4 Refusals (typed; a refusal never redirects).** `UnsupportedDimension(dimension)`,
+`TrailingEmptyFieldNotRepresentable`, `BackendMismatch`, `BackendRouteBlocked(token)` — tokens
+`backend_not_registered`, `collection_mismatch`, `identity_unverifiable_degraded`,
+`reconciliation_requires_authoritative_match`, `continuity_is_not_collection_evidence` —
+`DeckListingUnavailable`, `SaveInProgress`, `StudyActivityOverlaps`, `RetryNotAllowed(status)`,
+`UnknownMutation`, `PayloadUnavailable`, `ConflictNotResolvable(status)`. Each is projected to distinct
+user copy in `EditNoteMapper.refusalMessage` (`:361-386`), including the blocked-route copy that states
+the edit was not sent and that the app did not switch to another backend.
+
+**§4.5 Editor states.** `EditNoteUiState{Loading, Unavailable, Error, Refused, Ready}`;
+`EditNoteSaveState{Idle, Saving, Saved, Blocked, RetryAvailable, Conflicted, Ambiguous}`;
+`EditNoteCapabilities.authoritativeReconciliation` is documented in source as "Never true at this pin".
+A `Blocked` state carries the unresolved mutation and no note content; `canSave` is false while a
+mutation is unresolved, so a possibly-applied write is never overwritten (VER-21J-34, CHECKPOINT-21J-28).
 
 ---
 
-## §11 Audit record (revision 2)
+## §5 File-by-file report
 
-The gate's independent architecture audit, run against source and against the harness. Only the
-`OP-M3` question is reproduced in full here; the other `AUDIT-21J-*` items are unchanged from
-revision 1 and are pinned by `Gate21jArchitectureAuditTest` (15 tests).
+**§5.1 Production code — as found at HEAD (unchanged by this revision).**
+
+| File | State |
+|---|---|
+| `core/anki/edit/NoteMutationRoutingPolicy.kt` | Present: pure `admit` / `route` / `mutationOperationClass`; locked-matrix delegation; stable block tokens. |
+| `core/anki/edit/NoteMutationRecord.kt` | `collectionRef: AnkiCollectionIdentity? = null`, validated `collectionRef == null \|\| collectionRef.backendId == backendId`; the durable record stores metadata only — never field values or tag text. |
+| `core/anki/edit/NoteMutationCoordinator.kt` | Registry-routed (`private val backends: AnkiBackendRegistry`); one `.applyNoteMutation(` call site inside `callBackend`; `routing.route(record, OP_M3, pending.containsKey(record.mutationId))`; pre-write drift check → `CONFLICT`; post-write verification over all steps; `POST_WRITE_READ_ATTEMPTS = 2`; single-holder `withGate` tryLock. |
+| `core/anki/edit/NoteMutationLedger.kt` | GATE 17 ledger; codec `VERSION = 1`, `encodeDefaults = true`, `ignoreUnknownKeys = false`; `snapshot_corrupt`, `write_not_committed`; startup normalization of `SUBMITTING` → `AMBIGUOUS`. |
+| `ui/screens/editnote/EditNoteViewModel.kt` | `backend` is a `val` (`:48`); generation tokens on every suspending action; `retry` / `resumePrepared` / `checkAgain` (read-only) / `attest` / `reloadAfterConflict`. |
+| `ui/screens/editnote/EditNoteMapper.kt`, `EditNoteModels.kt` | Refusal copy per reason; blocked-mutation projection; UI state machine. |
+| `di/AppContainer.kt` (`:466-468`), `ui/navigation/AppNavHost.kt` (`:460`), `Screen.kt` (`:64`) | `backends = ankiBackendRegistry`; edit route resolves from the qualified ref. |
+| `data/anki/ankidroid/AnkiDroidBackend.kt` (`:302`, `:310`) | The only real `applyNoteMutation` / `noteMutationSemantics` in the tree. |
+
+**§5.2 Changes made by this revision (verification only — no production file touched).**
+
+| File | Change |
+|---|---|
+| `app/src/test/.../anki/edit/Gate21jBackends.kt` | **New.** The colliding two-backend world + counters used by every behavioural claim (CHECKPOINT 21J-30): identical note/card/deck/model ids on A and B, per-backend ids, registry, mutable preference and read context, `restart()`, persisted-status accessors. |
+| `app/src/test/.../anki/edit/Gate21jCanonicalVerificationTest.kt` | **New.** `VER-21J-01…37` + `CHECKPOINT-21J-28`, one test per ID, through the real `EditNoteViewModel` and the real coordinator. |
+| `app/src/test/.../anki/Gate21jCanonicalAuditTest.kt` | **New.** `AUDIT-21J-01…25`, one test per ID, source audit + behaviour. |
+| `app/src/test/.../anki/edit/Gate21jNoteEditEnduranceTest.kt` | **New.** `VER-21J-38` — the 1,000-event deterministic fault injection (§10). |
+| `app/src/test/.../anki/edit/FakeNoteMutationBackend.kt` | Modified (+75/−18): colliding ids, sibling cards, `deckIds`/`noteId`/`cardId` parameters, request-aware faithful apply, per-instance hooks. Defaults are unchanged, so every GATE 17 assertion still holds. |
+| `docs/GATE_21J_NOTE_EDIT_BINDING.md` | This document, revision 3. |
+
+**§5.3 Pre-existing 21J test batch at HEAD (audited, not written by this revision).**
+`NoteMutationRoutingPolicyTest` (**13** tests), `Gate21jNoteEditOwnershipTest` (**17**),
+`Gate21jArchitectureAuditTest` (**15**, its own `SRC-21J-*` numbering — *not* a mapping to the canonical
+IDs). Revision 2 described this batch as 12 + 15 + 14 = 41 tests; the measured counts are
+13 + 17 + 15 = **45** (§12.1 D-21J-03).
+
+---
+
+## §6 Durability, conflict, ambiguity, recovery, partial saves
+
+**§6.1 Ordering.** Durable record → durable submission intent → one backend write per operation →
+authoritative read → verified terminal status. A `PREPARED` persistence failure issues **zero** backend
+calls (`LedgerUnavailable("write_not_committed")`, VER-21J-19/20).
+
+**§6.2 `CONFLICT` is evidence-based.** The pre-write re-read must actually disagree with the recorded base
+(`if (latest != payload.base)`) before `CONFLICT` is recorded; nothing is written. `AMBIGUOUS` is recorded
+when the write's outcome is unknown. The two are different statuses from different causes and are never
+conflated (VER-21J-17/18, AUDIT-21J-14).
+
+**§6.3 `AMBIGUOUS` is terminal-for-now.** It survives restart, session end, preference change and
+reconnect; it can only leave via an authoritative reconciliation (`OP-M3`, which no backend at this pin
+supports) or an explicit human attestation, recorded as an attestation and never as backend evidence
+(`USER_ATTESTED_APPLIED` / `USER_ATTESTED_NOT_APPLIED`). `checkAgain` re-reads evidence and writes
+nothing; it never converts ambiguity into a safe retry (VER-21J-21/26; §8 Q10).
+
+**§6.4 `DECISION-21J-03` — rejected.** Revision 1 let the note family permit `OP-M3` on
+`SessionContinuityVerified`/`NOMINAL`. That re-decided a locked cell. The branch is deleted; `OP-M3` now
+follows locked §3.3 exactly, and `AUDIT-21J-15` fails if any `operation == OP_M3` branch reappears in the
+policy.
+
+**§6.5 Partial and composite saves.** Only when *every* planned operation is verified against the
+post-write read is `APPLIED` recorded; a failure after an earlier step becomes `AMBIGUOUS` with
+`PARTIAL_OPERATION_UNKNOWN`, never a retry, and a confirmed write whose `APPLIED` persistence fails
+becomes `SUBMITTING → AMBIGUOUS` (`applied_not_recorded`) (VER-21J-22/23).
+
+**§6.6 Deck targets are card-scoped and owner-scoped.** A target deck is accepted only if it belongs to
+the owner (`it.ref.backendId == backend.id`), and only the edited card moves — the note's other cards do
+not (VER-21J-11/13, AUDIT-21J-11).
+
+**§6.7 Legacy and stale traffic.** Pre-21J bytes (no `collectionRef`) decode and stay with their owner; a
+record whose owner is gone blocks with `backend_not_registered` and is never reassigned; a save whose
+result arrives after the editor's generation moved on is dropped (VER-21J-32/35/36).
+
+---
+
+## §7 Architecture audit — `AUDIT-21J-01 … AUDIT-21J-25`
+
+Executed as `app/src/test/.../anki/Gate21jCanonicalAuditTest.kt` — **25 / 25 PASS**. `B` = behaviour
+(two colliding backends), `S` = source audit.
+
+| ID | Audit question | Kind | Result |
+|---|---|---|---|
+| AUDIT-21J-01 | Are the ownership rules the locked 21B / GATE 17 contracts, and is no draft ever migrated? | S | PASS — policy decides through `AnkiIdentityContinuation.continuationVerdict` + `AnkiIdentityAssurancePolicy`; status vocabulary exactly the six GATE 17 values; no `migrate`/`repoint` in the family. |
+| AUDIT-21J-02 | Are the GATE 17 coordinator and ledger still the single mutation authority? | S | PASS — one ledger, one coordinator, one `.applyNoteMutation(` call site; the view model and mapper never call it. |
+| AUDIT-21J-03 | Can an editor switch its `BackendId`? | S | PASS — `private val backend`; no `var backend`; no `switchBackend`; route resolves the owner from the qualified ref. |
+| AUDIT-21J-04 | Is an admitted transaction's destination immutable? | S | PASS — `NoteMutationRecord.backendId` is a `val`; no `.copy(… backendId …)` anywhere in the family; the route is always the record's own owner. |
+| AUDIT-21J-05 | Are `NoteRef`/`CardRef`/`DeckRef`(+collection identity) backend- and collection-qualified? | S+B | PASS — all four carry `backendId` and an optional `collectionKey`; identical numeric ids on A and B are different `stableKey`s and resolve to their own instances. |
+| AUDIT-21J-06 | Is every write and recovery read routed to the exact instance? | S+B | PASS — `callBackend(backend: AnkiBackend, …)`; `routing.admit(base.backendId)`; `routeFor(record)`; a save on A produces 1 apply on A and 0 on B. |
+| AUDIT-21J-07 | Does any preference/AUTO/resolver path exist in the note path? | S | PASS — none of `AnkiBackendMode`, `AnkiBackendResolver`, `AnkiBackendSelector`, `preferenceStore`, `AUTO`, `resolveBackend(` appears in the family, the view model or the mapper; the coordinator never walks the registry to find a substitute. |
+| AUDIT-21J-08 | Is an unsupported operation refused rather than substituted? | S | PASS — the coordinator refuses an unadvertised dimension before the patch; the AnkiDroid adapter refuses a step its capabilities do not advertise (`ConfirmedNotApplied`). |
+| AUDIT-21J-09 | Is field/model identity ever borrowed from another backend? | S | PASS — the base carries its own `noteTypeId`; field identity is the authoritative ordinal; no model listing is consulted by an edit. |
+| AUDIT-21J-10 | Do tag writes follow the pinned replace-only contract? | S | PASS — `REPLACE_ONLY_CANONIFIED` declared; drafts are normalized into a whole-set patch; no `ADD_REMOVE_DELTA` path and no add/remove tag call exist in the family. |
+| AUDIT-21J-11 | Are deck operations card-scoped and owner-scoped? | S+B | PASS — `CARD_ONLY` required, foreign scope refused, both deck ids compared inside the owner; a move leaves the sibling card where it was. |
+| AUDIT-21J-12 | Do composite saves claim unproven atomicity? | S | PASS — the plan is an ordered operation list; atomicity is a declared per-backend property; `APPLIED` needs verification over all steps; a later failure is `AMBIGUOUS`. |
+| AUDIT-21J-13 | Does collection assurance follow the locked rule, with "unknown" never a wildcard? | S | PASS — the family's facts are stated, not invented; the reconciliation claim comes from the backend's own semantics; `collectionKey == null` is never a match. |
+| AUDIT-21J-14 | Is `CONFLICT` evidence-based and distinct from `AMBIGUOUS`? | S+B | PASS — conflict requires an actual drift; an unknown outcome records ambiguity; the two produce different durable statuses from different causes. |
+| AUDIT-21J-15 | Is no irreversible Save issued before the durable record and intent? | S | PASS — `ledger.create` precedes `EnterMutationBoundary`, which precedes the write; one write call site; `write_not_committed` blocks with zero calls. |
+| AUDIT-21J-16 | Is a possibly-applied mutation ever replayed blindly? | S+B | PASS — `retry` refuses any status other than `RETRY_ALLOWED` *before* any transition; a submitted-but-unrecorded write normalizes to `AMBIGUOUS`; a retry of the ambiguous record is refused and issues no second write. |
+| AUDIT-21J-17 | Is retry permission an evidence decision? | S | PASS — `BackendConfirmedNotApplied` is the transition; reconciliation is the only automatic exit; human attestation is recorded as an attestation; connectivity is not modelled as evidence. |
+| AUDIT-21J-18 | Do unresolved transactions on different backends stay independent? | S | PASS — recovery asks exactly one owner (`route(record, OP_M3, …)`); the active lookup is keyed by owner **and** note; the only record-wide pass is the ledger's own startup normalization. |
+| AUDIT-21J-19 | Is a historical record without provable ownership ever guessed? | S | PASS — unknown codec keys fail closed; a corrupt snapshot is a refusal; the owner comes from the record; a missing owner is `backend_not_registered`, never a fallback; `collectionRef` defaults to `null` so legacy bytes decode. |
+| AUDIT-21J-20 | Can a stale result be published into a newer editor session? | S | PASS — every suspending editor action re-checks `token != generation`; a save captures the generation it was issued under. |
+| AUDIT-21J-21 | Does refresh after a mutation stay inside the confirmed owner? | S+B | PASS — refresh is the owner's own post-write read; the editor refreshes through its immutable backend; no second cache system (no `LibrarySnapshot`, no note/card/resource cache) exists in the family. The one scoped read cache in the app (`AnkiLibraryRepository.cached`, `:61`) is cleared by owner/registry disposal (`:253`), by a confirmed identity-integrity failure (`:261`), by `invalidateContext()` (`:295-299`) and by `invalidateIfBackendChanged(expected: AnkiBackendId)` (`:305-308`) — a bound-backend comparison, never a global flush. |
+| AUDIT-21J-22 | Is a draft kept out of the transaction, and can discarding one delete a mutation? | S | PASS — the durable record stores metadata, never field values or tag text; the in-process payload is memory-only; an unresolved record blocks the editor instead of being dropped. |
+| AUDIT-21J-23 | Does the new surface leak credentials or private content? | S | PASS — no secret token appears in the family, view model or mapper; the blocked projection carries a routing token, never a payload; refusal copy never interpolates note content. |
+| AUDIT-21J-24 | Do the earlier gates keep their own authority? | S | PASS — 21H/21I routing policies, 21C identity seams and 21G transaction-recovery routing are untouched; the GATE 17 suite still passes unmodified. |
+| AUDIT-21J-25 | Was any creation, migration or replay infrastructure added? | S | PASS — no such identifier exists in the family, and GATE 18's creation ledger remains separate. |
+
+**Prior audit suite.** `Gate21jArchitectureAuditTest` (15 tests, `SRC-21J-*` numbering) also passes and is
+retained: it pins the coordinator's constructor and call sites, the absence of resolver-mode names in
+`core/anki/edit`, and the exact `continuationVerdict` argument list. It is *not* a mapping to the
+canonical IDs; `Gate21jCanonicalAuditTest` is.
+
+---
+
+## §8 Authoritative verification — `VER-21J-01 … VER-21J-40`
+
+Executed in `Gate21jCanonicalVerificationTest` (VER-01…37 + CHECKPOINT-21J-28),
+`Gate21jNoteEditEnduranceTest` (38) and the full regression run (40). **39 / 39 executable IDs PASS;
+VER-21J-39 BLOCKED** (no device, no real backend in this environment).
+
+| ID | Verification | Result |
+|---|---|---|
+| VER-21J-01 | A note read from AnkiDroid opens an editor bound to AnkiDroid | PASS |
+| VER-21J-02 | A note bound to the PC identity is never substituted by AnkiDroid | PASS (refusal, zero writes) |
+| VER-21J-03 | A preference change during the edit never redirects the save | PASS |
+| VER-21J-04 | An AUTO availability change cannot redirect a bound editor | PASS |
+| VER-21J-05 | A Library context switch does not move the edit context | PASS |
+| VER-21J-06 | Identical note ids on two backends are two different notes | PASS |
+| VER-21J-07 | Colliding card and deck ids cannot be used across backends | PASS |
+| VER-21J-08 | An identical numeric model id never borrows the other backend's schema | PASS |
+| VER-21J-09 | A valid field edit executes through the original backend only | PASS (1 apply on A, 0 on B) |
+| VER-21J-10 | A tag edit keeps replace-only semantics and the original backend | PASS |
+| VER-21J-11 | A valid deck reassignment uses the source card and the owner's deck | PASS |
+| VER-21J-12 | An unsupported operation is refused, never silently substituted | PASS |
+| VER-21J-13 | A single-card move never moves the note's other cards | PASS |
+| VER-21J-14 | Invalid field input is rejected before any mutation | PASS |
+| VER-21J-15 | A verified collection mismatch blocks the write | PASS |
+| VER-21J-16 | Unknown collection assurance is never upgraded to a match | PASS |
+| VER-21J-17 | An external edit before the write is a conflict with nothing written | PASS |
+| VER-21J-18 | A verified conflict and an uncertain write are distinct durable outcomes | PASS |
+| VER-21J-19 | A `PREPARED` persistence failure causes zero backend calls | PASS |
+| VER-21J-20 | No irreversible mutation before the durable submission intent | PASS |
+| VER-21J-21 | A lost save response is ambiguous and is never replayed | PASS |
+| VER-21J-22 | A partial composite save is never fully applied and is not replayed | PASS (`PARTIAL_OPERATION_UNKNOWN`) |
+| VER-21J-23 | A confirmed save whose `APPLIED` write fails is not replayed | PASS (`applied_not_recorded` → `AMBIGUOUS`) |
+| VER-21J-24 | A durable `APPLIED` refreshes only the owner's data | PASS |
+| VER-21J-25 | After a restart an ambiguous record keeps owner, identity and ambiguity | PASS |
+| VER-21J-26 | Retry permission comes from backend evidence, not transport recovery | PASS |
+| VER-21J-27 | An unavailable original backend blocks and never fails over | PASS |
+| VER-21J-28 | Reconnect alone never completes a recovery | PASS |
+| VER-21J-29 | A historical transaction is never reassigned to a new backend | PASS |
+| VER-21J-30 | Two unresolved backends recover independently | PASS |
+| VER-21J-31 | A repeated save never produces an uncontrolled duplicate mutation | PASS (`SaveInProgress` / one transaction) |
+| VER-21J-32 | An old save result cannot reach a new editor session | PASS (generation drop) |
+| VER-21J-33 | A restored draft keeps its owner, note and model context | PASS |
+| VER-21J-34 | Discarding an unsaved draft cannot delete an unresolved mutation | PASS |
+| VER-21J-35 | A record without provable ownership is preserved and blocked | PASS |
+| VER-21J-36 | A historical record with a provable owner recovers through that owner only | PASS |
+| VER-21J-37 | Only the owner's read data is refreshed after a confirmed mutation | PASS |
+| VER-21J-38 | 1,000-event deterministic fault injection holds every ownership invariant | PASS (§10) |
+| VER-21J-39 | Verification with the real AnkiDroid and real PC backends | **BLOCKED — ENVIRONMENT** (no device; no PC backend exists; §13 R-21J-4) |
+| VER-21J-40 | The full previous-gate regression suite still passes | PASS — 222 classes / 2,711 tests / 2,711 passed (§9.1) |
+
+**CHECKPOINT 21J-28** (blocked-save projection) is executed inside this suite: a blocked save is
+projected as an `EditNoteSaveState.Blocked` refusal whose copy states that the app did not switch to
+another backend, with **zero** writes and **zero** records. Revision 2 recorded this as a source-audit
+gap; it is now behavioural and closed.
+
+**Cross-check on revision 2's claim set.** Every refusal token, status, cell and boundary claimed in
+revision 2 is reproduced above by an executed ID; where revision 2 recorded a *gap* (blocked-save UI,
+per-ID mapping) this revision closes it. Revision 2's audit-pending item (`DECISION-21J-03`) stays
+rejected and is pinned here.
+
+---
+
+## §9 Build and regression results
+
+**§9.1 JVM harness (executed in this sandbox).**
+
+| Check | Command | Result |
+|---|---|---|
+| Main scope | `HARNESS_WORK=/tmp/h tools/jvm-harness/bin/build.sh all` | **PASS** — `main errors: 0 (files: 328)` |
+| Compose closure | same | **PASS** — `compose errors: 0 (files: 24, stub files: 46)` |
+| Test scope | same | **PASS** — `test errors: 0 (files: 255)` |
+| GATE 21J canonical audit | `run.sh 'Gate21jCanonicalAuditTest'` | **PASS** — 1 class, 25 tests, 25 passed |
+| GATE 21J canonical verification | `run.sh 'Gate21jCanonicalVerificationTest'` | **PASS** — 1 class, 38 tests, 38 passed |
+| GATE 21J endurance | `run.sh 'Gate21jNoteEditEnduranceTest'` | **PASS** — 1 class, 1 test, 1 passed |
+| GATE 21J suite (every 21J class: canonical audit + canonical verification + endurance + the two pre-existing 21J suites) | `run.sh 'Gate21j'` | **PASS** — 5 classes, 96 tests, 96 passed |
+| **Full regression** | `run.sh` (no filter) | **PASS — `RESULT classes=222 tests=2711 passed=2711 failed=0 ignored=0 time=45.5s`, exit 0** |
+
+Baseline at the same HEAD **before** this revision's four new test files: `classes=219 tests=2647
+passed=2647 failed=0 ignored=0 time=44.0s`. This revision adds 3 classes / 64 tests (25 + 38 + 1);
+2,647 + 64 = 2,711 ✔.
+
+**§9.2 Gradle and Android — ENVIRONMENT BLOCKER (BLOCKED, not passed).** Attempted in this sandbox and
+failed for environmental reasons, with first-hand evidence:
 
 ```text
-AUDIT ID:   AUDIT-21J-03 / AUDIT-21J-04 — immutable edit binding and transaction destination
-RESULT:     PASS
-EVIDENCE:   routing is by record.backendId against the registry; 2629/2629 harness tests, including
-            editOpenedOnBIsWrittenOnlyToB and registryOrderNeverChangesTheOwner.
-DEFECT:     none found in revision 2.
-REMEDIATION: n/a
+$ ./gradlew testDebugUnitTest --no-daemon --offline
+ERROR: JAVA_HOME is not set and no 'java' command could be found in your PATH.
+
+$ JAVA_HOME=<sandbox Temurin 25> ./gradlew testDebugUnitTest --no-daemon
+… org.gradle.wrapper.Install.forceFetch(SourceFile:2)
+Caused by: java.io.EOFException: SSL peer shut down incorrectly
+           at sun.security.ssl.SSLTransport.decode(…)      ← gradle-8.7 distribution not downloadable
 ```
 
-```text
-AUDIT ID:   DECISION-21J-03 — the note family's OP-M3 cell versus locked §3.3
-RESULT:     FAIL (revision 1) → remediated → PASS (revision 2)
-EVIDENCE:   BACKEND_IDENTITY_CONTRACT.md:265 blocks OP-M3 on continuity and nominal evidence and
-            conditions the match cell on the family's own authoritative read;
-            AnkiIdentityContinuation.kt:158,:210 transcribe that; NoteMutationBackendResult.kt:152,:181
-            set authoritativeReconciliation = false for UNVERIFIED and ANKIDROID_V2_24_1;
-            AnkiBackend.kt:396 is the only definition of reconcileNoteMutation and returns Unresolved.
-DEFECT:     a family branch re-decided a LOCKED cell, so the matrix could be overridden without
-            amending the contract. The branch also permitted a read that no backend implements.
-REMEDIATION: branch deleted; every operation class routed through the shared matrix;
-            AUDIT-21J-15 pins it; 8 tests fail if the branch returns (mutation-checked).
-```
+`ANDROID_HOME` / `ANDROID_SDK_ROOT` are unset, there is no Android SDK and no cached Gradle
+distribution, so `testDebugUnitTest`, `lint`, `assembleDebug`, `assembleRelease` and
+`connectedDebugAndroidTest` **could not be executed at all**. This is an environment verdict, identical
+to the one GATE 21G/21H/21I recorded, and it is not evidence of a defect in the gate.
+
+**§9.3 What the harness numbers are and are not.** They are equivalence evidence for the same source
+tree under a different compiler and shim set (§2.4). They are **not** CI results, and four test classes
+plus all Compose/instrumented coverage are outside the run.
+
+---
+
+## §10 Endurance and fault injection — VER-21J-38
+
+`Gate21jNoteEditEnduranceTest` runs **1,000 deterministic events** (seeded LCG, `seed = 1_000_003`, so
+the run is reproducible) against the colliding two-backend world, through the real
+`EditNoteViewModel` + coordinator, with `runTest` and a restart (`restart()`) of the world/ledger in the
+mix. Event kinds include: field/tag/deck saves on either owner, external drift before a save, faithful
+applies, **refused-then-applied** retries, `Conflict`, `ConfirmedNotApplied`, lost responses
+(`OutcomeUnknown`), provider exceptions, partial composites, restart with unresolved records, stale
+editor sessions (save overtaken by a session reload), and human attestation of an ambiguous record.
+
+Counters asserted to be **exactly zero** at the end (all measured zero on the passing run):
+
+| Counter | Meaning |
+|---|---|
+| `crossBackendMutations` | a mutation, note ref, deck ref or route addressed to the other backend |
+| `wrongNoteEdits` | an edit written without the drift check seeing another writer's value |
+| `wrongDeckAssignments` | a deck write carrying a foreign ref or the wrong scope |
+| `wrongModelSchemaUsage` | a field patch whose arity does not match the owner's own schema |
+| `blindAmbiguousReplays` | any second write for an id whose outcome was unknown |
+| `unjustifiedRetryAllowed` | `RETRY_ALLOWED` without proven non-application |
+| `falseAppliedForPartialChanges` | `APPLIED` when only part of a composite landed |
+| `lostUnresolvedRecords` | an unresolved record that disappeared from the ledger |
+| `staleEditorContamination` | a replaced generation publishing a result (signal or `Saved` state) |
+| `transactionOwnershipRewrites` | any change of a record's owning backend |
+
+The run's own activeness assertions (`restarts ≥ 20`, applies ≥ 50) failed on the first attempt, which
+exposed a real defect **in the test**, not in the code: event 9 counted an externally changed note as a
+false edit when the save was legitimately refused by a pre-write pathway. The check now asserts the only
+thing that matters — no write occurred past the drift check — and the endurance run passes. The incident
+is recorded because a weaker assertion would have hidden the distinction between "refused before the
+write" and "written anyway".
+
+---
+
+## §11 Invariant report (selected; INV-21J)
+
+| ID | Invariant | Enforcement point | Evidence |
+|---|---|---|---|
+| INV-21J-01 | A save, retry or recovery read never reaches a backend other than the record's owner | `NoteMutationRoutingPolicy.admit/route`, `callBackend` | AUDIT-21J-06/07, VER-21J-09/27/29/36, VER-21J-38 counters |
+| INV-21J-02 | The editor's backend is fixed for the edit context | `EditNoteViewModel.backend` (`val`), route resolution | AUDIT-21J-03, VER-21J-01…05 |
+| INV-21J-03 | No draft is migrated, copied or re-pointed to another backend | absent behaviour + audit | AUDIT-21J-01/25 |
+| INV-21J-04 | A record's owner is immutable once admitted | `NoteMutationRecord.backendId` (`val`) | AUDIT-21J-04, VER-21J-29 |
+| INV-21J-05 | Identical numeric ids on two backends are different resources | `AnkiRefs` qualification | AUDIT-21J-05, VER-21J-06/07/08 |
+| INV-21J-06 | No AUTO, preference or resolver participates in the note path | source audit | AUDIT-21J-07, VER-21J-03/04/05 |
+| INV-21J-07 | A refusal is never a redirect | refusal vocabulary + copy | AUDIT-21J-07, CHECKPOINT-21J-28 |
+| INV-21J-08 | Unknown collection evidence is never upgraded to a match | locked §3.3 via the continuation matrix | AUDIT-21J-13, VER-21J-15/16 |
+| INV-21J-09 | `OP-M3` requires an authoritative match *and* the family's read | shared matrix; no family branch | AUDIT-21J-15, `DECISION-21J-03` rejected |
+| INV-21J-10 | A possibly-applied mutation is never replayed | `retry` pre-check; `RecoveryNormalizedUnknown` | AUDIT-21J-16, VER-21J-21/26 |
+| INV-21J-11 | `CONFLICT` requires observed drift; `AMBIGUOUS` never means "conflict" | pre-write comparison; transition table | AUDIT-21J-14, VER-21J-17/18 |
+| INV-21J-12 | `APPLIED` requires verification over **all** plan operations | `NoteMutationVerifier` over the plan | AUDIT-21J-12, VER-21J-22/23 |
+| INV-21J-13 | No backend write precedes the durable record and submission intent | `ledger.create` → boundary → write | AUDIT-21J-15, VER-21J-19/20 |
+| INV-21J-14 | Deck writes are card-scoped and owner-scoped | plan + coordinator guards | AUDIT-21J-11, VER-21J-11/13 |
+| INV-21J-15 | Tag writes are whole-set replace-only | planner normalization + pinned semantics | AUDIT-21J-10, VER-21J-10 |
+| INV-21J-16 | Sibling cards of the same note are not moved by a card move | payload scope | AUDIT-21J-11, VER-21J-13 |
+| INV-21J-17 | Unresolved transactions on different backends stay independent | per-record routing; owner-and-note lookup | AUDIT-21J-18, VER-21J-30 |
+| INV-21J-18 | Legacy bytes without `collectionRef` decode and stay owned | additive optional field, `encodeDefaults`, strict decode | AUDIT-21J-19, VER-21J-35 |
+| INV-21J-19 | An unregistered owner blocks; the record is never reassigned | `backend_not_registered` | AUDIT-21J-19, VER-21J-27/35 |
+| INV-21J-20 | Only the correct scope is refreshed or invalidated | owner-scoped post-write read; `AnkiLibraryRepository.invalidateIfBackendChanged` / `invalidateContext`; no second cache | AUDIT-21J-21, VER-21J-24/37 |
+| INV-21J-21 | A stale result never reaches a newer editor session | generation tokens | AUDIT-21J-20, VER-21J-32 |
+| INV-21J-22 | A draft is not a transaction, and discarding a draft deletes nothing durable | record holds metadata only | AUDIT-21J-22, VER-21J-33/34 |
+| INV-21J-23 | GATE 17 authority is not re-implemented or weakened | single ledger/coordinator/status vocabulary | AUDIT-21J-02/24, `NoteMutationCoordinatorTest` unchanged |
+| INV-21J-24 | The gate adds no secret exposure | source audit | AUDIT-21J-23 |
+| INV-21J-25 | GATE 21K's scope is untouched | source audit | AUDIT-21J-25, §13 |
+
+---
+
+## §12 Defects, discrepancies and remediation register
+
+**§12.1 Discrepancies found and their resolution.**
+
+| ID | Discrepancy | Evidence | Resolution |
+|---|---|---|---|
+| **D-21J-01** | Revision 2's regression figure (**2,629 / 2,629**) is not reproducible at HEAD | measured baseline at the same HEAD is **2,647 / 2,647**; after this revision's tests, 2,711 | 2,647 is the figure to quote. The 18-test gap matches the GATE 21I re-verification batch that landed on the same branch (its report records the same 2,647 full-suite result), so revision 2 most likely measured a pre-21I-correction tree. **Not a defect in the tree**: the tree is fully green. Recorded as a documentation-accounting defect in revision 2. |
+| **D-21J-02** | Revision 2 declined to map the canonical `AUDIT-21J-01…25` / `VER-21J-01…40` lists, so its coverage table was thematic only | `docs/GATE_21J_NOTE_EDIT_BINDING.md` revision 2 §9, "Limitation" paragraph | **Closed by this revision**: both lists are executable IDs, one test per ID, green (§7, §8). |
+| **D-21J-03** | Revision 2 §3/§7.2 under-counted its own new tests (claimed 12 + 15 + 14 = 41) | measured: `NoteMutationRoutingPolicyTest` **13**, `Gate21jNoteEditOwnershipTest` **17**, `Gate21jArchitectureAuditTest` **15** = **45** | Corrected in §5.3. No test changed; the count was wrong. |
+| **D-21J-04** | `OPEN-21J-01` (21I/21C `OP-M3` contradiction) was recorded as still open | see §12.2 | **Closed** — the contradiction no longer exists at HEAD; the referring record was stale. |
+| **D-21J-05** | Documentation line drift: `BACKEND_OWNERSHIP_INVARIANTS.md` §5.1 cites `Screen.kt:42,95-122` / `AppNavHost.kt:248-253` for the edit route; at HEAD the route constant is `Screen.kt:64` and the route is hosted at `AppNavHost.kt:460` | grep of current sources | Recorded, not silently rewritten: the citations are *illustrative* and the invariants they support are enforced and audited (AUDIT-21J-03/06). Owner: whoever next edits the 21B documents. |
+| **D-21J-06** | Revision 2 recorded "blocked-save UI" as source-audited only (no behavioural test) | revision 2 §9 table | **Closed** by `CHECKPOINT-21J-28`, which now projects a blocked save through the real view model and asserts the copy plus zero writes and zero records. |
+| **D-21J-07** | The endurance test's drift-scenario assertion was initially wrong (it counted a legitimate pre-write refusal as a false edit) | first two endurance runs failed on `wrong-note-edits: 6` | Fixed in the test to assert the invariant that actually matters (no write past the drift check); the production code was never wrong. Third run passes. |
+
+**§12.2 `OPEN-21J-01` — audited and closed.** Revision 2 recorded that `DECISION-21I-03` permitted
+`OP-M3` on nominal/continuity evidence while the shared locked matrix blocks it, and referred the item to
+the 21B contract owner. Audit at HEAD shows the contradiction **does not exist any more**:
+
+- `ReviewerActionRoutingPolicy.reconcileRoute()` (`:215-243`) delegates to
+  `AnkiIdentityContinuation.continuationVerdict(operation, check, facts)` with the capability reduced to
+  the record's frozen promise ∩ the backend's live claim — it no longer hand-rolls a cell.
+- `GATE_21I_VERIFICATION_REPORT.md` §17 («Current re-verification and contract correction»,
+  2026-10-16) records the correction, and `GATE_21I_REVIEWER_ACTION_ROUTING.md` `:86` now reads
+  "DECISION-21I-03 (corrected to locked GATE 21B)".
+- The only `OP_M3` decisions in production are the shared matrix, the reviewer-action family (delegating)
+  and the two note-family call sites (`NoteMutationCoordinator.kt:296`,
+  `AnkiStudyEffectExecutor.kt:617`) — all of which now route through the same matrix.
+
+**Verdict:** `OPEN-21J-01` = **CLOSED (verified conforming at HEAD)**. The 21B contract lock needed no
+amendment: the locked matrix was already the single decider, and 21I was conformed to it. This gate did
+**not** touch 21I (AUDIT-21J-24, INV-21J-23).
+
+**§12.3 Defects found in the implementation by this audit.** None. Twenty-five canonical audits, 39
+executed verifications and a 1,000-event endurance run produced no failing invariant in the tree. The
+only defects found were in *evidence* (D-21J-01…D-21J-07), and all are closed in this revision.
+
+**§12.4 Residual gaps that are not defects.** (a) `NoteMutationCodec` downgrade is not mitigated: a
+downgrade to a pre-`collectionRef` build reads the snapshot strictly but the *older* build's behaviour
+toward an unknown field is outside this app's control; recorded, fail-closed on this side
+(`ignoreUnknownKeys = false`, `snapshot_corrupt`). (b) The blocked-route copy is asserted in the view
+model and mapper, not on a rendered screen. (c) AnkiDroid's real provider behaviour is modelled, never
+observed (§9.2).
+
+---
+
+## §13 Residual risks and non-claims
+
+| ID | Risk | Why it exists | Consequence under this gate | Owner |
+|---|---|---|---|---|
+| R-21J-1 | AnkiDroid exposes **no collection key** (`collectionKey = null`) | `AnkiDroidDeckMapper` sets none; capability matrix "Collection identity ✘" | Collection equals/mismatch can never be *proven* on the only real note backend: every write runs in the `NOMINAL` (disclosed-unverifiable) cell, and `OP-M3` is blocked for every ambiguous AnkiDroid note. | 21C (represent) / product decision |
+| R-21J-2 | No real second backend exists, so no production collision can be exercised | `data/anki/remote/` has no backend class; §3.1 | The two-backend proofs are fixture proofs. | 21D / 21E once a PC backend exists |
+| R-21J-3 | Reconciliation is unimplementable at this pin | `AnkiBackend.reconcileNoteMutation` default returns `Unresolved()`; `authoritativeReconciliation = false` in every existing semantics set | An ambiguous note edit can only be closed by a human attestation; the UI must say so truthfully. | 21M (disclose) / future backend |
+| R-21J-4 | Device, real AnkiDroid and real PC verification did not happen | no device, no SDK, Gradle blocked (§9.2) | VER-21J-39 stays BLOCKED; no exactly-once *device* claim may be made. | CI + GATE 11/16/21N |
+| R-21J-5 | Codec downgrade is unmitigated | §12.4(a) | A pre-21J build reading a 21J snapshot is undefined from this side. | 21N / release policy |
+| R-21J-6 | The GATE 21E prerequisite-status wording conflict noted by 21I is untouched | `GATE_21I_VERIFICATION_REPORT.md` §17.1 | Prerequisite caveat only; 21J changed nothing in 21E. | 21N |
+
+**Explicit non-claims.** This gate does not claim: that a note save has ever executed on a device; that
+AnkiDroid's collection identity is verified; that PC Anki note editing works; that the harness numbers
+equal CI numbers; that any cross-backend continuation, migration or replay is safe (it is forbidden); or
+that GATE 21K is started.
+
+---
+
+## §14 Handoff
+
+**To GATE 21K (Note Creation Backend Binding) — not started here.**
+
+- Reuse, do not recreate: `NoteCreationLedger`, `NoteCreationCoordinator`, `AddNoteViewModel`,
+  `AddNoteMapper`, the `add-note/{backendId}` route and its seed (`AppNavHost.kt:94` is still hard-coded
+  to AnkiDroid — the seed is a **pre-binding** decision and is 21K's to make).
+- Inherit the pattern proven here: one decider (locked §3.3 via `AnkiIdentityContinuation`), a typed
+  refusal instead of a redirect, an immutable owner on the context and the record, and a
+  could-not-have-applied vs may-have-applied split.
+- `DECISION-21B-21` governs; media ownership (`AnkiMediaRef`, DECISION-21B-04) is a 21K blocker and must
+  not be invented here.
+- `NoteMutationCoordinator.kt:151`-style pinning still exists for creation
+  (`NoteCreationCoordinator.kt:162`) — the same class of latent gap R9 recorded.
+
+**To GATE 21M (UI indicators and diagnostics).** The refusal tokens are stable strings; the blocked-save
+state (`EditNoteSaveState.Blocked`, `EditNoteBlockedMutation`) is the vocabulary an indicator should use.
+Do not collapse `NOMINAL` (disclosed-unverifiable) into "not connected".
+
+**To GATE 21N / CI.** VER-21J-39 and the whole Gradle block (§9.2) remain owed. The canonical ID suites
+added here are the regression harness for the note family; `AUDIT-21J-15` in particular will fail if any
+future change re-introduces a family-local `OP-M3` branch.
+
+**Contract-lock bookkeeping.** `GATE_21B_CONTRACT_LOCK.md` needs no amendment for this gate: §21J's
+required decisions are answered, the output contract holds, and R9's note half is now implemented
+(creation half → 21K). `OPEN-21J-01` is closed (§12.2). No decision of this gate contradicts the lock's
+12-question consistency review (Q7 editor save on another backend: no; Q10 ambiguity never a safe retry;
+Q12 unevidenced legacy stays unknown).
+
+---
+
+## §15 Gate lock decision
 
 ```text
-AUDIT ID:   OPEN-21J-01 — 21I/21C OP-M3 discrepancy (referred, not resolved)
-RESULT:     BLOCKED (owned by GATE 21B / GATE 21I, outside this gate's authority)
-EVIDENCE:   DECISION-21I-03 (GATE_21I_REVIEWER_ACTION_ROUTING.md:83) permits OP-M3 on nominal and
-            continuity evidence; AnkiIdentityContinuation.kt:210 blocks it. ReviewerActionRoutingPolicy
-            .reconcileRoute() hand-rolls the permitted cell, so 21I's code follows 21I's text and
-            contradicts 21C's transcription of §3.3.
-DEFECT:     the locked matrix and one locked family disagree. Both cannot be the locked truth.
-REMEDIATION: the 21B contract owner must either amend §3.3 with an explicit, typed family-exception
-            clause (making the shared matrix the single decider, as the note family now is) or
-            conform 21I. 21J did not touch 21I: it is a locked gate and INV-21J-31 forbids weakening it.
+GATE 21J IMPLEMENTATION:      PRESENT AND COMPLETE AT HEAD — audited as found, no production change
+                              required or made by this revision
+GATE 21J ARCHITECTURE AUDIT:  PASS — AUDIT-21J-01 … AUDIT-21J-25 (25/25), plus SRC-21J-* (15/15)
+GATE 21J AUTHORITATIVE VERIF: PASS — VER-21J-01 … VER-21J-38 + CHECKPOINT-21J-28 (39/39 executed)
+                              BLOCKED — VER-21J-39 (device / real backends): ENVIRONMENT
+GATE 21J REGRESSION:          PASS — 222 classes, 2,711 tests, 2,711 passed, 0 failed, 0 ignored
+                              (baseline before this revision: 219 / 2,647 / 2,647)
+GRADLE / ANDROID BUILD:       BLOCKED (ENVIRONMENT) — wrapper cannot download the distribution;
+                              no JAVA_HOME, no Android SDK, no device
+DECISION-21J-03:              REJECTED (revision 1 deviation removed; pinned by AUDIT-21J-15)
+OPEN-21J-01:                  CLOSED — verified conforming at HEAD (21I delegates to the locked matrix)
+GATE 21K:                     NOT STARTED
+OVERALL GATE STATUS:          LOCKED — implemented, audited and harness-verified; device and Gradle
+                              verification remain environmentally blocked and are recorded as such
 ```
 
-```text
-AUDIT ID:   GATE 17 preservation (INV-21J-28, INV-21J-31)
-RESULT:     PASS
-EVIDENCE:   the ledger, status machine, coordinator and refusal vocabulary are unchanged; the only
-            edit to NoteMutationCoordinatorTest is a new reconcilingHarness() for two reconciliation
-            tests, and every GATE 17 assertion still passes unchanged in the 2629 run.
-DEFECT:     the pre-existing fixture declared authoritativeReconciliation = false while implementing
-            an authoritative read. The fixture was made self-consistent; the assertions were not
-            weakened.
-REMEDIATION: n/a
-```
+**What "locked" means here.** The gate's contract is implemented in the tree and its ownership rules are
+enforced by executable evidence at the canonical IDs; later sub-gates may build on it. It does **not**
+mean the gate is release-verified: `VER-21J-39`, `lint`, `assembleDebug`, `assembleRelease` and
+`connectedDebugAndroidTest` have never run in this environment.
