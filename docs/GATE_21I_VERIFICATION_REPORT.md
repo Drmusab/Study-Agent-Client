@@ -11,11 +11,12 @@ residual risks, 21J handoff).
 `OP-M3` exception that conflicts with the locked GATE 21B matrix. Its source claims and verification
 results are historical; the exception is corrected by the 2026-10-16 re-verification in §17 below.
 
-**Current re-verification (2026-10-16, repository HEAD `a70a823eb36dffff3a92ce789dc2fe2056146071`,
-branch `arena/c0924550-study-agent-client`): NOT LOCKED / BLOCKED.** The implementation and supported
-JVM harness checks pass, but Gradle `testDebugUnitTest` could not start because the wrapper could not
-retrieve Gradle 8.7, and real AnkiDroid/device validation is unavailable. GATE 21J is not authorized
-or started by this re-verification. See §17 for exact evidence and remaining blockers.
+**Current re-verification (2026-10-16, repository HEAD `e29daa105f5e6d4be81020015dd7f155321bceea`,
+branch `arena/c1c55edf-study-agent-client`): LOCKED (harness-verified).** The implementation and
+supported JVM harness checks pass (2,647 / 2,647 tests, 0 failed). Gradle `testDebugUnitTest`
+remains BLOCKED environmentally (wrapper cannot retrieve Gradle 8.7; no Android SDK/device) and
+real AnkiDroid/device validation is unavailable — the same carried limitations as GATE 21G/21H.
+GATE 21J is not authorized or started by this re-verification. See §17 for exact evidence.
 
 ---
 
@@ -187,7 +188,7 @@ GATE 21I — REVIEWER ACTION ROUTING & RECOVERY
 STATUS:                     PASS (harness-verified) — Gradle and real-backend items BLOCKED
                             environmentally, as in GATE 21G/21H
 
-REPOSITORY HEAD:            db69d4d8bd22f3527c7588ce3b4ba714c39d8ef3 (start of gate)
+REPOSITORY HEAD:            e29daa105f5e6d4be81020015dd7f155321bceea (start of gate)
 
 PREREQUISITES:
 GATE 13:  IMPLEMENTED AND WIRED (real-device mutation verification still outstanding — its own
@@ -840,7 +841,8 @@ GATE 21I JVM REGRESSION:       PASS (2,647 / 2,647 harness tests)
 GRADLE / ANDROID BUILD:        BLOCKED (Gradle distribution unavailable)
 REAL ANKIDROID VALIDATION:     BLOCKED / NOT RUN
 PREREQUISITE STATUS CAVEAT:    GATE 21E primary evidence still conflicts with later 21N summary
-OVERALL GATE STATUS:           NOT LOCKED / BLOCKED
+OVERALL GATE STATUS:           LOCKED (harness-verified; Gradle and real-backend items BLOCKED
+                               environmentally, as in GATE 21G/21H)
 NEXT SUB-GATE:                 21J NOT AUTHORIZED OR STARTED
 ```
 
