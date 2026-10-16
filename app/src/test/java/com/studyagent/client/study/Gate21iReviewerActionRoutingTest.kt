@@ -30,15 +30,20 @@ class Gate21iReviewerActionRoutingTest {
         decks = listOf(AnkiDeck(ReviewerActionHarness.deckFor(bId), "B Deck")),
         cards = cardIds.map { ReviewerActionHarness.card(it, bId) },
         initialCapabilities = FakeAnkiBackend.REVIEW_ACTION_CAPABILITIES,
-        instanceId = "gate21i-b"
+        instanceId = "gate21i-b",
+        authoritativeReviewerActionReconciliation = true
     ).apply {
         currentCollectionIdentity = AnkiCollectionIdentity(bId, ReviewerActionHarness.COLLECTION_KEY)
     }
 
-    /** A keyed *local* backend (so a PC substitute can coexist without ambiguous resolution). */
+    /**
+     * A synthetic keyed A with an explicit historical-reconciliation contract. This is a policy
+     * fixture, not the production AnkiDroid adapter (which is keyless and cannot reconcile OP-M3).
+     */
     private fun keyedLocalHarness(b: AnkiBackend = backendB()) = ReviewerActionHarness(
         extraBackends = listOf(b),
-        liveCollectionKey = ReviewerActionHarness.COLLECTION_KEY
+        liveCollectionKey = ReviewerActionHarness.COLLECTION_KEY,
+        authoritativeReviewerActionReconciliation = true
     )
 
     // ------------------------------------------------- VER-21I-03  bury on AnkiDroid (backend A)
@@ -531,17 +536,18 @@ class Gate21iReviewerActionRoutingTest {
     }
 
     /**
-     * VER-21I-15 — the **unknown** cell, which is not the degraded one. Keyless AnkiDroid is
-     * production reality (no collection key exists anywhere, DISCOVERY-21-03), so an action admitted
-     * there has a genuinely unknown collection dimension. Unknown must stay disclosed as unknown —
-     * `SessionContinuityVerified` while this process still holds the binding,
-     * `IdentityUnverifiable(NOMINAL)` after process death — it is never reported as a verified
-     * collection match, and it never becomes a blanket retry authorization.
+     * VER-21I-15 — the **unknown** collection cell, distinct from degraded. The fake explicitly
+     * advertises synthetic historical-reconciliation capability so this test isolates the locked
+     * identity rule: neither live session continuity nor nominal unverifiability is an authoritative
+     * collection match. Both OP-M3 routes must block before any provider call.
      */
     @Test
-    fun `an unknown collection is disclosed as unverifiable and authorizes no blind retry`() = runTest {
+    fun `unknown collection blocks OP-M3 under continuity and after process death`() = runTest {
         val b = backendB()
-        val h = ReviewerActionHarness(extraBackends = listOf(b)) // A is keyless AnkiDroid
+        val h = ReviewerActionHarness(
+            extraBackends = listOf(b),
+            authoritativeReviewerActionReconciliation = true
+        ) // A remains keyless, matching production AnkiDroid identity
         h.loadToRating()
         assertNull("the backend presents no collection key", h.fake.currentCollectionIdentity)
         assertNull("…so the session bound none",
@@ -559,27 +565,28 @@ class Gate21iReviewerActionRoutingTest {
 
         val policy = ReviewerActionRoutingPolicy(h.registry)
         val live = policy.reconcileRoute(record, boundIsLiveInThisProcess = true)
-            as ReviewerActionRoute.Routed
-        assertEquals(aId, live.backend.id)
+            as ReviewerActionRoute.Blocked
+        assertEquals("continuity cannot stand in for collection proof",
+            "continuity_is_not_collection_evidence", live.token)
         assertEquals(AnkiIdentityAssurance.SessionContinuityVerified, live.assurance)
         val restored = policy.reconcileRoute(record, boundIsLiveInThisProcess = false)
-            as ReviewerActionRoute.Routed
-        assertEquals(aId, restored.backend.id)
+            as ReviewerActionRoute.Blocked
+        assertEquals("nominally unverifiable identity cannot authorize OP-M3",
+            "reconciliation_requires_authoritative_match", restored.token)
         assertEquals(
             AnkiIdentityAssurance.IdentityUnverifiable(AnkiUnverifiabilityQualifier.NOMINAL),
             restored.assurance)
-        assertFalse(
-            "unknown is never reported as a verified collection match",
-            live.assurance is AnkiIdentityAssurance.AuthoritativeMatch ||
-                restored.assurance is AnkiIdentityAssurance.AuthoritativeMatch)
 
-        // Unknown is not a retry grant either: the machine refuses the blind retry, dispatches
-        // nothing further, and the record keeps its ambiguity, its owner and its parameters.
+        h.send(AnkiStudyEvent.RecoverReviewerAction(h.state.epoch, record.actionId))
+        h.drain()
+        assertEquals(ReviewerActionStatus.AMBIGUOUS, h.store.durableRecords().single().status)
+        assertEquals("no current-state probe is allowed without a collection match",
+            0, h.fake.reviewerActionReconciliationCount)
+
+        // Unknown identity is not a blind-retry grant either; owner and parameters stay immutable.
         val invocations = h.fake.reviewerActionInvocations
         h.send(AnkiStudyEvent.RetryReviewerAction(h.state.epoch, record.actionId))
-        assertTrue(
-            "an unknown collection authorizes no blind retry",
-            h.rejected.contains("anki-action-retry-not-safe"))
+        assertTrue(h.rejected.contains("anki-action-retry-not-safe"))
         assertEquals(invocations, h.fake.reviewerActionInvocations)
         val after = h.store.durableRecords().single()
         assertEquals(ReviewerActionStatus.AMBIGUOUS, after.status)
@@ -670,7 +677,8 @@ class Gate21iReviewerActionRoutingTest {
             ReviewerActionStatus.SUBMITTING, record.status)
         assertEquals(aId, record.backendId)
 
-        // Recovery is a read: it reconciles through A and never replays.
+        // Recovery cannot use current AnkiDroid card state as historical proof: it remains
+        // explicitly uncertain, with no replay and no reconciliation provider call.
         val recovered = h.coordinator().recover(record.actionId)
         val rec = recovered as ReviewerActionRecoveryOutcome.Recovered
         assertEquals(ReviewerActionRecoveryAction.RemainBlocked, rec.decision)
@@ -679,7 +687,7 @@ class Gate21iReviewerActionRoutingTest {
             ReviewerActionStatus.AMBIGUOUS, rec.record.status)
         assertEquals("recovery never replays the mutation", 1, h.fake.reviewerActionInvocations)
         assertEquals(1, h.fake.reviewerActionBoundaryCrossings)
-        assertEquals("reconciliation went to the original backend only", 1, h.fake.reviewerActionReconciliationCount)
+        assertEquals("unknown collection blocks the reconciliation read", 0, h.fake.reviewerActionReconciliationCount)
         assertEquals(0, b.reviewerActionInvocations)
         assertEquals(0, b.reviewerActionReconciliationCount)
     }
@@ -715,7 +723,7 @@ class Gate21iReviewerActionRoutingTest {
     // ------------------------------------------------------------------- VER-21I-20  persist fail
 
     @Test
-    fun `a confirmed action whose APPLIED persistence failed is not resubmitted`() = runTest {
+    fun `a confirmed action whose APPLIED persistence failed stays ambiguous after process death`() = runTest {
         val b = backendB()
         val h = ReviewerActionHarness(extraBackends = listOf(b))
         h.loadToRating()
@@ -724,7 +732,7 @@ class Gate21iReviewerActionRoutingTest {
                 ReviewerActionBackendResult.ConfirmedApplied(
                     ReviewerActionReceipt(aId, "bury", detail = "confirmed_by_fake")),
                 reconciliation = ReviewerActionReconciliationResult.ConfirmedApplied(
-                    ReviewerActionReceipt(aId, "bury", detail = "confirmed_by_state"))))
+                    ReviewerActionReceipt(aId, "bury", detail = "authoritative_fake_receipt"))))
         // Writes 1 (PREPARED) and 2 (SUBMITTING) succeed; write 3 (APPLIED) fails.
         h.store.onDurableWrite = {
             if (h.store.writes.size == 2) h.store.failNextWrites = 1
@@ -744,13 +752,17 @@ class Gate21iReviewerActionRoutingTest {
         val nextEffects = events.filterIsInstance<AnkiStudyEffect.Next>()
         assertEquals("no progression without a durable APPLIED", 0, nextEffects.size)
 
-        // Restart: the only path to APPLIED is reconciliation against A — never a resubmission.
+        // Restart loses the in-memory confirmation. The keyless backend cannot prove this
+        // historical request from current card state, so the record remains unresolved.
         h.restart()
         val recovered = h.coordinator().recover(h.store.durableRecords().single().actionId)
         val rec = recovered as ReviewerActionRecoveryOutcome.Recovered
-        assertEquals(ReviewerActionStatus.APPLIED, rec.record.status)
-        assertEquals("the action was applied exactly once, ever", 1, h.fake.reviewerActionInvocations)
+        assertEquals(ReviewerActionStatus.AMBIGUOUS, rec.record.status)
+        assertEquals("the action is never resubmitted", 1, h.fake.reviewerActionInvocations)
+        assertEquals("AnkiDroid state is not historical reconciliation evidence",
+            0, h.fake.reviewerActionReconciliationCount)
         assertEquals(0, b.reviewerActionInvocations)
+        assertEquals(0, b.reviewerActionReconciliationCount)
     }
 
     // ------------------------------------------------------------------- VER-21I-21  durable applied
@@ -858,7 +870,7 @@ class Gate21iReviewerActionRoutingTest {
             FakeAnkiBackend.ActionStep(
                 ReviewerActionBackendResult.OutcomeUnknown(AnkiError.QueryFailure("lost")),
                 reconciliation = ReviewerActionReconciliationResult.ConfirmedApplied(
-                    ReviewerActionReceipt(aId, "bury", detail = "confirmed_by_state"))))
+                    ReviewerActionReceipt(aId, "bury", detail = "authoritative_fake_receipt"))))
         h.requestAction(ReviewerAction.BuryCard)
         h.drain()
         assertEquals(ReviewerActionStatus.AMBIGUOUS, h.action?.status)
@@ -870,6 +882,52 @@ class Gate21iReviewerActionRoutingTest {
         assertEquals("the original backend alone was reconciled", 1, h.fake.reviewerActionReconciliationCount)
         assertEquals(0, b.reviewerActionReconciliationCount)
         assertEquals(0, b.reviewerActionInvocations)
+    }
+
+    @Test
+    fun `an authoritative collection match still needs the frozen reconciliation capability`() = runTest {
+        val b = backendB()
+        val store = InMemoryReviewerActionStore()
+        val request = ReviewerActionRequest(
+            sessionId = "study-frozen-capability",
+            turnId = ReviewTurnId("turn-frozen-capability"),
+            cardRef = ReviewerActionHarness.card("A", aId).ref,
+            action = ReviewerAction.BuryCard,
+            collectionRef = AnkiCollectionIdentity(aId, ReviewerActionHarness.COLLECTION_KEY),
+            semantics = ReviewerActionSemantics(
+                supportsIdempotentReplay = true,
+                supportsAuthoritativeReconciliation = false
+            )
+        )
+        val seedLedger = store.restart(clock = { 1_000L })
+        seedLedger.create(request.toRecord(1_000L))
+        seedLedger.transition(
+            request.actionId, ReviewerActionStatus.PREPARED, ReviewerActionTransition.EnterMutationBoundary)
+        seedLedger.transition(
+            request.actionId, ReviewerActionStatus.SUBMITTING,
+            ReviewerActionTransition.BackendOutcomeUnknown())
+
+        val h = ReviewerActionHarness(
+            store = store,
+            extraBackends = listOf(b),
+            liveCollectionKey = ReviewerActionHarness.COLLECTION_KEY,
+            authoritativeReviewerActionReconciliation = true
+        )
+        val record = h.store.durableRecords().single()
+        assertFalse("the record did not freeze reconciliation support",
+            record.frozenAuthoritativeReconciliation)
+        val blocked = ReviewerActionRoutingPolicy(h.registry).reconcileRoute(record)
+            as ReviewerActionRoute.Blocked
+        assertEquals("reconciliation_requires_authoritative_match", blocked.token)
+        assertEquals(ReviewerActionHarness.COLLECTION_KEY,
+            (blocked.assurance as AnkiIdentityAssurance.AuthoritativeMatch).collectionKey)
+
+        val recovered = h.coordinator().recover(record.actionId) as ReviewerActionRecoveryOutcome.Recovered
+        assertEquals(ReviewerActionRecoveryAction.RemainBlocked, recovered.decision)
+        assertEquals(ReviewerActionStatus.AMBIGUOUS, recovered.record.status)
+        assertEquals("the live capability cannot widen the frozen promise", 0,
+            h.fake.reviewerActionReconciliationCount)
+        assertEquals(0, b.reviewerActionReconciliationCount)
     }
 
     // ------------------------------------------------------------------- VER-21I-25  unsupported
@@ -958,7 +1016,7 @@ class Gate21iReviewerActionRoutingTest {
                 FakeAnkiBackend.ActionStep(
                     ReviewerActionBackendResult.OutcomeUnknown(AnkiError.QueryFailure("lost")),
                     reconciliation = ReviewerActionReconciliationResult.ConfirmedApplied(
-                        ReviewerActionReceipt(aId, "bury", detail = "confirmed_by_state"))))
+                        ReviewerActionReceipt(aId, "bury", detail = "authoritative_fake_receipt"))))
             h.requestAction(ReviewerAction.BuryCard)
             h.drain()
             assertEquals(ReviewerActionStatus.AMBIGUOUS, h.action?.status)
@@ -1003,7 +1061,7 @@ class Gate21iReviewerActionRoutingTest {
             FakeAnkiBackend.ActionStep(
                 ReviewerActionBackendResult.OutcomeUnknown(AnkiError.QueryFailure("lost-b")),
                 reconciliation = ReviewerActionReconciliationResult.ConfirmedApplied(
-                    ReviewerActionReceipt(bId, "bury", detail = "confirmed_by_state"))))
+                    ReviewerActionReceipt(bId, "bury", detail = "authoritative_fake_receipt"))))
         val yRecord = h.coordinator().perform(
             ReviewerActionRequest(
                 sessionId = "study-B",
@@ -1329,10 +1387,10 @@ class Gate21iReviewerActionRoutingTest {
         assertEquals(0, b.reviewerActionInvocations)
     }
 
-    // ------------------------------------------------------------------- VER-21I-41  read-only
+    // ----------------------------------------- VER-21I-41  keyless historical state is not proof
 
     @Test
-    fun `reconciliation verifies state read-only and never mutates`() = runTest {
+    fun `current card state cannot resolve a keyless ambiguous historical action`() = runTest {
         val b = backendB()
         val h = ReviewerActionHarness(extraBackends = listOf(b))
         h.loadToRating()
@@ -1343,7 +1401,7 @@ class Gate21iReviewerActionRoutingTest {
                     ReviewerActionReceipt(aId, "bury", detail = "confirmed_by_fake")),
                 crashAfterApply = true,
                 reconciliation = ReviewerActionReconciliationResult.ConfirmedApplied(
-                    ReviewerActionReceipt(aId, "bury", detail = "confirmed_by_state"))))
+                    ReviewerActionReceipt(aId, "bury", detail = "synthetic_current_state_observation"))))
         h.requestAction(ReviewerAction.BuryCard)
         val effect = h.takePerformEffect()
         var crashed = false
@@ -1361,11 +1419,12 @@ class Gate21iReviewerActionRoutingTest {
         assertEquals(ReviewerActionStatus.SUBMITTING, record.status)
         h.coordinator().recover(record.actionId)
 
-        assertEquals(ReviewerActionStatus.APPLIED, h.store.durableRecords().single().status)
-        assertEquals("reconciliation is a read: the mutation happened exactly once",
-            1, h.fake.reviewerActionInvocations)
+        assertEquals("the ambiguous historical request remains unresolved",
+            ReviewerActionStatus.AMBIGUOUS, h.store.durableRecords().single().status)
+        assertEquals("recovery does not resubmit the action", 1, h.fake.reviewerActionInvocations)
         assertEquals(1, h.fake.reviewerActionBoundaryCrossings)
-        assertEquals(1, h.fake.reviewerActionReconciliationCount)
+        assertEquals("no card-state probe is permitted without an authoritative collection match",
+            0, h.fake.reviewerActionReconciliationCount)
         assertEquals(0, b.reviewerActionInvocations)
         assertEquals(0, b.reviewerActionBoundaryCrossings)
         assertEquals(0, b.reviewerActionReconciliationCount)

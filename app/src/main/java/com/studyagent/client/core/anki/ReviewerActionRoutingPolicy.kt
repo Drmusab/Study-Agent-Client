@@ -37,31 +37,21 @@ package com.studyagent.client.core.anki
  * AnkiDroid case (no key exists anywhere, DISCOVERY-21-03) — and unknown is never treated as a
  * verified match (`BACKEND_FAILURE_MATRIX` §6, `BACKEND_IDENTITY_CONTRACT` §6.2 row 1).
  *
- * ## DECISION-21I-03 — this family's reconciliation cell
+ * ## DECISION-21I-03 — the locked `OP-M3` matrix applies without a family exception
  *
- * The §3.3 matrix permits `OP-M3` under an authoritative match only when the family also exposes
- * an authoritative reconciliation read; under `SessionContinuityVerified` and
- * `IdentityUnverifiable(NOMINAL)` it blocks, because collection continuity cannot by itself prove
- * that a mutation applied. The reviewer-action family's reconciliation evidence is different in
- * kind from the rating family's: it is **instance-bound card state** — the backend's own
- * read-only read of the *same* card on the *same* configured instance the action targeted
- * (GATE 13 §27, `AnkiBackend.reconcileReviewerAction`) — attributed by
- * `record.backendId == backend.id` ∧ `cardRef.backendId == backend.id` ∧ the semantics frozen at
- * admission (capped by the live capability) ∧ the observed state matching the action's target
- * state. That attribution does not rest on a collection key, and the GATE 13 contract (locked
- * before GATE 21B, protected by INV-21I-34) makes it the resolution path for AnkiDroid
- * bury/suspend, whose backend never carries a key. So for this family:
+ * `OP-M3` is permitted only when **both** conditions hold: the transaction has an authoritative
+ * collection match and the family has authoritative reconciliation capability, frozen at admission
+ * and still advertised live. A read of the card's present flag/queue state is not, by itself,
+ * evidence that a particular historical request applied: another Anki client may have changed that
+ * state, and no transaction-correlated action receipt exists in AnkiDroid's public contract.
  *
- * - `AuthoritativeMismatch` and `IdentityUnverifiable(DEGRADED)` **block** `OP-M3` — a verified
- *   different collection, or a lost key, is mismatch-grade in every family;
- * - `IdentityUnverifiable(NOMINAL)` and `SessionContinuityVerified` **permit** `OP-M3` under the
- *   frozen ∩ live capability — disclosed as unverifiable/continuity, never described as a
- *   verified collection match;
- * - `AuthoritativeMatch` permits `OP-M3` only when the capability is also present.
- *
- * This is the family's answer to the §3.3 cell, recorded here rather than by default — the same
- * mechanism GATE 21H used for the rating family's facts (DECISION-21H-01). It is stated, never
- * hidden: diagnostics report the assurance category verbatim.
+ * Therefore this policy delegates `OP-M3` assurance to the locked
+ * `AnkiIdentityContinuation.continuationVerdict` matrix. `AuthoritativeMismatch`,
+ * `IdentityUnverifiable(DEGRADED)`, `IdentityUnverifiable(NOMINAL)`, and
+ * `SessionContinuityVerified` all block reconciliation. Only `AuthoritativeMatch` can proceed, and
+ * even that cell blocks unless the exact action's frozen and live semantics both advertise
+ * authoritative historical reconciliation. This is not an extension of GATE 13's ledger or status
+ * machine; it is the GATE 21B identity-assurance rule for reaching the existing family reconciler.
  */
 object ReviewerActionFamilyFacts {
 
@@ -74,14 +64,14 @@ object ReviewerActionFamilyFacts {
      *   `ReviewerActionId` before the provider write (GATE 13 §17). It is never a scheduler
      *   observation, so it does not rest on collection identity.
      * - `authoritativeReconciliationAvailable` is taken from the **live** backend semantics for
-     *   this *exact action* (never a per-backend default): a backend whose action has no
-     *   authoritative read (for example AnkiDroid's flag, which has no write path at all at the
-     *   pin) cannot reconcile it, so `OP-M3` stays blocked for it even under a match.
-     * - `familyRecoveryRequiresCollectionProof = false`: the family's process-death recovery rule
-     *   is the record's own durable status plus its own backend (`BACKEND_IDENTITY_CONTRACT`
-     *   §6.1/§6.2, `BACKEND_OWNERSHIP_INVARIANTS` §3.3); it does not require a collection proof,
-     *   and a record whose collection is unknown recovers through the same family rule with the
-     *   collection check inert.
+     *   this *exact action* (never a per-backend default). For `OP-M3`, `reconcileRoute` further
+     *   intersects it with the capability frozen in the record before passing the facts into the
+     *   locked identity matrix; a current-state observation is not historical evidence by itself.
+     * - `familyRecoveryRequiresCollectionProof = false`: the `OP-P` recovery plan preserves each
+     *   record's durable status and exact owner (`BACKEND_IDENTITY_CONTRACT` §6.1/§6.2,
+     *   `BACKEND_OWNERSHIP_INVARIANTS` §3.3); planning the owner's recovery group does not itself
+     *   mutate or reconcile anything. It does **not** grant `OP-M3`: the separate reconciliation
+     *   operation still requires an authoritative collection match.
      * - `backendCurrentlyOffersNoCollectionKey` is passed deliberately (GATE 21C residual
      *   R-21C-04): it is the `OP-R1` degraded-cell condition and is stated, never defaulted.
      */
@@ -153,7 +143,8 @@ class ReviewerActionRoutingPolicy(
 
     /**
      * The collection an action was **admitted against**. Absence is honest evidence, not a
-     * wildcard (see this file's header): it never becomes a match and never blocks by itself.
+     * wildcard: it never becomes a match. For OP-M3, the locked matrix requires a match, so absence
+     * blocks historical reconciliation even when the backend advertises a read capability.
      */
     fun bindingCollectionKey(record: ReviewerActionRecord): String? = record.collectionRef?.collectionKey
 
@@ -217,9 +208,9 @@ class ReviewerActionRoutingPolicy(
     }
 
     /**
-     * The `OP-M3` verdict for one durable record (DECISION-21I-03): the locked matrix's
-     * mismatch/degraded/foreign cells block, and the keyless cells permit reconciliation under
-     * the family's frozen ∩ live capability — disclosed, never described as a verified match.
+     * The `OP-M3` verdict for one durable record. Identity and capability are evaluated by the
+     * same locked continuation matrix used by the other transaction families: a collection match
+     * is mandatory, and a match alone is not historical-action evidence.
      */
     fun reconcileRoute(
         record: ReviewerActionRecord,
@@ -237,54 +228,26 @@ class ReviewerActionRoutingPolicy(
             live = AnkiIdentityObservation(record.backendId, backend.currentCollectionIdentity?.collectionKey),
             boundIsLiveInThisProcess = boundIsLiveInThisProcess
         )
-        return when (check) {
-            is AnkiIdentityCheck.ForeignBackend -> blocked(
-                blockReasonToken(AnkiContinuationBlockReason.FOREIGN_BACKEND),
-                blockError(AnkiContinuationBlockReason.FOREIGN_BACKEND),
-                operation
+        val facts = ReviewerActionFamilyFacts.of(backend, record.action).copy(
+            authoritativeReconciliationAvailable = familyReconciliationAvailable(record, backend)
+        )
+        return when (val verdict = AnkiIdentityContinuation.continuationVerdict(operation, check, facts)) {
+            is AnkiContinuationVerdict.Permitted ->
+                ReviewerActionRoute.Routed(backend, operation, verdict.assurance)
+            is AnkiContinuationVerdict.Blocked -> blocked(
+                blockReasonToken(verdict.reason),
+                blockError(verdict.reason),
+                operation,
+                (check as? AnkiIdentityCheck.SameBackend)?.assurance
             )
-            is AnkiIdentityCheck.SameBackend -> when (check.assurance) {
-                is AnkiIdentityAssurance.AuthoritativeMatch ->
-                    if (familyReconciliationAvailable(record, backend)) {
-                        ReviewerActionRoute.Routed(backend, operation, check.assurance)
-                    } else blocked(
-                        blockReasonToken(AnkiContinuationBlockReason.RECONCILIATION_REQUIRES_AUTHORITATIVE_MATCH),
-                        blockError(AnkiContinuationBlockReason.RECONCILIATION_REQUIRES_AUTHORITATIVE_MATCH),
-                        operation,
-                        check.assurance
-                    )
-                is AnkiIdentityAssurance.AuthoritativeMismatch -> blocked(
-                    blockReasonToken(AnkiContinuationBlockReason.COLLECTION_MISMATCH),
-                    blockError(AnkiContinuationBlockReason.COLLECTION_MISMATCH),
-                    operation,
-                    check.assurance
-                )
-                is AnkiIdentityAssurance.IdentityUnverifiable ->
-                    if (check.assurance.qualifier == AnkiUnverifiabilityQualifier.DEGRADED) {
-                        blocked(
-                            blockReasonToken(AnkiContinuationBlockReason.IDENTITY_UNVERIFIABLE_DEGRADED),
-                            blockError(AnkiContinuationBlockReason.IDENTITY_UNVERIFIABLE_DEGRADED),
-                            operation,
-                            check.assurance
-                        )
-                    } else {
-                        // DECISION-21I-03: a keyless binding was never promised a verification.
-                        // The family's instance-bound card-state evidence governs; the
-                        // capability gate below still decides whether it exists at all.
-                        ReviewerActionRoute.Routed(backend, operation, check.assurance)
-                    }
-                AnkiIdentityAssurance.SessionContinuityVerified ->
-                    // DECISION-21I-03: same rationale — continuity plus instance-bound evidence,
-                    // disclosed as continuity, never as a collection match.
-                    ReviewerActionRoute.Routed(backend, operation, check.assurance)
-            }
         }
     }
 
     /**
      * The frozen promise ∩ live capability (GATE 13 §28): a capability can only shrink, never
-     * grow, and an action that was admitted without a verified reconciliation read can never be
-     * reconciled afterwards.
+     * grow, and an action admitted without authoritative historical-reconciliation support can
+     * never gain it later. The OP-M3 continuation matrix separately requires an authoritative
+     * collection match; this helper is never a substitute for that identity proof.
      */
     private fun familyReconciliationAvailable(
         record: ReviewerActionRecord,

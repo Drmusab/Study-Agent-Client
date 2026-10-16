@@ -1,4 +1,4 @@
-# GATE 21I — Verification Report (PART VII §1–16)
+# GATE 21I — Verification Report (PART VII §1–17)
 
 **Gate:** 21I — Reviewer Action Routing & Recovery (parent: GATE 21 — Multi-Backend Anki Selection /
 Hybrid Mode; sub-gate 21I of 21A–21N).
@@ -6,11 +6,16 @@ Hybrid Mode; sub-gate 21I of 21A–21N).
 **Companion:** `docs/GATE_21I_REVIEWER_ACTION_ROUTING.md` (contract, decisions, capability truth,
 residual risks, 21J handoff).
 
-**Gate-lock decision: LOCKED** at the harness-verified scope — every mandatory audit and every
-applicable verification below passed on evidence actually executed in this environment. Two items are
-reported **BLOCKED** and neither is claimable here: real-backend validation (VER-21I-43 — no
-device/emulator, no production PC Anki backend) and every Gradle task (PART V — the wrapper cannot
-download its distribution; no Android SDK). Both are the same limitations GATE 21G/21H carried.
+**Historical baseline decision:** the earlier report recorded GATE 21I as LOCKED at commit
+`db69d4d8bd22f3527c7588ce3b4ba714c39d8ef3`. That baseline allowed a reviewer-action-specific
+`OP-M3` exception that conflicts with the locked GATE 21B matrix. Its source claims and verification
+results are historical; the exception is corrected by the 2026-10-16 re-verification in §17 below.
+
+**Current re-verification (2026-10-16, repository HEAD `a70a823eb36dffff3a92ce789dc2fe2056146071`,
+branch `arena/c0924550-study-agent-client`): NOT LOCKED / BLOCKED.** The implementation and supported
+JVM harness checks pass, but Gradle `testDebugUnitTest` could not start because the wrapper could not
+retrieve Gradle 8.7, and real AnkiDroid/device validation is unavailable. GATE 21J is not authorized
+or started by this re-verification. See §17 for exact evidence and remaining blockers.
 
 ---
 
@@ -658,7 +663,7 @@ assembleDebug assembleRelease` before this gate's claims are treated as device-g
 | INV-21I-31 GATE 11 stays a separate authority | **PASS** | separate policy, plan, ledger, vocabulary; audit test 10 |
 | INV-21I-32 no offline blind-mutation queue | **PASS** | no `OfflineQueue`/`WorkManager` token; audit test 1 |
 | INV-21I-33 no private AnkiDroid DB/scheduler access | **PASS** | public `AnkiDroidApiContract` provider path only; audit test 10 |
-| INV-21I-34 GATE 10–21H guarantees not weakened | **PASS** | 2 584/2 584 full-suite regression; 21G/21H seams untouched; DECISION-21I-03 defers to the GATE 13 contract rather than overriding it |
+| INV-21I-34 GATE 10–21H guarantees not weakened | **Historical PASS; current correction verified in §17** | The prior baseline claim deferred to GATE 13's card-state reconciliation assertion. The current implementation instead applies the locked GATE 21B OP-M3 matrix; 21G/21H seams remain untouched. |
 
 ## §14 Residual risks
 
@@ -671,20 +676,21 @@ Backend flag/bury/suspend asymmetry          AnkiDroid: bury/suspend verified bo
                                              impossible. PC: no backend at all, so every PC action is a
                                              default typed refusal in production and a fixture in tests
                                              (R-21I-04). Nothing was harmonized by inventing behaviour.
-Unknown collection identity                  AnkiDroid exposes no collection key anywhere, so its
-                                             actions carry no binding evidence: OP-M3 proceeds under
-                                             NOMINAL/continuity with instance-bound card-state evidence,
-                                             disclosed verbatim, and an authoritative match is
-                                             unreachable for that backend (R-21I-01, DECISION-21I-03).
+Unknown collection identity                  AnkiDroid exposes no collection key or transaction-correlated
+                                             action receipt. OP-M3 is blocked in both NOMINAL and
+                                             session-continuity cells; no current card-state observation
+                                             is accepted as historical proof. An authoritative match
+                                             remains necessary for any future reconciliation path
+                                             (corrected DECISION-21I-03).
 Historical records missing action scope      Schema v1 is matched exactly; a record whose action key or
                                              derived id does not resolve makes the snapshot Unreadable.
                                              Nothing is migrated by inference and nothing is erased to
                                              unblock startup (R-21I-07).
-Concurrent edits from another Anki client    Card-state reconciliation can observe a state another
-                                             client produced. Positive evidence is accepted only under
-                                             the frozen ∩ live capability and the record's own
-                                             backend/card; the opposite state never proves
-                                             non-application (R-21I-03).
+Concurrent edits from another Anki client    A later card-state read cannot attribute state to a
+                                             particular historical request. AnkiDroid's adapter now
+                                             advertises no authoritative historical reconciliation
+                                             and returns Unresolved without reading the provider;
+                                             the durable record remains AMBIGUOUS (R-21I-03).
 Ambiguous actions that cannot be resolved    AMBIGUOUS is terminal-for-now: it survives restart,
     automatically                            session end, preference change and disconnect, blocks
                                              progression, and is surfaced as VerificationRequired.
@@ -722,49 +728,121 @@ constraint for the next sub-gate:
 > that exists today is one-way and read-only: `NoteEditSafetyPolicy` consults the reviewer-action
 > ledger to refuse an edit overlapping an unresolved action.
 
-## §16 Gate lock decision
+## §16 Historical baseline decision (superseded by current §17)
+
+The following is the prior report's conclusion at its baseline commit, not the current decision.
+Its `OP-M3` exception was later identified as conflicting with the locked GATE 21B matrix.
 
 ```text
-GATE 21I:                       LOCKED (harness-verified scope)
+HISTORICAL BASELINE:            db69d4d8bd22f3527c7588ce3b4ba714c39d8ef3
+HISTORICAL GATE STATUS:         LOCKED at harness scope (baseline report only)
+HISTORICAL VERIFICATION:        PASS as recorded in §§0–15; those runs predate the §17 correction
+HISTORICAL GRADLE/DEVICE ITEMS: BLOCKED
 
-ACTION OWNERSHIP:               PASS
-EXACT BACKEND ROUTING:          PASS
-ACTION SCOPE:                   PASS
-COLLECTION SAFETY:              PASS
-DURABLE SUBMISSION:             PASS
-AMBIGUOUS RECOVERY:             PASS
-RETRY SAFETY:                   PASS
-RATING MUTUAL EXCLUSION:        PASS
-SESSION PROGRESSION:            PASS
-ARCHITECTURE AUDIT:             PASS  (AUDIT-21I-01…27, machine-checked where structural)
-VERIFICATION:                   PASS  (VER-21I-01…42, 44; VER-21I-43 BLOCKED — no device, no PC backend)
-BUILD:                          PASS at the harness scope / BLOCKED for every Gradle task (environmental)
-
-NEXT AUTHORIZED SUB-GATE:       21J — Note Editing Backend Binding
+CURRENT GATE STATUS:            see §17 — NOT LOCKED / BLOCKED
+NEXT SUB-GATE:                  not authorized by this re-verification; 21J not started
 ```
+
+The ownership invariants remain in scope: original-backend-only routing, immutable backend/action
+identity, no AUTO recovery, no blind retry of `AMBIGUOUS`, card-scoped actions only, backend-authoritative
+session effects, separate GATE 11 rating authority, and the existing GATE 13 ledger/coordinator/status
+owner. The correction changes only OP-M3 eligibility and AnkiDroid's historical-reconciliation claim.
+
+**Historical post-gate statement.** The earlier run reported no production edits and locked the gate at
+the harness scope. That statement described its then-current tree and is superseded by the production
+correction and current verification in §17.
+
+Suggested commit message (used by the historical baseline): `fix(gate21i): preserve original backend for reviewer actions and recovery`
+
+## §17 Current re-verification and contract correction (2026-10-16)
+
+### §17.1 Repository and prerequisite evidence
 
 ```text
-GATE 21I — REVIEWER ACTION ROUTING LOCKED
-
-REVIEWER ACTION:                ORIGINAL BACKEND ONLY
-BACKEND OWNERSHIP:              DURABLY IMMUTABLE
-ACTION TARGET/SCOPE:            BACKEND-QUALIFIED (card scope only; no note/sibling action exists)
-AUTO RECOVERY ROUTING:          PROHIBITED
-CROSS-BACKEND ACTION REPLAY:    PROHIBITED
-AMBIGUOUS ACTION:               NO BLIND RETRY
-RETRY_ALLOWED:                  ACTION-SPECIFIC EVIDENCE REQUIRED (frozen ∩ live semantics)
-POST-ACTION SESSION EFFECT:     BACKEND-AUTHORITATIVE (nextCardAllowed ∧ APPLIED)
-RATING TRANSACTION:             SEPARATE GATE 11 AUTHORITY
-REVIEWER ACTION LEDGER:         SINGLE EXISTING GATE 13 OWNER
+REPOSITORY:                  Drmusab/Study-Agent-Client
+HEAD BEFORE EDITS:           a70a823eb36dffff3a92ce789dc2fe2056146071
+BRANCH:                      arena/c0924550-study-agent-client
+WORKTREE BEFORE EDITS:       clean
+SCOPE:                       GATE 21I only; no GATE 21J work
 ```
 
-**Post-gate statement.** This session changed no production source: the 21I implementation found in
-the tree at `db69d4d` was inspected, executed and audited rather than assumed, and it held. What this
-session added is verification and documentation — three missing verifications (VER-21I-04, VER-21I-06,
-the VER-21I-15 unknown-assurance cell), corrected VER labelling, the machine-checked PART II audit
-(`Gate21iArchitectureAuditTest`, 10 tests, 6 mutants killed across both audit and behavioural halves),
-and the two authoritative gate documents. The gate is locked at harness scope; CI must re-run the
-Gradle tasks, and real-backend validation (VER-21I-43) remains outstanding for the whole reviewer-action
-family exactly as it does for GATE 11 and GATE 13.
+GATE 13's existing ledger, coordinator, status vocabulary, and `ReviewAction`/rating exclusion path
+were inspected and preserved. GATE 21N records GATE 21A–21H as locked, but the primary GATE 21E
+re-verification document still says **BLOCKED** and GATE 21N records a wording/evidence gap. That
+prerequisite-status discrepancy was not rewritten or silently resolved by this GATE 21I change; it
+remains a dependency caveat.
 
-Suggested commit message (used): `fix(gate21i): preserve original backend for reviewer actions and recovery`
+### §17.1.1 Pre-edit source, test, persistence, and gate inventory
+
+| Area inspected before editing | Observed repository evidence |
+|---|---|
+| GATE 13 action authority | Existing `ReviewerActionRecord`, five-status `ReviewerActionStatus`, `ReviewerActionLedger`, `ReviewerActionCoordinator`, admission/recovery policy, and rating/action exclusion path were present and wired. The GATE 13 contract remains the sole ledger/coordinator/status authority. |
+| Durable persistence | `DataStoreReviewerActionStore` and the versioned action-ledger codec persist backend-qualified action records and unresolved statuses. No schema, status, or persistence ownership change was needed. |
+| GATE 21I routing/recovery | `ReviewerActionRoutingPolicy`, `ReviewerActionRecovery`, `AnkiStudyEffectExecutor`, AnkiDroid backend/committer, the fake backend, reviewer-action harness, routing/endurance tests, and architecture audit were inspected. The prior OP-M3 route admitted keyless continuity/nominal assurance despite GATE 21B. |
+| Backend contract evidence | Pinned AnkiDroid v2.24.1 bury/suspend writes exist, but no transaction-correlated action receipt or collection key exists. A later provider card-state query could reflect another Anki client, so it could not serve as historical action proof. Flag mutation remains unsupported. |
+| Existing test evidence | Behavioral, crash-window/endurance, coordinator/machine, and architecture-audit coverage existed. The fake's default reconciliation capability incorrectly mirrored the old AnkiDroid claim, so it was changed to default-off; synthetic authoritative tests now opt in explicitly. |
+| Gate evidence | GATE 21B's locked OP-M3 matrix requires authoritative collection match plus family reconciliation capability. GATE 21N summarizes 21A–21H as locked; GATE 21E's primary re-verification still says BLOCKED, as recorded above. The evidence conflict was left unresolved and disclosed. |
+| Build/runtime environment | No cached Gradle 8.7 distribution or Android SDK variables were available. A JDK was obtained for the Gradle-free JVM harness only; it does not turn harness results into an official Android build. |
+
+### §17.2 Finding and correction
+
+The locked `BACKEND_IDENTITY_CONTRACT.md` §3.3 / `GATE_21B_CONTRACT_LOCK.md` requires `OP-M3` to have
+**both** (1) an authoritative reconciliation capability and (2) an authoritative collection match.
+The prior 21I family exception incorrectly permitted `SessionContinuityVerified` and
+`IdentityUnverifiable(NOMINAL)`. Current card flag/queue state is not transaction-correlated evidence
+that a particular historical request applied; another Anki client may have changed that state.
+
+Corrective changes, with no edits to GATE 21B and no new transaction authority:
+
+- `ReviewerActionRoutingPolicy.reconcileRoute()` now delegates to the shared locked continuation
+  matrix, with the capability reduced to the record's frozen promise ∩ the exact backend's live claim.
+  Mismatch, degraded, nominal-unverifiable, and continuity cells block before provider access.
+- `AnkiDroidBackend` now advertises `supportsAuthoritativeReconciliation = false` for bury/suspend and
+  returns `Unresolved` for direct historical reconciliation calls without reading the provider.
+  `AnkiDroidReviewerActionCommitter.reconcile()` also refuses without a card-state read. Immediate
+  before/after checks used to classify a synchronous mutation remain distinct from historical OP-M3.
+- Tests now cover the exact matrix, frozen/live capability intersection, original-backend behavior,
+  keyless ambiguity across crash windows, and the real AnkiDroid adapter's zero-query refusal.
+- The existing GATE 13 ownership architecture and five statuses are unchanged. `GATE_13_REVIEWER_ACTIONS.md`
+  records this backend-evidence correction without reopening GATE 13's ledger/coordinator contract.
+
+### §17.3 Verification actually executed
+
+The repository's Gradle-free JVM harness was bootstrapped using `tools/jvm-harness/bin/bootstrap-sandbox.sh`.
+Its Kotlin 2.3 / stubbed Android-JVM environment is **not equivalent to the Gradle/Android build**; see
+`tools/jvm-harness/README.md` for exclusions and substitutions.
+
+| Check | Result |
+|---|---|
+| `tools/jvm-harness/bin/build.sh all` — main scope | **PASS** — 0 errors, 328 source files |
+| `tools/jvm-harness/bin/build.sh all` — Compose closure | **PASS** — 0 errors, 24 source files plus 46 stubs |
+| `tools/jvm-harness/bin/build.sh all` — test scope | **PASS** — 0 errors, 251 source files |
+| `run.sh 'Gate21i'` | **PASS** — 4 classes, 59 tests, 59 passed |
+| `run.sh 'ReviewerAction|Gate13'` | **PASS** — 8 classes, 148 tests, 148 passed |
+| Full `run.sh` regression suite | **PASS** — 219 classes, 2,647 tests, 2,647 passed, 0 failed, 0 ignored |
+| `git diff --check` | **PASS** — no whitespace errors in the final patch |
+| `./gradlew testDebugUnitTest --no-daemon` | **BLOCKED** — wrapper could not download Gradle 8.7 (`SSLHandshakeException`; remote host terminated handshake), so Gradle did not start |
+| Android-device / real AnkiDroid validation | **BLOCKED / NOT RUN** — no device or emulator available |
+| Real PC backend validation | **BLOCKED / NOT RUN** — no production PC Anki backend exists |
+
+One initial `Gate21i` harness attempt timed out because the new adapter test attached the long-lived
+backend fixture to the foreground test scope. The fixture was moved to `backgroundScope`, tests were
+recompiled, and the final GATE 21I and full-suite runs above passed. The timeout is not counted as a
+passing test.
+
+### §17.4 Current gate decision
+
+```text
+GATE 21I IMPLEMENTATION:       OP-M3 now follows locked GATE 21B; AnkiDroid current state cannot
+                               resolve historical ambiguity
+GATE 21I HARNESS AUDIT:        PASS (Gate21iArchitectureAuditTest and behavioral/endurance tests)
+GATE 21I JVM REGRESSION:       PASS (2,647 / 2,647 harness tests)
+GRADLE / ANDROID BUILD:        BLOCKED (Gradle distribution unavailable)
+REAL ANKIDROID VALIDATION:     BLOCKED / NOT RUN
+PREREQUISITE STATUS CAVEAT:    GATE 21E primary evidence still conflicts with later 21N summary
+OVERALL GATE STATUS:           NOT LOCKED / BLOCKED
+NEXT SUB-GATE:                 21J NOT AUTHORIZED OR STARTED
+```
+
+No current-device or backend behavior is claimed as tested. Re-locking requires resolution of the
+prerequisite evidence and successful mandatory Gradle/Android and applicable real-backend checks.

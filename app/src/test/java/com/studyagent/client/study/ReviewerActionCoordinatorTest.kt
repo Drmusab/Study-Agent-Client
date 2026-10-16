@@ -41,7 +41,7 @@ class ReviewerActionCoordinatorTest {
         backendId = backend,
         collectionRef = null,
         semantics = ReviewerActionSemantics(
-            supportsIdempotentReplay = true, supportsAuthoritativeReconciliation = true)
+            supportsIdempotentReplay = true, supportsAuthoritativeReconciliation = false)
     )
 
     private class Fixture(
@@ -50,8 +50,8 @@ class ReviewerActionCoordinatorTest {
         var now = 1_000L
         val clock: () -> Long = { now }
         // The fake models bury/suspend *and* flag writes here, so the whole family can be driven
-        // through the coordinator; its per-action semantics still mirror the pinned contract rules
-        // (bury/suspend verified in both directions, a flag not reconcilable).
+        // through the coordinator. Its default action semantics mirror the pinned AnkiDroid limit:
+        // the write actions exist, but a current card-state read cannot reconcile history.
         val fake = FakeAnkiBackend(
             id = AnkiBackendId.AnkiDroidLocal,
             decks = emptyList(),
@@ -183,7 +183,7 @@ class ReviewerActionCoordinatorTest {
         assertTrue(again is ReviewerActionOutcome.Ambiguous)
         assertEquals("never replayed", 1, fixture.fake.reviewerActionInvocations)
 
-        // Recovery with unresolved evidence stays AMBIGUOUS and still does not touch the backend.
+        // Keyless historical recovery stays AMBIGUOUS and is blocked before the provider read.
         val recovered = fixture.coordinator.recover(request(ReviewerAction.BuryCard).actionId)
         assertTrue(recovered is ReviewerActionRecoveryOutcome.Recovered)
         assertEquals(
@@ -191,8 +191,9 @@ class ReviewerActionCoordinatorTest {
             (recovered as ReviewerActionRecoveryOutcome.Recovered).decision
         )
         assertEquals(ReviewerActionStatus.AMBIGUOUS, recovered.record.status)
-        assertEquals("recovery is read-only", 1, fixture.fake.reviewerActionInvocations)
-        assertEquals(1, fixture.fake.reviewerActionReconciliationCount)
+        assertEquals("recovery never replays", 1, fixture.fake.reviewerActionInvocations)
+        assertEquals("OP-M3 is blocked before the provider read", 0,
+            fixture.fake.reviewerActionReconciliationCount)
     }
 
     @Test
@@ -227,7 +228,7 @@ class ReviewerActionCoordinatorTest {
     // --------------------------------------------------------------------- VERIFICATION 9/10
 
     @Test
-    fun `restarting from submitting replays nothing and requires reconciliation`() = runBlocking {
+    fun `keyless submitting recovery stays blocked without a historical reconciliation call`() = runBlocking {
         val fixture = Fixture()
         fixture.fake.scriptActions(
             FakeAnkiBackend.ActionStep(ReviewerActionBackendResult.OutcomeUnknown(AnkiError.QueryFailure("lost")))
@@ -241,22 +242,22 @@ class ReviewerActionCoordinatorTest {
         assertTrue("a restarted process must answer from the ledger", outcome is ReviewerActionOutcome.Ambiguous)
         assertEquals("no backend replay after restart", before, fixture.fake.reviewerActionInvocations)
 
-        // Recovery reconciles read-only, and an unresolved answer keeps the record blocked.
+        // The keyless AnkiDroid-shaped fake cannot prove a historical action from card state.
         val recovered = fixture.coordinator.recover(actionId)
         assertTrue(recovered is ReviewerActionRecoveryOutcome.Recovered)
         assertEquals(ReviewerActionStatus.AMBIGUOUS, (recovered as ReviewerActionRecoveryOutcome.Recovered).record.status)
-        assertEquals("reconciliation is a read", before + 0, fixture.fake.reviewerActionInvocations)
-        assertEquals(1, fixture.fake.reviewerActionReconciliationCount)
+        assertEquals("no backend replay after recovery", before, fixture.fake.reviewerActionInvocations)
+        assertEquals("OP-M3 is blocked before the provider read", 0, fixture.fake.reviewerActionReconciliationCount)
     }
 
     @Test
-    fun `reconciliation with positive evidence resolves an ambiguous bury to applied`() = runBlocking {
+    fun `a positive current-state observation does not reconcile a keyless historical bury`() = runBlocking {
         val fixture = Fixture()
         val receipt = ReviewerActionReceipt(
             backendId = backend,
             actionKey = ReviewerAction.BuryCard.key,
             cardState = ReviewerCardState.fromQueue(ReviewerCardState.QUEUE_MANUALLY_BURIED),
-            detail = "reconciled_by_card_state"
+            detail = "synthetic_current_state_observation"
         )
         fixture.fake.scriptActions(
             FakeAnkiBackend.ActionStep(
@@ -267,10 +268,13 @@ class ReviewerActionCoordinatorTest {
         fixture.coordinator.perform(request(ReviewerAction.BuryCard))
         val recovered = fixture.coordinator.recover(request(ReviewerAction.BuryCard).actionId)
         val recoveredRecord = (recovered as ReviewerActionRecoveryOutcome.Recovered)
-        assertEquals(ReviewerActionRecoveryAction.ResumeApplied, recoveredRecord.decision)
-        assertEquals(ReviewerActionStatus.APPLIED, recoveredRecord.record.status)
-        assertEquals(ReviewerActionResolution.RECONCILED_APPLIED, recoveredRecord.record.resolution)
-        assertEquals("reconciliation never mutates", 1, fixture.fake.reviewerActionBoundaryCrossings)
+        assertEquals(ReviewerActionRecoveryAction.RemainBlocked, recoveredRecord.decision)
+        assertEquals(ReviewerActionStatus.AMBIGUOUS, recoveredRecord.record.status)
+        assertEquals(ReviewerActionResolution.RECONCILIATION_UNRESOLVED, recoveredRecord.record.resolution)
+        assertEquals("no reconciliation provider read is permitted without a collection match",
+            0, fixture.fake.reviewerActionReconciliationCount)
+        assertEquals("the mutation boundary was crossed only once",
+            1, fixture.fake.reviewerActionBoundaryCrossings)
     }
 
     @Test
@@ -391,7 +395,8 @@ class ReviewerActionCoordinatorTest {
     fun `the frozen capability snapshot comes from the backend's own contract`() {
         val refusing = FakeAnkiBackend(
             initialCapabilities = FakeAnkiBackend.REVIEW_ACTION_CAPABILITIES,
-            instanceId = "gate13-caps-none")
+            instanceId = "gate13-caps-none",
+            authoritativeReviewerActionReconciliation = true)
         val snapshot = refusing.reviewerActionCapabilities()
         assertEquals(
             listOf(ReviewerActionKind.BURY, ReviewerActionKind.SUSPEND),

@@ -49,8 +49,10 @@ value class ReviewerActionId(val value: String) {
  * record, not a copy of the card.
  *
  * A receipt is *not* necessarily backend-issued: the pinned AnkiDroid public contract has no action
- * receipt, so its gateway produces one from the post-mutation card-state read
- * (`queue == desired queue`). [receiptId] stays null there — a fabricated id would be a lie.
+ * receipt, so its committer may produce one from the **immediate post-mutation** card-state read
+ * (`queue == desired queue`) to classify that synchronous call. It is not a transaction-correlated
+ * historical receipt and cannot resolve a later ambiguous record (`OP-M3`). [receiptId] stays null
+ * there — a fabricated id would be a lie.
  */
 data class ReviewerActionReceipt(
     val backendId: AnkiBackendId,

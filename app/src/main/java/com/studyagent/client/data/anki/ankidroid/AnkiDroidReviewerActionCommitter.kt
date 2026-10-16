@@ -27,9 +27,9 @@ import com.studyagent.client.core.common.AppLogger
  *
  * Why step 6 exists: the pinned v2.24.1 provider resolves the card, calls the scheduler and
  * swallows `RuntimeException` while still answering one updated row (`AnkiDroidApiContract` GATE 13
- * table). A returned row count is therefore never treated as success — the *card's own queue* is the
- * only positive evidence, exactly as the GATE 11 committer uses counters instead of trusting the
- * answer call's return value.
+ * table). A returned row count is therefore never treated as success. The immediate before/after
+ * read is used only to classify this synchronous call; it is not transaction-correlated historical
+ * evidence and is never used to recover a later `AMBIGUOUS` record (GATE 21B `OP-M3`).
  *
  * Failure semantics per action are answered from the pinned backend rather than assumed, and each
  * action is audited separately (§28):
@@ -37,8 +37,8 @@ import com.studyagent.client.core.common.AppLogger
  * | Action | Retry after `ConfirmedNotApplied` | Retry after `OutcomeUnknown` | Verified semantics |
  * |---|---|---|---|
  * | Flag | n/a — the pinned contract cannot express it (`UnsupportedAction`) | n/a | unverified |
- * | Bury | safe: a bury that provably did not apply leaves the card untouched | **never** (INV-13-12) | idempotent replay (desired-state check), authoritative reconciliation (card-state read) |
- * | Suspend | safe, same reasoning | **never** | idempotent replay (desired-state check), authoritative reconciliation (card-state read) |
+ * | Bury | safe only after transaction-correlated non-application evidence | **never** (INV-13-12) | desired-state preflight for an explicitly permitted retry; no authoritative historical reconciliation |
+ * | Suspend | safe, same reasoning | **never** | desired-state preflight for an explicitly permitted retry; no authoritative historical reconciliation |
  *
  * A *durable* ledger sits above this class (GATE 13 §14): this committer never writes transaction
  * truth, it only reports what the backend did. The ledger is what makes the same decision survive a
@@ -129,34 +129,24 @@ internal class AnkiDroidReviewerActionCommitter(
     }
 
     /**
-     * §27 — read-only reconciliation of an unresolved action. It performs **no** mutation: the only
-     * provider traffic is the card-state read this class already uses for verification.
-     *
-     * Only a positive observation is trusted: the card is in the state the action wanted, so the
-     * action is in effect. Anything else is [ReviewerActionReconciliationResult.Unresolved] rather
-     * than "not applied" — the pinned semantics are day-scoped (a bury expires at the next day
-     * rollover, a suspend can be undone by the user in AnkiDroid), so "not currently buried" cannot
-     * prove "was never buried".
+     * GATE 21B `OP-M3` — current card state is not a transaction-correlated historical receipt.
+     * A matching bury/suspend state may have been set by another Anki client (and may later be
+     * undone or expire), so this adapter cannot resolve an ambiguous request from that observation.
+     * Refuse without a provider read; the action remains `AMBIGUOUS` until authoritative evidence
+     * exists under a future backend contract.
      */
+    @Suppress("UNUSED_PARAMETER")
     suspend fun reconcile(
         authority: String,
         card: AnkiCardRef,
         action: ReviewerAction
     ): ReviewerActionReconciliationResult {
-        val desiredQueue = desiredQueueFor(action)
-            ?: return ReviewerActionReconciliationResult.Unresolved(
-                AnkiError.UnsupportedAction(action.key))
-        val observed = when (val read = cardStates.readCardState(authority, card)) {
-            is AnkiResult.Success -> read.value
-            is AnkiResult.Failure -> return ReviewerActionReconciliationResult.Unresolved(read.error)
+        if (card.backendId != backendId) {
+            return ReviewerActionReconciliationResult.Unresolved(
+                AnkiError.InvalidRequest("card_ref_foreign_backend"))
         }
-        return if (observed.queue == desiredQueue) {
-            ReviewerActionReconciliationResult.ConfirmedApplied(
-                receipt(action, observed.queue, "reconciled_by_card_state"))
-        } else {
-            ReviewerActionReconciliationResult.Unresolved(
-                AnkiError.Unknown("card_state_not_desired"))
-        }
+        return ReviewerActionReconciliationResult.Unresolved(
+            AnkiError.UnsupportedApi(null, 0, "action_reconciliation_unsupported"))
     }
 
     /** The queue the pinned scheduler leaves behind for one action. Flag has none (§28). */

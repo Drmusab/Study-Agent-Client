@@ -188,8 +188,9 @@ class AnkiDroidBackend(
     private val committer: AnkiDroidRatingCommitter? = ratingGateway?.let { AnkiDroidRatingCommitter(it, clock) }
 
     /**
-     * GATE 13 — the reviewer-action protocol. Needs both writers: the action gateway for the one
-     * provider mutation and the rating gateway for the read-only card-state evidence.
+     * GATE 13 — the reviewer-action protocol. Needs the action gateway for its one provider
+     * mutation and the rating gateway for immediate pre/post card-state checks that classify that
+     * synchronous call. Those checks are not historical `OP-M3` evidence; recovery is unsupported.
      */
     private val reviewerActionCommitter: AnkiDroidReviewerActionCommitter? =
         reviewerActionGateway?.let { actions ->
@@ -1144,28 +1145,28 @@ class AnkiDroidBackend(
     }
 
     /**
-     * GATE 13 §28 — the audited semantics of the pinned contract, per action.
+     * GATE 13 / GATE 21I — audited semantics of the pinned contract, per action.
      *
-     * Bury/suspend: the committer checks the card's own queue *before* dispatching and reports the
-     * desired state without a provider write (`already_in_desired_state`), which is the audited
-     * idempotent-replay path; and the immediate post-mutation card-state read is authoritative
-     * evidence for both directions of reconciliation. Flag: the pinned contract cannot express it
-     * at all, so nothing is claimed.
+     * Bury/suspend retain the audited state-setting retry behavior, but do **not** advertise
+     * authoritative historical reconciliation. The public provider has no action receipt or
+     * transaction correlation key; a later card-state read cannot prove that this particular
+     * durable request produced the observed state (another Anki client may have changed it).
+     * `OP-M3` therefore stays unsupported on AnkiDroid. Flag remains inexpressible at the pin.
      */
     override fun reviewerActionSemantics(action: ReviewerAction): ReviewerActionSemantics =
         when (action.kind) {
             ReviewerActionKind.BURY, ReviewerActionKind.SUSPEND -> ReviewerActionSemantics(
                 supportsIdempotentReplay = true,
-                supportsAuthoritativeReconciliation = true
+                supportsAuthoritativeReconciliation = false
             )
             ReviewerActionKind.FLAG -> ReviewerActionSemantics.UNVERIFIED
         }
 
     /**
-     * GATE 13 §27 — read-only reconciliation through the same card-state evidence the committer
-     * uses after a mutation. It dispatches nothing: a positive observation confirms the action is
-     * in effect, and anything else stays unresolved (bury is day-scoped and both operations can be
-     * undone outside Study-Agent, so absence of the desired state proves nothing).
+     * GATE 21I / locked GATE 21B — the pinned provider has no transaction-correlated action receipt.
+     * Its current flag/queue state cannot prove whether this particular historical request applied,
+     * so AnkiDroid exposes no authoritative `OP-M3` path. Return `Unresolved` without reading the
+     * provider; the family reconciler also checks this false capability before reaching this method.
      */
     override suspend fun reconcileReviewerAction(
         request: ReconcileReviewerActionRequest
@@ -1174,19 +1175,8 @@ class AnkiDroidBackend(
             return ReviewerActionReconciliationResult.Unresolved(
                 AnkiError.InvalidRequest("card_ref_foreign_backend"))
         }
-        val performer = reviewerActionCommitter
-            ?: return ReviewerActionReconciliationResult.Unresolved(
-                AnkiError.UnsupportedAction(request.action.key))
-        return try {
-            val authority = currentAuthority()
-                ?: return ReviewerActionReconciliationResult.Unresolved(
-                    AnkiError.QueryFailure("authority-unknown"))
-            performer.reconcile(authority, request.cardRef, request.action)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (throwable: Throwable) {
-            ReviewerActionReconciliationResult.Unresolved(AnkiError.Unknown("reconcile_threw"))
-        }
+        return ReviewerActionReconciliationResult.Unresolved(
+            AnkiError.UnsupportedApi(null, 0, "action_reconciliation_unsupported"))
     }
 
     /** Content-free diagnostics for settings and the debug harness (§82/§84). Never card text. */

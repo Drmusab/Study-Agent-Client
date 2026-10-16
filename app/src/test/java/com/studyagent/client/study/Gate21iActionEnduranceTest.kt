@@ -129,7 +129,7 @@ class Gate21iActionEnduranceTest {
         val h = ReviewerActionHarness(extraBackends = listOf(b))
         h.loadToRating()
         val receipt = ReviewerActionReceipt(aId, "bury", detail = "confirmed_by_fake")
-        val stateReceipt = ReviewerActionReceipt(aId, "bury", detail = "confirmed_by_state")
+        val stateReceipt = ReviewerActionReceipt(aId, "bury", detail = "synthetic_current_state_observation")
         when (window) {
             1 -> h.store.failNextWrites = 1 // W1: death before the durable PREPARED write
             2 -> h.store.onDurableWrite = { // W2: death after the durable PREPARED write
@@ -198,6 +198,8 @@ class Gate21iActionEnduranceTest {
             }
             // B is never a destination, in any window.
             assertEquals("window $window: B receives nothing", 0, b.reviewerActionInvocations)
+            assertEquals("window $window: keyless OP-M3 never reads current card state",
+                0, h.fake.reviewerActionReconciliationCount)
             assertEquals(0, b.reviewerActionBoundaryCrossings)
             assertEquals(0, b.nextCardCount)
             assertEquals(0, b.physicalCommitCalls)
@@ -231,10 +233,10 @@ class Gate21iActionEnduranceTest {
     private fun expectedAfterRecovery(window: Int) = when (window) {
         1 -> null
         2 -> ReviewerActionStatus.PREPARED // provably un-entered: offered as a safe retry
-        3 -> ReviewerActionStatus.AMBIGUOUS // no authoritative evidence: explicit uncertainty
-        4 -> ReviewerActionStatus.APPLIED // read-only reconciliation proved the applied effect
+        3 -> ReviewerActionStatus.AMBIGUOUS // keyless OP-M3 is blocked: explicit uncertainty
+        4 -> ReviewerActionStatus.AMBIGUOUS // current card state is not historical proof
         5 -> ReviewerActionStatus.AMBIGUOUS // no evidence either way
-        6 -> ReviewerActionStatus.APPLIED // reconciliation proves it; it is never resubmitted
+        6 -> ReviewerActionStatus.AMBIGUOUS // lost APPLIED write cannot be reconstructed from state
         else -> ReviewerActionStatus.APPLIED
     }
 
@@ -255,26 +257,28 @@ class Gate21iActionEnduranceTest {
         }
 
     @Test
-    fun `recovery of an ambiguous action is read-only, per window, across a hundred crashes`() =
+    fun `keyless ambiguous recovery is blocked before any card-state read across a hundred crashes`() =
         runTest {
             repeat(100) {
                 val outcome = runWindow(3)
                 assertEquals(
-                    "W3 recovery is a read-only reconciliation against A",
-                    1, outcome.aReconciliations)
+                    "W3 OP-M3 has no authoritative collection match",
+                    0, outcome.aReconciliations)
                 assertEquals("W3 leaves explicit uncertainty, never a guess",
                     ReviewerActionStatus.AMBIGUOUS, outcome.afterRecovery)
             }
         }
 
     @Test
-    fun `an applied-then-lost effect is reconciled to APPLIED without a second mutation`() =
+    fun `an applied-then-lost effect stays ambiguous without historical evidence`() =
         runTest {
             repeat(100) {
                 val outcome = runWindow(4)
-                assertEquals(ReviewerActionStatus.APPLIED, outcome.afterRecovery)
+                assertEquals(ReviewerActionStatus.AMBIGUOUS, outcome.afterRecovery)
                 assertEquals("the effect happened exactly once", 1, outcome.aInvocations)
                 assertEquals(1, outcome.aCrossings)
+                assertEquals("the current queue state is not a historical receipt", 0,
+                    outcome.aReconciliations)
                 assertEquals(0, outcome.bInvocations)
             }
         }
