@@ -1,9 +1,11 @@
 package com.studyagent.client.anki.create
 
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiResult
 import com.studyagent.client.core.anki.create.AddNoteDraft
+import com.studyagent.client.core.anki.create.AnkiNoteCreationContext
 import com.studyagent.client.core.anki.create.CreationLedgerResult
 import com.studyagent.client.core.anki.create.CreationMediaKind
 import com.studyagent.client.core.anki.create.DefaultNoteCreationCoordinator
@@ -37,7 +39,9 @@ class NoteCreationCoordinatorTest {
         val backend = FakeNoteCreationBackend(events = events)
         val store = InMemoryNoteCreationStore(events = events)
         val ledger = com.studyagent.client.core.anki.create.DefaultNoteCreationLedger(store)
-        val coordinator = DefaultNoteCreationCoordinator(backend = backend, ledger = ledger)
+        val coordinator = DefaultNoteCreationCoordinator(
+            backends = AnkiBackendRegistry(listOf(backend)), ledger = ledger
+        )
         val model get() = backend.models.first()
     }
 
@@ -46,8 +50,7 @@ class NoteCreationCoordinatorTest {
         tags: List<String> = listOf("alpha"),
         media: List<PendingMedia> = emptyList()
     ) = AddNoteDraft(
-        backendId = backendId,
-        collectionKey = null,
+        context = AnkiNoteCreationContext.of(backendId),
         model = model,
         fieldValues = values,
         tags = tags,
@@ -126,16 +129,18 @@ class NoteCreationCoordinatorTest {
         // The draft requires the model's backend to equal the draft's backend; build accordingly.
         val outcome = harness.coordinator.create(
             AddNoteDraft(
-                backendId = AnkiBackendId.Fake("other"),
-                collectionKey = null,
+                context = AnkiNoteCreationContext.of(AnkiBackendId.Fake("other")),
                 model = FakeNoteCreationBackend.basicModel(backendId = AnkiBackendId.Fake("other")),
                 fieldValues = mapOf(0 to "a", 1 to "b"),
                 tags = emptyList(),
                 media = emptyList()
             )
         )
+        // GATE 21K — a draft bound to an unregistered backend is refused by routing
+        // (BackendRouteBlocked/backend_not_registered) before any record or dispatch; the
+        // registered backend is never substituted. The GATE 18 safety assertions below are unchanged.
         assertEquals(
-            NoteCreationRefusal.BackendMismatch,
+            NoteCreationRefusal.BackendRouteBlocked("backend_not_registered"),
             (outcome as NoteCreationOutcome.Refused).reason
         )
         assertTrue(harness.store.encoded == null)

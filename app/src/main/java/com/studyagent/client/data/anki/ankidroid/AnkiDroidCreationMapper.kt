@@ -6,6 +6,8 @@ import com.studyagent.client.core.anki.AnkiNoteModel
 import com.studyagent.client.core.anki.AnkiNoteModelField
 import com.studyagent.client.core.anki.AnkiNoteModelKind
 import com.studyagent.client.core.anki.AnkiNoteModelRef
+import com.studyagent.client.core.anki.AnkiNoteRef
+import com.studyagent.client.core.anki.AnkiStoredMediaRef
 import com.studyagent.client.core.anki.create.CreateNoteBackendRequest
 import com.studyagent.client.core.anki.create.CreateNoteBackendResult
 import com.studyagent.client.core.anki.create.MediaStoreBackendResult
@@ -81,8 +83,16 @@ object AnkiDroidCreationMapper {
     /**
      * Maps one provider insert answer for the NOTE boundary. Only a returned URI with a parseable
      * positive id is creation proof; only the proven pre-write refusals are non-creation proof.
+     *
+     * GATE 21K — the returned id is qualified with the invoking instance's own identity
+     * (DECISION-21B-04). [collectionKey] is the identity this adapter can actually observe (null at
+     * this pin — AnkiDroid issues no collection discriminator); it is never invented.
      */
-    fun classifyNoteInsert(dispatch: AnkiDroidCreationDispatch): CreateNoteBackendResult =
+    fun classifyNoteInsert(
+        backendId: AnkiBackendId,
+        collectionKey: String?,
+        dispatch: AnkiDroidCreationDispatch
+    ): CreateNoteBackendResult =
         when (dispatch) {
             is AnkiDroidCreationDispatch.NotDispatched ->
                 CreateNoteBackendResult.ConfirmedNotCreated(dispatch.error)
@@ -91,7 +101,9 @@ object AnkiDroidCreationMapper {
                     ?.takeIf { it.isNotEmpty() }
                 val parsed = noteId?.toLongOrNull()?.takeIf { it > 0L }
                 if (parsed != null) {
-                    CreateNoteBackendResult.ConfirmedCreated(parsed.toString())
+                    CreateNoteBackendResult.ConfirmedCreated(
+                        AnkiNoteRef(backendId, parsed.toString(), collectionKey)
+                    )
                 } else if (dispatch.uri == null) {
                     // Provider answered null: refusal-by-null or provider death — indistinguishable.
                     CreateNoteBackendResult.OutcomeUnknown(AnkiError.QueryFailure("provider_null_insert"))
@@ -118,15 +130,22 @@ object AnkiDroidCreationMapper {
     /**
      * Maps one provider insert answer for the MEDIA boundary. The stored name comes from the
      * returned URI's last segment — the backend is the naming authority (CONTRACT-18-27).
+     *
+     * GATE 21K — the name is qualified with the storing instance's own identity
+     * (DECISION-21B-04); [collectionKey] is null at this pin for the same reason as above.
      */
-    fun classifyMediaInsert(dispatch: AnkiDroidCreationDispatch): MediaStoreBackendResult =
+    fun classifyMediaInsert(
+        backendId: AnkiBackendId,
+        collectionKey: String?,
+        dispatch: AnkiDroidCreationDispatch
+    ): MediaStoreBackendResult =
         when (dispatch) {
             is AnkiDroidCreationDispatch.NotDispatched ->
                 MediaStoreBackendResult.ConfirmedNotStored(dispatch.error)
             is AnkiDroidCreationDispatch.Returned -> {
                 val name = dispatch.uri?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
                 if (name != null) {
-                    MediaStoreBackendResult.Stored(name)
+                    MediaStoreBackendResult.Stored(AnkiStoredMediaRef(backendId, name, collectionKey))
                 } else if (dispatch.uri == null) {
                     MediaStoreBackendResult.OutcomeUnknown(AnkiError.QueryFailure("provider_null_insert"))
                 } else {

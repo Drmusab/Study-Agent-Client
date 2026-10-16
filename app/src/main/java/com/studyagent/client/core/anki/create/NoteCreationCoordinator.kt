@@ -2,10 +2,12 @@ package com.studyagent.client.core.anki.create
 
 import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiCreatedNote
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiNoteModel
 import com.studyagent.client.core.anki.AnkiNoteRef
+import com.studyagent.client.core.anki.AnkiOperationClass
 import com.studyagent.client.core.anki.AnkiResult
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
@@ -16,6 +18,14 @@ sealed interface NoteCreationRefusal {
     data class UnsupportedCapability(val dimension: String) : NoteCreationRefusal
     data object BackendMismatch : NoteCreationRefusal
     data object BackendUnavailable : NoteCreationRefusal
+
+    /**
+     * GATE 21K — the owning backend of this creation cannot be used right now (not configured, or
+     * its verified collection no longer matches the one the creation was bound/admitted against).
+     * [token] is the stable routing token. Nothing was sent, and the creation was never routed to
+     * another backend.
+     */
+    data class BackendRouteBlocked(val token: String) : NoteCreationRefusal
     data object ModelMissing : NoteCreationRefusal
 
     /** The model's schema changed since the draft was taken. No silent remapping (PART I §19). */
@@ -157,13 +167,27 @@ interface NoteCreationCoordinator {
  * ([NoteCreationOutcome.CreationInProgress]) — duplicate Save inputs never produce duplicate
  * dispatches (VER-18-13). The coordinator touches no review session, rating or reviewer-action
  * surface (INV-18-19).
+ *
+ * GATE 21K — there is no pinned backend instance. Every backend touch resolves the creation's
+ * owner through the registry ([NoteCreationRoutingPolicy]): the draft's immutable
+ * [AnkiNoteCreationContext] for a new creation, the durable record's `backendId` for retry and
+ * hydration. There is no fallback, no AUTO and no preference lookup after binding: an owner that
+ * is not registered, or whose collection evidence contradicts the creation's, refuses the call
+ * before anything is recorded or sent, and the record is preserved untouched.
  */
 class DefaultNoteCreationCoordinator(
-    private val backend: AnkiBackend,
+    /**
+     * GATE 21K — the exact configured instances. Every backend touch resolves the owner of the
+     * creation (`draft.context.backendId` for a new creation, `record.backendId` for everything
+     * else) through this registry. There is no pinned instance, no fallback and no preference lookup.
+     */
+    private val backends: AnkiBackendRegistry,
     private val ledger: NoteCreationLedger,
     private val idSource: NoteCreationIdSource = UuidNoteCreationIdSource,
     private val nowEpochMs: () -> Long = System::currentTimeMillis
 ) : NoteCreationCoordinator {
+
+    private val routing = NoteCreationRoutingPolicy(backends)
 
     private val execution = Mutex()
 
@@ -172,7 +196,20 @@ class DefaultNoteCreationCoordinator(
     private val payloads = HashMap<NoteCreationId, AddNoteDraft>()
 
     override suspend fun create(draft: AddNoteDraft): NoteCreationOutcome = runExclusive {
-        runCreation(draft, retryOf = null)
+        // GATE 21K — admission routes to the draft's own bound backend (OP-M1) before any record
+        // exists. A blocked owner refuses with nothing recorded and nothing sent; the draft and its
+        // local media attachments stay exactly where they were.
+        val backend = when (val route = routing.admit(draft.context)) {
+            is NoteCreationRoute.Routed -> route.backend
+            is NoteCreationRoute.Blocked ->
+                return@runExclusive NoteCreationOutcome.Refused(
+                    NoteCreationRefusal.BackendRouteBlocked(route.token)
+                )
+        }
+        if (backend.id != draft.backendId) {
+            return@runExclusive NoteCreationOutcome.Refused(NoteCreationRefusal.BackendMismatch)
+        }
+        runCreation(backend, draft, retryOf = null)
     }
 
     override suspend fun retry(creationId: NoteCreationId): NoteCreationOutcome = runExclusive {
@@ -190,18 +227,38 @@ class DefaultNoteCreationCoordinator(
             )
         }
         val draft = payloadFor(creationId)
-            ?: return@runExclusive NoteCreationOutcome.Refused(NoteCreationRefusal.PayloadUnavailable)
+        // GATE 21K — a retry goes only to the record's own owner (OP-M2: proven non-creation). The
+        // in-process payload's presence is the honest statement of whether this process still holds
+        // the binding. A blocked owner preserves the record untouched for a later, valid attempt.
+        val backend = when (
+            val route = routing.route(record, record.creationOperationClass(), draft != null)
+        ) {
+            is NoteCreationRoute.Routed -> route.backend
+            is NoteCreationRoute.Blocked ->
+                return@runExclusive NoteCreationOutcome.Refused(
+                    NoteCreationRefusal.BackendRouteBlocked(route.token)
+                )
+        }
+        if (draft == null) {
+            return@runExclusive NoteCreationOutcome.Refused(NoteCreationRefusal.PayloadUnavailable)
+        }
+        if (backend.id != record.backendId || draft.backendId != record.backendId) {
+            return@runExclusive NoteCreationOutcome.Refused(NoteCreationRefusal.BackendMismatch)
+        }
         // Reset to PREPARED durably first; runCreation then repeats the full fresh preflight
         // (capabilities, backend context, validation, live schema) exactly like a first attempt.
         val reset = ledgerApply(creationId, NoteCreationStatus.RETRY_ALLOWED, NoteCreationEvent.RetryRequested)
             ?: return@runExclusive NoteCreationOutcome.LedgerUnavailable("retry_reset_not_persisted")
-        runCreation(draft, retryOf = reset)
+        runCreation(backend, draft, retryOf = reset)
     }
 
     override suspend fun resolveAmbiguous(
         creationId: NoteCreationId,
         attestation: NoteCreationAttestation
     ): NoteCreationRecoveryOutcome {
+        // GATE 21K — attestation routes nowhere: it touches no backend, so no routing decision
+        // exists for it. It closes this record's own local bookkeeping as a human attestation
+        // (never as backend proof), whether or not the owning backend is currently registered.
         if (execution.isLocked) return NoteCreationRecoveryOutcome.Busy
         val record = when (val read = ledger.get(creationId)) {
             is CreationLedgerResult.Ok -> read.value ?: return NoteCreationRecoveryOutcome.NotFound
@@ -233,7 +290,18 @@ class DefaultNoteCreationCoordinator(
         }
         val noteId = record.createdNoteId
             ?: return NoteCreationRecoveryOutcome.Resolved(record)
-        return readCreatedNote(record, noteId)
+        // GATE 21K — the post-create read is a bound read (OP-R2) against the record's own owner
+        // only. A blocked owner leaves the creation CREATED and reports a read failure; it never
+        // reads the note from another backend, where the same note id would name a different note.
+        val backend = when (
+            val route = routing.route(record, AnkiOperationClass.OP_R2, boundIsLiveInThisProcess = false)
+        ) {
+            is NoteCreationRoute.Routed -> route.backend
+            is NoteCreationRoute.Blocked -> return NoteCreationRecoveryOutcome.HydrationFailed(
+                record, AnkiError.InvalidRequest(route.token)
+            )
+        }
+        return readCreatedNote(backend, record, noteId)
     }
 
     override suspend fun activeCreationsFor(backendId: AnkiBackendId): List<NoteCreationRecord> =
@@ -273,7 +341,9 @@ class DefaultNoteCreationCoordinator(
         data object Ready : Preflight
     }
 
-    private suspend fun preflight(draft: AddNoteDraft): Preflight {
+    private suspend fun preflight(backend: AnkiBackend, draft: AddNoteDraft): Preflight {
+        // Defensive re-check: the routed instance must be the draft's own backend (the registry
+        // already matched them; a future change must not be able to route across instances).
         if (draft.backendId != backend.id) return Preflight.Refused(NoteCreationRefusal.BackendMismatch)
         val caps = backend.capabilities.value
         if (!caps.createNotes) {
@@ -299,10 +369,11 @@ class DefaultNoteCreationCoordinator(
     }
 
     private suspend fun runCreation(
+        backend: AnkiBackend,
         draft: AddNoteDraft,
         retryOf: NoteCreationRecord?
     ): NoteCreationOutcome {
-        when (val pre = preflight(draft)) {
+        when (val pre = preflight(backend, draft)) {
             is Preflight.Refused -> return NoteCreationOutcome.Refused(pre.reason)
             is Preflight.Invalid -> return NoteCreationOutcome.ValidationFailed(pre.issues)
             is Preflight.Ready -> Unit
@@ -353,6 +424,21 @@ class DefaultNoteCreationCoordinator(
             )
             current = when (result) {
                 is MediaStoreBackendResult.Stored -> {
+                    if (result.media.backendId != backend.id) {
+                        // GATE 21K — the invoked backend answered with a media identity that is not
+                        // its own. A store may have happened, but the returned name cannot be
+                        // trusted to name media on this backend: fail closed as outcome-unknown
+                        // (orphan-media risk disclosed, never cleaned up), never reference it from
+                        // the note, and never store the next step to a different destination.
+                        val updated = ledgerApply(
+                            creationId, NoteCreationStatus.STORING_MEDIA,
+                            NoteCreationEvent.MediaOutcomeUnknown
+                        ) ?: return NoteCreationOutcome.LedgerUnavailable("media_unknown_not_persisted")
+                        forgetPayloadIfTerminal(updated)
+                        return NoteCreationOutcome.MediaOutcomeUnclear(
+                            updated, AnkiError.InvalidRequest("stored_media_foreign_backend")
+                        )
+                    }
                     ledgerApply(creationId, NoteCreationStatus.STORING_MEDIA, NoteCreationEvent.MediaStored(index, result.mediaName))
                         ?: return failClosedAfterMediaStore(creationId, "media_store_name_not_persisted")
                 }
@@ -404,7 +490,9 @@ class DefaultNoteCreationCoordinator(
         val fields = if (draft.media.isEmpty()) {
             NoteCreationFieldAssembly.assembleWithoutMedia(draft)
         } else {
-            NoteCreationFieldAssembly.assemble(draft, current.storedMediaNames)
+            // GATE 21K — only media the record proves was stored on this creation's own backend is
+            // ever referenced from the note; anything else fails the assembly closed.
+            NoteCreationFieldAssembly.assemble(draft, current.storedMediaRefs)
                 ?: return noteBoundaryUnknown(creationId, AnkiError.InvalidRequest("media_names_incomplete"))
         }
         val result = backend.createAnkiNote(
@@ -417,11 +505,19 @@ class DefaultNoteCreationCoordinator(
         )
         return when (result) {
             is CreateNoteBackendResult.ConfirmedCreated -> {
+                if (result.noteRef.backendId != backend.id) {
+                    // GATE 21K — a creation confirmation under another backend's identity can never
+                    // be claimed as this backend's note. The note may exist on the invoked backend,
+                    // so the honest durable state is ambiguous: never CREATED, never re-created.
+                    return noteBoundaryUnknown(
+                        creationId, AnkiError.InvalidRequest("created_note_foreign_backend")
+                    )
+                }
                 val created = ledgerApply(
                     creationId, NoteCreationStatus.CREATING_NOTE,
                     NoteCreationEvent.BackendConfirmedCreated(result.noteId)
                 ) ?: return failClosedAfterConfirmedCreation(creationId)
-                finishCreated(created, result.noteId)
+                finishCreated(backend, created, result.noteId)
             }
             is CreateNoteBackendResult.ConfirmedNotCreated -> {
                 val updated = ledgerApply(
@@ -441,11 +537,12 @@ class DefaultNoteCreationCoordinator(
 
     /** CREATED is durable: hydrate through the backend's own read; a read failure never re-creates. */
     private suspend fun finishCreated(
+        backend: AnkiBackend,
         record: NoteCreationRecord,
         noteId: String
     ): NoteCreationOutcome {
         forgetPayloadIfTerminal(record)
-        return when (val hydration = readCreatedNote(record, noteId)) {
+        return when (val hydration = readCreatedNote(backend, record, noteId)) {
             is NoteCreationRecoveryOutcome.Hydrated ->
                 NoteCreationOutcome.Created(hydration.record, hydration.created)
             is NoteCreationRecoveryOutcome.HydrationFailed ->
@@ -457,6 +554,7 @@ class DefaultNoteCreationCoordinator(
     }
 
     private suspend fun readCreatedNote(
+        backend: AnkiBackend,
         record: NoteCreationRecord,
         noteId: String
     ): NoteCreationRecoveryOutcome {

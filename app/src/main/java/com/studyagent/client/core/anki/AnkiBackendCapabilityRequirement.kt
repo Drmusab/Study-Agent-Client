@@ -112,3 +112,23 @@ fun AnkiCapabilities.supports(required: AnkiRequiredCapability): Boolean = when 
  */
 val STUDY_SESSION_REQUIREMENTS: Set<AnkiRequiredCapability> =
     setOf(AnkiRequiredCapability.REVIEW)
+
+/**
+ * GATE 21K — the capability set a backend must have before a *new* creation context may bind to it
+ * (DECISION-21B-21, the `STORE_MEDIA`/`CREATE_NOTE` row of the ownership matrix).
+ *
+ * Used exactly twice, both before binding: to seed the Add Note route from GATE 21E resolution,
+ * and as the creation screen's exact-context requirement. It is never consulted after a creation
+ * context binds, and it never redirects an admitted creation.
+ *
+ * `STORE_MEDIA` is deliberately NOT here. A field-only creation must stay possible on a backend
+ * that cannot store media; media support is required per-draft at admission, where the coordinator
+ * refuses a media-bearing draft without it instead of silently dropping the attachment.
+ * `DECKS` is present because the creation screen reads deck names to display the model's own
+ * backend-determined destination (creation takes no caller deck at the pinned contract).
+ */
+val CREATION_CONTEXT_REQUIREMENTS: Set<AnkiRequiredCapability> = setOf(
+    AnkiRequiredCapability.NOTE_MODEL_LISTING,
+    AnkiRequiredCapability.CREATE_NOTE,
+    AnkiRequiredCapability.DECKS
+)

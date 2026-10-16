@@ -131,7 +131,7 @@ class AnkiDroidCreationMapperTest {
 
     @Test
     fun `note classification proves creation only from a parseable returned id`() {
-        val created = AnkiDroidCreationMapper.classifyNoteInsert(
+        val created = AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, 
             AnkiDroidCreationDispatch.Returned("content://com.ichi2.anki.provider/notes/16873")
         )
         assertEquals("16873", (created as CreateNoteBackendResult.ConfirmedCreated).noteId)
@@ -140,11 +140,11 @@ class AnkiDroidCreationMapperTest {
     @Test
     fun `note classification treats null and unparseable uris as unknown, never not-created`() {
         assertTrue(
-            AnkiDroidCreationMapper.classifyNoteInsert(AnkiDroidCreationDispatch.Returned(null))
+            AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, AnkiDroidCreationDispatch.Returned(null))
                 is CreateNoteBackendResult.OutcomeUnknown
         )
         assertTrue(
-            AnkiDroidCreationMapper.classifyNoteInsert(AnkiDroidCreationDispatch.Returned("content://notes/notanumber"))
+            AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, AnkiDroidCreationDispatch.Returned("content://notes/notanumber"))
                 is CreateNoteBackendResult.OutcomeUnknown
         )
     }
@@ -152,32 +152,32 @@ class AnkiDroidCreationMapperTest {
     @Test
     fun `note classification proves non-creation only for pre-write refusals`() {
         assertTrue(
-            AnkiDroidCreationMapper.classifyNoteInsert(
+            AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, 
                 AnkiDroidCreationDispatch.Threw("SecurityException")
             ) is CreateNoteBackendResult.ConfirmedNotCreated
         )
         for (cls in listOf("IllegalArgumentException", "NumberFormatException", "NullPointerException")) {
             assertTrue(
                 "$cls precedes the irreversible write at the pin",
-                AnkiDroidCreationMapper.classifyNoteInsert(AnkiDroidCreationDispatch.Threw(cls))
+                AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, AnkiDroidCreationDispatch.Threw(cls))
                     is CreateNoteBackendResult.ConfirmedNotCreated
             )
         }
         // Backend Rust errors arrive as RuntimeException subclasses: origin unprovable -> UNKNOWN.
         assertTrue(
-            AnkiDroidCreationMapper.classifyNoteInsert(AnkiDroidCreationDispatch.Threw("BackendNotFoundException"))
+            AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, AnkiDroidCreationDispatch.Threw("BackendNotFoundException"))
                 is CreateNoteBackendResult.OutcomeUnknown
         )
         assertTrue(
-            AnkiDroidCreationMapper.classifyNoteInsert(AnkiDroidCreationDispatch.Threw("RuntimeException"))
+            AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, AnkiDroidCreationDispatch.Threw("RuntimeException"))
                 is CreateNoteBackendResult.OutcomeUnknown
         )
         assertTrue(
-            AnkiDroidCreationMapper.classifyNoteInsert(AnkiDroidCreationDispatch.Unknown("insert_timeout"))
+            AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, AnkiDroidCreationDispatch.Unknown("insert_timeout"))
                 is CreateNoteBackendResult.OutcomeUnknown
         )
         assertTrue(
-            AnkiDroidCreationMapper.classifyNoteInsert(
+            AnkiDroidCreationMapper.classifyNoteInsert(backendId, null, 
                 AnkiDroidCreationDispatch.NotDispatched(AnkiError.QueryFailure("provider_write_busy"))
             ) is CreateNoteBackendResult.ConfirmedNotCreated
         )
@@ -187,7 +187,7 @@ class AnkiDroidCreationMapperTest {
 
     @Test
     fun `media classification reads the backend chosen name from the returned uri`() {
-        val stored = AnkiDroidCreationMapper.classifyMediaInsert(
+        val stored = AnkiDroidCreationMapper.classifyMediaInsert(backendId, null, 
             AnkiDroidCreationDispatch.Returned("file:///storage/emulated/0/Android/media/diagram_9f3.png")
         )
         assertEquals("diagram_9f3.png", (stored as MediaStoreBackendResult.Stored).mediaName)
@@ -196,11 +196,11 @@ class AnkiDroidCreationMapperTest {
     @Test
     fun `media classification treats null and malformed uris as unknown`() {
         assertTrue(
-            AnkiDroidCreationMapper.classifyMediaInsert(AnkiDroidCreationDispatch.Returned(null))
+            AnkiDroidCreationMapper.classifyMediaInsert(backendId, null, AnkiDroidCreationDispatch.Returned(null))
                 is MediaStoreBackendResult.OutcomeUnknown
         )
         assertTrue(
-            AnkiDroidCreationMapper.classifyMediaInsert(AnkiDroidCreationDispatch.Returned("file:///"))
+            AnkiDroidCreationMapper.classifyMediaInsert(backendId, null, AnkiDroidCreationDispatch.Returned("file:///"))
                 is MediaStoreBackendResult.OutcomeUnknown
         )
     }
@@ -208,19 +208,19 @@ class AnkiDroidCreationMapperTest {
     @Test
     fun `media classification proves non-storage only for pre-write refusals`() {
         assertTrue(
-            AnkiDroidCreationMapper.classifyMediaInsert(AnkiDroidCreationDispatch.Threw("SecurityException"))
+            AnkiDroidCreationMapper.classifyMediaInsert(backendId, null, AnkiDroidCreationDispatch.Threw("SecurityException"))
                 is MediaStoreBackendResult.ConfirmedNotStored
         )
         assertTrue(
-            AnkiDroidCreationMapper.classifyMediaInsert(AnkiDroidCreationDispatch.Threw("IllegalArgumentException"))
+            AnkiDroidCreationMapper.classifyMediaInsert(backendId, null, AnkiDroidCreationDispatch.Threw("IllegalArgumentException"))
                 is MediaStoreBackendResult.ConfirmedNotStored
         )
         assertTrue(
-            AnkiDroidCreationMapper.classifyMediaInsert(AnkiDroidCreationDispatch.Threw("EmptyMediaException"))
+            AnkiDroidCreationMapper.classifyMediaInsert(backendId, null, AnkiDroidCreationDispatch.Threw("EmptyMediaException"))
                 is MediaStoreBackendResult.OutcomeUnknown
         )
         assertTrue(
-            AnkiDroidCreationMapper.classifyMediaInsert(AnkiDroidCreationDispatch.Unknown("insert_timeout"))
+            AnkiDroidCreationMapper.classifyMediaInsert(backendId, null, AnkiDroidCreationDispatch.Unknown("insert_timeout"))
                 is MediaStoreBackendResult.OutcomeUnknown
         )
     }

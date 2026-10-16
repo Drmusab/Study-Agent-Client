@@ -5,7 +5,9 @@ import com.studyagent.client.core.anki.AnkiNoteModel
 import com.studyagent.client.core.anki.AnkiNoteModelField
 import com.studyagent.client.core.anki.AnkiNoteModelKind
 import com.studyagent.client.core.anki.AnkiNoteModelRef
+import com.studyagent.client.core.anki.AnkiStoredMediaRef
 import com.studyagent.client.core.anki.create.AddNoteDraft
+import com.studyagent.client.core.anki.create.AnkiNoteCreationContext
 import com.studyagent.client.core.anki.create.CreationMediaKind
 import com.studyagent.client.core.anki.create.NoteCreationFieldAssembly
 import com.studyagent.client.core.anki.create.PendingMedia
@@ -42,13 +44,15 @@ class NoteCreationFieldAssemblyTest {
     )
 
     private fun draft(media: List<PendingMedia>, values: Map<Int, String>) = AddNoteDraft(
-        backendId = backend,
-        collectionKey = null,
+        context = AnkiNoteCreationContext.of(backend),
         model = model(),
         fieldValues = values,
         tags = emptyList(),
         media = media
     )
+
+    /** GATE 21K — stored media travel as qualified refs; a name is meaningless without its backend. */
+    private fun stored(vararg names: String) = names.map { AnkiStoredMediaRef(backend, it) }
 
     @Test
     fun `no media returns the fields exactly as typed`() {
@@ -59,21 +63,21 @@ class NoteCreationFieldAssemblyTest {
     @Test
     fun `image references use img syntax and append to the target field`() {
         val d = draft(listOf(media(CreationMediaKind.IMAGE, target = 1)), mapOf(0 to "q", 1 to "answer"))
-        val assembled = NoteCreationFieldAssembly.assemble(d, listOf("pic_1.png"))
+        val assembled = NoteCreationFieldAssembly.assemble(d, stored("pic_1.png"))
         assertEquals(listOf("q", "answer<br><img src=\"pic_1.png\">"), assembled)
     }
 
     @Test
     fun `audio references use sound syntax`() {
         val d = draft(listOf(media(CreationMediaKind.AUDIO, target = 0)), mapOf(0 to "listen", 1 to "b"))
-        val assembled = NoteCreationFieldAssembly.assemble(d, listOf("clip_2.mp3"))
+        val assembled = NoteCreationFieldAssembly.assemble(d, stored("clip_2.mp3"))
         assertEquals(listOf("listen<br>[sound:clip_2.mp3]", "b"), assembled)
     }
 
     @Test
     fun `a blank target field becomes the reference alone`() {
         val d = draft(listOf(media(CreationMediaKind.IMAGE, target = 1)), mapOf(0 to "q", 1 to ""))
-        val assembled = NoteCreationFieldAssembly.assemble(d, listOf("pic.png"))
+        val assembled = NoteCreationFieldAssembly.assemble(d, stored("pic.png"))
         assertEquals(listOf("q", "<img src=\"pic.png\">"), assembled)
     }
 
@@ -83,7 +87,7 @@ class NoteCreationFieldAssemblyTest {
             listOf(media(CreationMediaKind.IMAGE, 0), media(CreationMediaKind.AUDIO, 0)),
             mapOf(0 to "x", 1 to "y")
         )
-        val assembled = NoteCreationFieldAssembly.assemble(d, listOf("a.png", "b.mp3"))
+        val assembled = NoteCreationFieldAssembly.assemble(d, stored("a.png", "b.mp3"))
         assertEquals(listOf("x<br><img src=\"a.png\"><br>[sound:b.mp3]", "y"), assembled)
     }
 
@@ -91,9 +95,19 @@ class NoteCreationFieldAssemblyTest {
     fun `incomplete stored names refuse assembly`() {
         val d = draft(listOf(media(CreationMediaKind.IMAGE), media(CreationMediaKind.AUDIO)),
             mapOf(0 to "x", 1 to "y"))
-        assertNull(NoteCreationFieldAssembly.assemble(d, listOf("a.png")))
-        assertNull(NoteCreationFieldAssembly.assemble(d, listOf("a.png", "")))
-        assertNull(NoteCreationFieldAssembly.assemble(d, listOf("a.png", "  ")))
+        assertNull(NoteCreationFieldAssembly.assemble(d, stored("a.png")))
+        // GATE 21K — blank stored names are now unrepresentable by construction
+        // (AnkiStoredMediaRef refuses them); the remaining refusal modes are an incomplete set
+        // and media stored by a different backend, asserted below.
         assertNull(NoteCreationFieldAssembly.assemble(d, emptyList()))
+    }
+
+    @Test
+    fun `media stored by another backend refuses assembly even with an identical name`() {
+        // GATE 21K — identical filenames in two collections are unrelated resources; a note on
+        // this backend must never reference a name another backend stored.
+        val d = draft(listOf(media(CreationMediaKind.IMAGE, target = 1)), mapOf(0 to "q", 1 to "a"))
+        val foreign = listOf(AnkiStoredMediaRef(AnkiBackendId.Fake("other"), "pic_1.png"))
+        assertNull(NoteCreationFieldAssembly.assemble(d, foreign))
     }
 }

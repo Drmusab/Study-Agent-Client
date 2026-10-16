@@ -1,6 +1,7 @@
 package com.studyagent.client.core.anki.create
 
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiStoredMediaRef
 import kotlinx.serialization.Serializable
 
 /** What kind of media a creation step stores. Determines the field-reference syntax only. */
@@ -89,6 +90,17 @@ data class NoteCreationRecord(
     val noteBoundaryEntered: Boolean get() = lastEnteredStep >= mediaSteps.size && status != NoteCreationStatus.PREPARED
 
     val storedMediaNames: List<String> get() = mediaSteps.mapNotNull { it.storedName }
+
+    /**
+     * GATE 21K — the stored media as qualified references. The persisted steps keep bare names by
+     * design (the record's own [backendId]/[collectionKey] are their qualification, and the
+     * serialized schema stays byte-stable); this projection re-attaches that qualification at the
+     * point a name leaves the record, so a stored name never travels unqualified.
+     */
+    val storedMediaRefs: List<AnkiStoredMediaRef>
+        get() = mediaSteps.mapNotNull { step ->
+            step.storedName?.let { AnkiStoredMediaRef(backendId, it, collectionKey) }
+        }
 }
 
 /** Builds the first record for a new creation: always PREPARED, never with a backend effect. */

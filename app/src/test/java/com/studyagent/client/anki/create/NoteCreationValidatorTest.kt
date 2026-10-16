@@ -7,6 +7,7 @@ import com.studyagent.client.core.anki.AnkiNoteModelField
 import com.studyagent.client.core.anki.AnkiNoteModelKind
 import com.studyagent.client.core.anki.AnkiNoteModelRef
 import com.studyagent.client.core.anki.create.AddNoteDraft
+import com.studyagent.client.core.anki.create.AnkiNoteCreationContext
 import com.studyagent.client.core.anki.create.CreationMediaKind
 import com.studyagent.client.core.anki.create.MAX_MEDIA_PER_CREATION
 import com.studyagent.client.core.anki.create.MAX_MEDIA_SIZE_BYTES
@@ -62,8 +63,7 @@ class NoteCreationValidatorTest {
         media: List<PendingMedia> = emptyList(),
         model: AnkiNoteModel = model()
     ) = AddNoteDraft(
-        backendId = backend,
-        collectionKey = null,
+        context = AnkiNoteCreationContext.of(backend),
         model = model,
         fieldValues = values,
         tags = tags,

@@ -111,7 +111,11 @@ class FakeNoteCreationBackend(
         if (mediaStoreResults.isNotEmpty()) return mediaStoreResults.removeFirst()
         // Content-idempotent: the pinned provider deduplicates by hash; the fake dedupes by name.
         val name = storedMedia.getOrPut(request.preferredName) { request.preferredName }
-        return MediaStoreBackendResult.Stored(name)
+        return MediaStoreBackendResult.Stored(
+            com.studyagent.client.core.anki.AnkiStoredMediaRef(
+                backendId, name, currentCollectionIdentity?.collectionKey
+            )
+        )
     }
 
     override suspend fun createAnkiNote(request: CreateNoteBackendRequest): CreateNoteBackendResult {
@@ -142,7 +146,9 @@ class FakeNoteCreationBackend(
                 )
             }
         )
-        return CreateNoteBackendResult.ConfirmedCreated(noteId)
+        return CreateNoteBackendResult.ConfirmedCreated(
+            AnkiNoteRef(backendId, noteId, currentCollectionIdentity?.collectionKey)
+        )
     }
 
     override suspend fun resolveCreatedNote(noteRef: AnkiNoteRef): AnkiResult<AnkiCreatedNote> {
@@ -157,6 +163,17 @@ class FakeNoteCreationBackend(
     // ---------------------------------------------------------------- ordinary surface (minimal)
 
     override val id: AnkiBackendId get() = backendId
+
+    /**
+     * GATE 21K scripting — the collection identity this fake currently reports. `null` (default)
+     * models AnkiDroid (no discriminator); setting a key models a keyed backend so continuity,
+     * mismatch and degradation cells can be driven deterministically.
+     */
+    var collectionIdentity: com.studyagent.client.core.anki.AnkiCollectionIdentity? = null
+
+    override val currentCollectionIdentity: com.studyagent.client.core.anki.AnkiCollectionIdentity?
+        get() = collectionIdentity
+
     override val availability: StateFlow<AnkiAvailability> =
         MutableStateFlow(AnkiAvailability.Ready(capabilities))
     override val capabilities: StateFlow<AnkiCapabilities> get() = caps

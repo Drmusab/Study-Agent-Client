@@ -82,3 +82,30 @@ data class AnkiCardRef(
 
     fun withCollectionKey(key: String?): AnkiCardRef = copy(collectionKey = key)
 }
+
+/**
+ * GATE 21K — a media resource the backend has actually stored (DECISION-21B-04, identity contract
+ * §4.2). [mediaName] is backend-local: the authoritative name the storing backend returned. The same
+ * name on two backends — or in two collections of one backend — names two unrelated resources, and
+ * a hash or filename alone never proves a remote upload completed. Structural equality therefore
+ * includes the backend and the collection evidence, exactly like every other reference type.
+ *
+ * This is deliberately **not** the render-side `AnkiMediaRef` (`AnkiModels.kt`), which stays an
+ * unqualified presentation pointer (21C record). A stored-media reference is produced only from a
+ * `Stored` result of the backend that performed the store, and it may only be referenced by a note
+ * created on that same backend — media never travels across a backend boundary inside a creation.
+ */
+@Serializable
+data class AnkiStoredMediaRef(
+    val backendId: AnkiBackendId,
+    val mediaName: String,
+    val collectionKey: String? = null
+) {
+    init {
+        require(mediaName.isNotBlank()) { "Stored media must carry the backend's name" }
+        requireOptionalId(collectionKey)
+    }
+    val stableKey: String get() = identityKey(backendId.stableId, collectionKey, "media", mediaName)
+
+    fun withCollectionKey(key: String?): AnkiStoredMediaRef = copy(collectionKey = key)
+}
