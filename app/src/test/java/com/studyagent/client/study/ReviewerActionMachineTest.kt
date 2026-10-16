@@ -196,9 +196,9 @@ class ReviewerActionMachineTest {
             turnId = ReviewTurnId("turn-1"),
             cardRef = card.ref,
             action = ReviewerAction.BuryCard,
-            // GATE 21I — AnkiDroid reports no collection key (DISCOVERY-21-03): the session
-            // context, and therefore the record, carries none. Keyless records are the normal
-            // AnkiDroid case and reconcile under the family's instance-bound evidence.
+            // GATE 21B `OP-M3`: no collection key means there is no authoritative match, so this
+            // record cannot use historical reconciliation even if the card is later observed in
+            // the desired state.
             collectionRef = null
         ).toRecord(1_000L)
         val seedLedger = store.restart(clock = { 1_000L })
@@ -219,7 +219,7 @@ class ReviewerActionMachineTest {
     }
 
     @Test
-    fun `a resolved restored action continues through a fresh read-only session`() = runBlocking {
+    fun `a keyless current-state observation cannot resolve a restored historical action`() = runBlocking {
         val store = InMemoryReviewerActionStore()
         val backendId = ReviewerActionHarness.BACKEND
         val card = ReviewerActionHarness.card("A")
@@ -228,10 +228,8 @@ class ReviewerActionMachineTest {
             turnId = ReviewTurnId("turn-1"),
             cardRef = card.ref,
             action = ReviewerAction.BuryCard,
-            // GATE 21I — AnkiDroid reports no collection key (DISCOVERY-21-03): keyless is the
-            // production shape for this backend; a recorded key against it would be degraded.
+            // No authoritative collection key: the locked OP-M3 matrix must block this record.
             collectionRef = null,
-            // The semantics frozen with the record (§28) are what authorizes the read-only probe.
             semantics = ReviewerActionSemantics(
                 supportsIdempotentReplay = true,
                 supportsAuthoritativeReconciliation = true
@@ -243,8 +241,11 @@ class ReviewerActionMachineTest {
         seedLedger.transition(
             request.actionId, ReviewerActionStatus.SUBMITTING,
             ReviewerActionTransition.BackendOutcomeUnknown())
-        // The fake reports the card is already buried: reconciliation proves the action applied.
-        val harness = ReviewerActionHarness(store = store)
+        // Even a synthetic desired-state observation is not consulted for this keyless binding.
+        val harness = ReviewerActionHarness(
+            store = store,
+            authoritativeReviewerActionReconciliation = true
+        )
         harness.fake.scriptActions(
             FakeAnkiBackend.ActionStep(
                 ReviewerActionBackendResult.OutcomeUnknown(AnkiError.QueryFailure("lost")),
@@ -252,7 +253,8 @@ class ReviewerActionMachineTest {
                     ReviewerActionReceipt(
                         backendId = backendId,
                         actionKey = ReviewerAction.BuryCard.key,
-                        cardState = ReviewerCardState.fromQueue(ReviewerCardState.QUEUE_MANUALLY_BURIED)
+                        cardState = ReviewerCardState.fromQueue(ReviewerCardState.QUEUE_MANUALLY_BURIED),
+                        detail = "synthetic_state_observation"
                     )
                 )
             )
@@ -265,18 +267,15 @@ class ReviewerActionMachineTest {
         harness.send(AnkiStudyEvent.RecoverReviewerAction(harness.state.epoch, actionId!!))
         harness.drain()
 
-        // The action is resolved and the session continues through a fresh read-only scheduler
-        // session — without ever replaying the action itself.
         assertEquals(0, harness.fake.reviewerActionBoundaryCrossings)
-        assertEquals(1, harness.fake.reviewerActionReconciliationCount)
-        assertNull(harness.action)
-        assertNotNull("a fresh session exists", harness.state.anki?.reviewSession)
-        // The machine is presenting a card again instead of staying blocked on the recovered record.
-        assertTrue(
-            "the recovered action must lead back to a presented card: ${harness.state.phase}",
-            harness.state.phase in setOf(
-                SessionPhase.WaitingForFirstCard, SessionPhase.SpeakingQuestion, SessionPhase.WaitingForAnswer)
-        )
+        assertEquals("the identity gate prevents any provider state read",
+            0, harness.fake.reviewerActionReconciliationCount)
+        assertEquals(ReviewerActionStatus.AMBIGUOUS, harness.store.durableRecords().single().status)
+        assertEquals(ReviewerActionStatus.AMBIGUOUS, harness.action?.status)
+        assertEquals(SessionPhase.ReviewerActionRecoveryRequired, harness.state.phase)
+        assertNull("no fresh session is started while the historical action is unresolved",
+            harness.state.anki?.reviewSession)
+        assertEquals("no scheduler card is fetched", 0, harness.fake.nextCardCount)
     }
 
     @Test

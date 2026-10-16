@@ -25,6 +25,8 @@ class ReviewerActionHarness(
     val commitStore: InMemoryReviewCommitStore = InMemoryReviewCommitStore(),
     capabilities: AnkiCapabilities = FakeAnkiBackend.REVIEW_ACTION_CAPABILITIES,
     flagWrites: Boolean = false,
+    /** Explicit test-only contract; false mirrors AnkiDroid's unsupported historical OP-M3. */
+    authoritativeReviewerActionReconciliation: Boolean = false,
     commitSteps: List<FakeAnkiBackend.CommitStep> = emptyList(),
     /**
      * GATE 21I — other backends installed alongside the session's own. A registry that holds more
@@ -44,10 +46,11 @@ class ReviewerActionHarness(
      * The default is production reality: AnkiDroid reports none (no key exists, DISCOVERY-21-03),
      * so a session bound to it records no collection and the collection dimension stays genuinely
      * unknown; every other identity models a *keyed* backend whose cards and session carry the
-     * same key it reports, so a durable record can reach an authoritative collection match —
-     * which is what the GATE 21C matrix needs before a mutation retry (`OP-M2`) or a read-only
-     * reconciliation (`OP-M3`) is permitted. Tests that need a keyed *local* backend alongside a
-     * PC substitute (so session-start resolution stays unambiguous) override this explicitly.
+     * same key it reports, so a durable record can reach an authoritative collection match.
+     * `OP-M3` still additionally requires an explicit authoritative-reconciliation capability;
+     * tests opt into that separately through `authoritativeReviewerActionReconciliation`. Tests
+     * that need a keyed *local* backend alongside a PC substitute (so session-start resolution
+     * stays unambiguous) override this explicitly.
      */
     liveCollectionKey: String? = if (backendId == BACKEND) null else COLLECTION_KEY
 ) {
@@ -61,6 +64,7 @@ class ReviewerActionHarness(
         initialCapabilities = capabilities,
         instanceId = "gate13",
         flagWrites = flagWrites,
+        authoritativeReviewerActionReconciliation = authoritativeReviewerActionReconciliation,
         commitSteps = commitSteps
     ).apply {
         currentCollectionIdentity = liveCollectionKey?.let { AnkiCollectionIdentity(backendId, it) }

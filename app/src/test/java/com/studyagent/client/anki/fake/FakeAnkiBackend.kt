@@ -49,7 +49,12 @@ class FakeAnkiBackend(
     private val guaranteeLevel: CommitGuaranteeLevel = mode.guarantee,
     private val persistedEffectStore: FakeBackendCommitStore = FakeBackendCommitStore(),
     /** GATE 16 — explicit deep-read fixtures; when absent, only already-known card facts project. */
-    cardDetails: List<AnkiCardDetails> = emptyList()
+    cardDetails: List<AnkiCardDetails> = emptyList(),
+    /**
+     * Test-only opt-in for a hypothetical backend with transaction-correlated historical action
+     * reconciliation. False by default: current AnkiDroid card state is not such evidence.
+     */
+    private val authoritativeReviewerActionReconciliation: Boolean = false
 ) : AnkiBackend {
     override val commitSemantics = CommitSemantics(guaranteeLevel,
         supportsIdempotentReplay = guaranteeLevel == CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED ||
@@ -923,7 +928,7 @@ class FakeAnkiBackend(
         val callsMutationEntry: Boolean = true,
         /** Refuses the boundary, as a backend must when the caller cannot make `SUBMITTING` durable. */
         val refusesMutationEntry: Boolean = false,
-        /** The read-only evidence `reconcileReviewerAction` reports while this step is current. */
+        /** Synthetic authoritative evidence returned only when this fake explicitly opts into reconciliation. */
         val reconciliation: ReviewerActionReconciliationResult? = null,
         /**
          * GATE 21I — simulate **process death** after the durable boundary was crossed but before
@@ -937,7 +942,7 @@ class FakeAnkiBackend(
          * GATE 21I — simulate process death **after** the provider effect was applied but before
          * the response reached the client (applied / lost response, crash-flavoured): the effect
          * happens on the fake's scheduler, then the process dies. The durable row stays
-         * `SUBMITTING` and only reconciliation may decide the outcome.
+         * `SUBMITTING`; only a backend that opted into authoritative recovery may decide the outcome.
          */
         val crashAfterApply: Boolean = false
     )
@@ -963,11 +968,11 @@ class FakeAnkiBackend(
 
     override fun reviewerActionSemantics(action: ReviewerAction): ReviewerActionSemantics =
         when (action.kind) {
-            // Mirrors the pinned AnkiDroid claim: bury/suspend are verified in both directions,
-            // a flag has no public write path at all — unless this fake was asked to model one.
+            // A test must opt into the synthetic transaction-correlated reconciliation contract;
+            // the default deliberately matches AnkiDroid's lack of historical reconciliation.
             ReviewerActionKind.BURY, ReviewerActionKind.SUSPEND -> ReviewerActionSemantics(
                 supportsIdempotentReplay = true,
-                supportsAuthoritativeReconciliation = true
+                supportsAuthoritativeReconciliation = authoritativeReviewerActionReconciliation
             )
             ReviewerActionKind.FLAG -> if (flagWrites) ReviewerActionSemantics(
                 supportsIdempotentReplay = true,
@@ -1024,6 +1029,10 @@ class FakeAnkiBackend(
         request: ReconcileReviewerActionRequest
     ): ReviewerActionReconciliationResult = mutex.withLock {
         actionReconciliations.incrementAndGet()
+        if (!reviewerActionSemantics(request.action).supportsAuthoritativeReconciliation) {
+            return@withLock ReviewerActionReconciliationResult.Unresolved(
+                AnkiError.UnsupportedApi(null, 0, "action_reconciliation_unsupported"))
+        }
         (actionSteps.firstOrNull() ?: lastActionStep)?.reconciliation
             ?: ReviewerActionReconciliationResult.Unresolved(AnkiError.Unknown("no_evidence"))
     }

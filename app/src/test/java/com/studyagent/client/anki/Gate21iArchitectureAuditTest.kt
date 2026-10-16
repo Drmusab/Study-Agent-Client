@@ -245,13 +245,26 @@ class Gate21iArchitectureAuditTest {
             backend.contains("ReviewerActionReconciliationResult.Unresolved()")
         )
 
-        // The pinned AnkiDroid contract: no flag write path at all, bury/suspend verified.
+        // The pinned AnkiDroid contract: no flag write path, and no transaction-correlated
+        // historical reconciliation for bury/suspend from a later card-state observation.
         val ankiDroid = main("data/anki/ankidroid/AnkiDroidBackend.kt").code()
         assertTrue("AnkiDroid never claims a flag capability", ankiDroid.contains("flags = false"))
         val semantics = ankiDroid.substringAfter("override fun reviewerActionSemantics(")
             .substringBefore("override suspend fun reconcileReviewerAction(")
         assertTrue(semantics.contains("ReviewerActionKind.FLAG -> ReviewerActionSemantics.UNVERIFIED"))
-        assertTrue(semantics.contains("supportsAuthoritativeReconciliation = true"))
+        assertTrue(semantics.contains("supportsAuthoritativeReconciliation = false"))
+        assertFalse(semantics.contains("supportsAuthoritativeReconciliation = true"))
+        val backendReconcile = ankiDroid.substringAfter("override suspend fun reconcileReviewerAction(")
+            .substringBefore("/** Content-free diagnostics")
+        assertTrue(backendReconcile.contains("action_reconciliation_unsupported"))
+        assertFalse("AnkiDroid must not delegate historical recovery to a current-state read",
+            backendReconcile.contains("performer.reconcile"))
+        val committer = main("data/anki/ankidroid/AnkiDroidReviewerActionCommitter.kt").code()
+        val historicalRead = committer.substringAfter("suspend fun reconcile(")
+            .substringBefore("private fun desiredQueueFor")
+        assertTrue(historicalRead.contains("action_reconciliation_unsupported"))
+        assertFalse("the historical reconciliation method must not read current card state",
+            historicalRead.contains("cardStates.readCardState"))
 
         // The modelled action family is card-scoped only: nothing note- or sibling-scoped exists, so
         // no adapter can silently widen a card action into a note mutation (INV-21I-08).
@@ -286,16 +299,22 @@ class Gate21iArchitectureAuditTest {
     fun `collection assurance follows the locked matrix and reconciliation stays honest`() {
         val policy = main("core/anki/ReviewerActionRoutingPolicy.kt").code()
         val reconcile = policy.substringAfter("fun reconcileRoute(")
-        // A verified mismatch and a degraded key are mismatch-grade in every family: both block.
-        assertTrue(reconcile.contains("AnkiIdentityAssurance.AuthoritativeMismatch -> blocked("))
-        assertTrue(reconcile.contains("AnkiUnverifiabilityQualifier.DEGRADED"))
-        assertTrue(reconcile.contains("blockReasonToken(AnkiContinuationBlockReason.COLLECTION_MISMATCH)"))
-        // An authoritative match additionally requires the family's own reconciliation evidence.
-        assertTrue(reconcile.contains("familyReconciliationAvailable(record, backend)"))
         assertTrue(
-            "RECONCILIATION_REQUIRES_AUTHORITATIVE_MATCH is a real refusal, not a comment",
-            reconcile.contains("AnkiContinuationBlockReason.RECONCILIATION_REQUIRES_AUTHORITATIVE_MATCH")
+            "reviewer actions use the shared locked continuation matrix for OP-M3",
+            reconcile.contains("AnkiIdentityContinuation.continuationVerdict(operation, check, facts)")
         )
+        assertTrue(
+            "the generic matrix receives the frozen ∩ live capability",
+            reconcile.contains("authoritativeReconciliationAvailable = familyReconciliationAvailable(record, backend)")
+        )
+        assertFalse("no family-specific exception may permit session continuity",
+            reconcile.contains("AnkiIdentityAssurance.SessionContinuityVerified ->"))
+        assertFalse("no family-specific exception may permit nominal-unverifiable OP-M3",
+            reconcile.contains("AnkiIdentityAssurance.IdentityUnverifiable ->"))
+        val matrix = main("core/anki/AnkiIdentityContinuation.kt").code()
+        assertTrue(matrix.contains("AnkiContinuationBlockReason.CONTINUITY_IS_NOT_COLLECTION_EVIDENCE"))
+        assertTrue(matrix.contains("AnkiContinuationBlockReason.RECONCILIATION_REQUIRES_AUTHORITATIVE_MATCH"))
+        assertTrue(matrix.contains("facts.authoritativeReconciliationAvailable"))
         // Retry/reconciliation capability is the frozen promise ∩ the live claim: it can only shrink.
         val capability = policy.substringAfter("private fun familyReconciliationAvailable(")
         assertTrue(capability.contains("record.frozenAuthoritativeReconciliation"))

@@ -269,10 +269,11 @@ sealed interface ReviewerActionReconciliationResult {
  * record's own card is consulted; a collection mismatch is
  * [ReviewerActionReconciliationResult.Unresolved], never a redirect.
  *
- * GATE 21I — the `OP-M3` identity gate (DECISION-21I-03) applies here, before any provider call:
- * a verified mismatch or a degraded key blocks the read with a stable token (zero calls), while a
- * keyless binding continues under the family's instance-bound card-state evidence, disclosed as
- * unverifiable — never as a verified collection match.
+ * GATE 21I / locked GATE 21B — the `OP-M3` gate applies here before any provider call. It requires
+ * both an authoritative collection match and the record's frozen ∩ live action-specific
+ * reconciliation capability. Mismatch, degraded, nominal-unverifiable, and session-continuity
+ * cells all return `Unresolved` with zero provider calls. A current card state is not treated as
+ * proof that a particular historical request applied.
  */
 interface ReviewerActionReconciler {
     suspend fun reconcile(record: ReviewerActionRecord): ReviewerActionReconciliationResult
@@ -306,12 +307,12 @@ class AnkiReviewerActionReconciler(
     }
 
     override suspend fun reconcile(record: ReviewerActionRecord): ReviewerActionReconciliationResult {
-        // GATE 21I — the identity gate runs **before** the provider call and before any other
-        // evidence is gathered. A verified collection mismatch, a degraded key or a foreign
-        // backend is `Unresolved` with a stable token — never a redirect to another collection,
-        // never a guess (DECISION-21I-03, CHECKPOINT 21I-14/21I-19). The reconciler has no
-        // session context, so it reads `boundIsLiveInThisProcess = false`: the conservative
-        // reading, which is also the reading after process death.
+        // GATE 21I / locked GATE 21B — the identity gate runs **before** the provider call and
+        // before any other evidence is gathered. Every cell except an authoritative collection
+        // match is blocked for OP-M3 (including nominal-unverifiable and session-continuity cells);
+        // a match still needs the frozen ∩ live family capability. Never redirect or guess. The
+        // reconciler has no session context, so it reads `boundIsLiveInThisProcess = false`: the
+        // conservative reading, which is also the reading after process death.
         val gate = routing.reconcileRoute(record, boundIsLiveInThisProcess = false)
         // The backend locked into the original action, not the current preference.
         val backend = when (gate) {

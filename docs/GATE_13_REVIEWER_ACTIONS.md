@@ -215,18 +215,27 @@ Consequences that the tests pin:
 
 ### 5.1 AnkiDroid backend facts behind the semantics (§28)
 
-| Action | Expressibility at the pin | Idempotent replay | Authoritative reconciliation |
+> **GATE 21B / 21I correction (2026-10-16):** The historical-reconciliation claims in this section
+> have been superseded. This does not change GATE 13's ledger, coordinator, status vocabulary, or
+> recovery ownership. AnkiDroid does not expose an action receipt or transaction-correlation key, so
+> its current card state cannot prove whether a particular earlier request applied. The 21I routing
+> layer now enforces the locked `OP-M3` requirement for both authoritative collection match and
+> authoritative reconciliation capability; AnkiDroid advertises neither for historical action
+> recovery, and its adapter returns `Unresolved` without a provider state read.
+
+| Action | Expressibility at the pin | Idempotent replay | Authoritative historical reconciliation |
 |---|---|---|---|
 | Flag | **none** — no flag column exists | n/a | n/a |
-| Bury | `ReviewInfo.BURY = "buried"`, card-scoped | yes (the committer checks the card's queue *before* dispatching; a second identical action writes nothing) | yes (immediate read-only card-state read) |
-| Suspend | `ReviewInfo.SUSPEND = "suspended"`, card-scoped | yes (same desired-state check) | yes (same read) |
+| Bury | `ReviewInfo.BURY = "buried"`, card-scoped | yes (desired-state preflight; ambiguous outcomes are never replayed) | **no** — current queue state is not transaction-correlated evidence (`OP-M3` unsupported) |
+| Suspend | `ReviewInfo.SUSPEND = "suspended"`, card-scoped | yes (same desired-state preflight) | **no** — current queue state is not transaction-correlated evidence (`OP-M3` unsupported) |
 
-Failure semantics are per action and audited in `AnkiDroidReviewerActionCommitter`: a returned row
-count is never success (the provider swallows scheduler exceptions), a refusal before IPC is
-provably-not-applied, and an unattributable post-mutation state is `OutcomeUnknown`. Reconciliation
-only claims `ConfirmedApplied` when the card is observed in the desired state — the pinned semantics
-are day-scoped (a bury expires at rollover, a suspend can be undone in AnkiDroid), so "not currently
-buried" cannot prove "was never buried".
+Failure semantics remain per action and audited in `AnkiDroidReviewerActionCommitter`: a returned
+row count is never success (the provider swallows scheduler exceptions), a refusal before IPC is
+provably not applied, and an unattributable post-mutation state is `OutcomeUnknown`. The immediate
+before/after read is used only to classify the synchronous call. Once an outcome is historical and
+ambiguous, neither a matching nor a non-matching current card state proves application or
+non-application; recovery remains unresolved unless a future backend contract provides
+transaction-correlated evidence.
 
 ---
 
