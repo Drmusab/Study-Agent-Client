@@ -1,6 +1,7 @@
 package com.studyagent.client.core.study
 
 import com.studyagent.client.core.anki.*
+import com.studyagent.client.core.anki.customstudy.CustomStudyPolicy
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -785,7 +786,8 @@ class AnkiStudyEffectExecutor(
             backend = registry.find(resolvedId),
             deck = request.deck,
             studySessionId = request.studySessionId,
-            startedAtEpochMs = effect.startedAtMs
+            startedAtEpochMs = effect.startedAtMs,
+            studyMode = request.studyMode
         )) {
             is StudySessionAdmission.Admitted -> admission.lock
             is StudySessionAdmission.Refused -> return failed(admission.error)
@@ -813,8 +815,28 @@ class AnkiStudyEffectExecutor(
         }
         when (val decks = backend.getDecks()) {
             is AnkiResult.Failure -> return failed(decks.error)
-            is AnkiResult.Success -> if (decks.value.none { it.ref == request.deck }) {
-                return failed(AnkiError.DeckNotFound(request.deck))
+            is AnkiResult.Success -> {
+                val deck = decks.value.firstOrNull { it.ref == request.deck }
+                    ?: return failed(AnkiError.DeckNotFound(request.deck))
+                // GATE 20 — the binding-moment custom-study guard (DECISION-20-02/20-15,
+                // INV-20-14/20-18). The deck listing has just been re-read from the live backend, so
+                // this is the last point at which a filtered deck can still be refused *before* the
+                // backend is asked to open a review session. The pre-binding start site asks the same
+                // question; asking it again here means a deck that became (or was revealed as)
+                // filtered between the two reads can never enter the scheduler as ordinary review.
+                when (val decision = CustomStudyPolicy.evaluate(
+                    deck = deck,
+                    backendId = id,
+                    capabilities = backend.customStudyCapabilities,
+                    rescheduling = if (deck.isFiltered == true) {
+                        (backend.filteredDeckRescheduling(deck.ref) as? AnkiResult.Success)?.value
+                    } else {
+                        null
+                    }
+                )) {
+                    is CustomStudyPolicy.Decision.Refused -> return failed(CustomStudyPolicy.errorFor(decision.refusal))
+                    is CustomStudyPolicy.Decision.Proceed -> Unit
+                }
             }
         }
         // The admitted lock is rebuilt with the backend's live capabilities (an observation, never

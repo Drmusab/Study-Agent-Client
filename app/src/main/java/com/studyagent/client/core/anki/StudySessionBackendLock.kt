@@ -1,7 +1,9 @@
 package com.studyagent.client.core.anki
 
+import com.studyagent.client.core.anki.customstudy.AnkiStudyMode
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import kotlinx.serialization.json.Json
 
 /**
@@ -36,6 +38,22 @@ data class StudySessionBackendLock(
     val collection: AnkiCollectionIdentity? = null,
     val deckRef: AnkiDeckRef? = null,
     val startedAtEpochMs: Long = 0L,
+    /**
+     * GATE 20 — the study mode of the *live* session, carried in memory only (`@Transient`: it is
+     * never written to durable bytes, so the persisted schema and every older reader are
+     * unchanged).
+     *
+     * The rule this encodes is deliberate (DECISION-20-09/20-15):
+     *
+     * - while the session lives, the mode is part of its identity and never changes;
+     * - a **restored** session is always [AnkiStudyMode.Normal], because a non-normal mode cannot
+     *   be started in this build — [com.studyagent.client.core.anki.customstudy.CustomStudyPolicy]
+     *   refuses it before any lock exists. So the decode default is never a silent downgrade of a
+     *   real filtered session; it is the only value a restored session can legitimately have;
+     * - a future backend that *does* support filtered review must persist the mode here and refuse
+     *   a restore that cannot reconstruct it. Until then this comment is the contract.
+     */
+    @Transient val studyMode: AnkiStudyMode = AnkiStudyMode.DEFAULT,
     val schemaVersion: Int = CURRENT_SCHEMA_VERSION
 ) {
     init {
@@ -72,7 +90,8 @@ data class StudySessionBackendLock(
             deckRef = deckRef,
             startedAtEpochMs = startedAtEpochMs,
             capabilities = capabilities,
-            studySessionId = studySessionId
+            studySessionId = studySessionId,
+            studyMode = studyMode
         )
 
     companion object {
@@ -87,6 +106,8 @@ data class StudySessionBackendLock(
                 collection = context.collection,
                 deckRef = context.deckRef,
                 startedAtEpochMs = context.startedAtEpochMs,
+                // Carried in memory for this session's lifetime; never written to durable bytes.
+                studyMode = context.studyMode,
                 schemaVersion = CURRENT_SCHEMA_VERSION
             )
     }
@@ -181,7 +202,13 @@ object StudySessionAdmissionPolicy {
         backend: AnkiBackend?,
         deck: AnkiDeckRef,
         studySessionId: String,
-        startedAtEpochMs: Long
+        startedAtEpochMs: Long,
+        /**
+         * GATE 20 — the mode this session was admitted for. It is recorded on the lock (in memory
+         * only, see [StudySessionBackendLock.studyMode]) so the session's identity, not a later
+         * observation, decides which of the backend's study surfaces it draws from.
+         */
+        studyMode: AnkiStudyMode = AnkiStudyMode.DEFAULT
     ): StudySessionAdmission {
         if (studySessionId.isBlank() || startedAtEpochMs < 0L) {
             return StudySessionAdmission.Refused(
@@ -249,7 +276,8 @@ object StudySessionAdmissionPolicy {
                 backendId = id,
                 collection = liveKey?.let { AnkiCollectionIdentity(id, it) },
                 deckRef = deck,
-                startedAtEpochMs = startedAtEpochMs
+                startedAtEpochMs = startedAtEpochMs,
+                studyMode = studyMode
             )
         )
     }

@@ -3,6 +3,7 @@ package com.studyagent.client.ui.screens.library
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.studyagent.client.core.anki.AnkiAvailability
+import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiCapabilities
@@ -17,6 +18,8 @@ import com.studyagent.client.data.anki.AnkiLibraryRepository
 import com.studyagent.client.data.anki.context.AnkiReadContextAccess
 import com.studyagent.client.data.anki.context.AnkiReadContextBinding
 import com.studyagent.client.data.repository.AnkiLocalStudyStarter
+import com.studyagent.client.ui.screens.customstudy.CustomStudyPanelMapper
+import com.studyagent.client.ui.screens.customstudy.CustomStudyPanelState
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -267,13 +270,18 @@ class DeckDetailsViewModel(
             )
             val activeSession = !inputs.studyState.canStartAnotherSession()
             val backendReady = inputs.availability is AnkiAvailability.Ready
+            // GATE 20 — the same policy the start site and the executor enforce, projected for the
+            // user: a deck that cannot be studied is explained here, before the Start button is
+            // pressed, and the Start button is disabled by it (DECISION-20-22, AUDIT-20-14).
+            val customStudy = buildCustomStudyPanel(selectedDeck)
             val canStudy = backendReady &&
                 inputs.capabilities.deckListing &&
                 inputs.capabilities.review &&
                 inputs.capabilities.scheduledReview &&
                 inputs.localStudyBackendId == backendId &&
                 !activeSession &&
-                !isStartingStudy
+                !isStartingStudy &&
+                customStudy.canStartStudy
             return DeckDetailsUiState.Ready(
                 summary = summary,
                 backend = backendId,
@@ -286,7 +294,8 @@ class DeckDetailsViewModel(
                 isStartingStudy = isStartingStudy,
                 readError = operationError,
                 studyStartError = studyStartError,
-                readContext = binding.context
+                readContext = binding.context,
+                customStudy = customStudy
             )
         }
 
@@ -319,6 +328,17 @@ class DeckDetailsViewModel(
             }
         }
     }
+
+    /**
+     * GATE 20 — project the backend's audited custom-study capabilities and this deck's own
+     * filtered flag into the panel. Pure: no provider traffic, no scheduler call, no deck walk.
+     */
+    private fun buildCustomStudyPanel(deck: AnkiDeck): CustomStudyPanelState =
+        CustomStudyPanelMapper.build(
+            deckName = deck.name,
+            deckIsFiltered = deck.isFiltered,
+            capabilities = backend.customStudyCapabilities
+        )
 
     private fun StudyState.canStartAnotherSession(): Boolean =
         this is StudyState.Idle || this is StudyState.SessionFinished || this is StudyState.Error

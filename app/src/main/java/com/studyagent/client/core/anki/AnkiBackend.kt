@@ -10,6 +10,8 @@ import com.studyagent.client.core.anki.edit.NoteMutationBackendResult
 import com.studyagent.client.core.anki.edit.NoteMutationReconciliationRequest
 import com.studyagent.client.core.anki.edit.NoteMutationReconciliationResult
 import com.studyagent.client.core.anki.edit.NoteMutationSemantics
+import com.studyagent.client.core.anki.customstudy.AnkiCustomStudyCapabilities
+import com.studyagent.client.core.anki.customstudy.AnkiReschedulingDisclosure
 import com.studyagent.client.core.models.Rating
 import kotlinx.coroutines.flow.StateFlow
 
@@ -53,6 +55,37 @@ interface AnkiBackend {
      * silently retained across a disconnect, a reconnect or a version change.
      */
     val implementedCapabilities: AnkiCapabilities? get() = null
+
+    /**
+     * GATE 20 — what this backend can honestly do for custom study / filtered review
+     * (DECISION-20-21, CAPABILITIES).
+     *
+     * This is a *static claim by the wired adapter*, exactly like [implementedCapabilities]: it
+     * says nothing about readiness (that is [availability]) and nothing about authorisation. A
+     * backend that has not audited its public contract against its own product semantics must
+     * answer [AnkiCustomStudyCapabilities.NONE], which is the default and is the only safe answer.
+     *
+     * In particular `canReviewFilteredDeck` is only truthful together with a provable rating commit
+     * and an exposed rescheduling disclosure; the type's constructor refuses any other combination,
+     * so no adapter can advertise a filtered-review mode that GATE 11 would leave permanently
+     * ambiguous (INV-20-11, DECISION-20-16/20-22).
+     */
+    val customStudyCapabilities: AnkiCustomStudyCapabilities get() = AnkiCustomStudyCapabilities.NONE
+
+    /**
+     * GATE 20 — what the backend says answers inside **this** filtered/dynamic deck do to normal
+     * scheduling (DECISION-20-06/20-07, DISCOVERY-20-09).
+     *
+     * Called only for a deck the backend itself reports as filtered, and only *before* the session
+     * starts: the pre-start disclosure DECISION-20-22 requires cannot be produced after the fact.
+     * Read-only by contract — it never rates, rebuilds, empties or selects a card.
+     *
+     * The default answers [AnkiError.UnsupportedAction]: a backend that cannot disclose the
+     * difference must never have it inferred from a deck name, a card queue value observed later,
+     * or a per-card guess (INV-20-16/INV-20-17).
+     */
+    suspend fun filteredDeckRescheduling(deckRef: AnkiDeckRef): AnkiResult<AnkiReschedulingDisclosure> =
+        AnkiResult.Failure(AnkiError.UnsupportedAction(action = "filtered_deck_rescheduling"))
 
     /** Effect semantics, not UI capability. Unverified adapters cannot claim safe replay. */
     val commitSemantics: CommitSemantics get() = CommitSemantics.UNVERIFIED

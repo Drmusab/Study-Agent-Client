@@ -57,7 +57,15 @@ class AnkiCommitHarness(
     /** GATE 11 checkpoint 4 — deterministic scheduler failure mode for the fake backend. */
     fakeMode: FakeCommitMode = FakeCommitMode.SUCCESS,
     /** LOCAL_DEDUP_ONLY makes the fake re-apply any repeated id that already had an effect. */
-    guarantee: CommitGuaranteeLevel = fakeMode.guarantee
+    guarantee: CommitGuaranteeLevel = fakeMode.guarantee,
+    /**
+     * GATE 20 — a ready-made fake whose decks, cards, capabilities and disclosures the test chose
+     * (for example a deck the backend reports as filtered, or a backend that claims filtered
+     * review). When supplied the harness uses it verbatim instead of building the default one, so a
+     * custom-study start can be exercised through the real machine without touching the defaults
+     * every other GATE 11/21H test relies on.
+     */
+    customBackend: FakeAnkiBackend? = null
 ) {
     var now: Long = 10_000L
     val clock: () -> Long = { now }
@@ -75,9 +83,11 @@ class AnkiCommitHarness(
      * cannot confirm is the fail-closed *degraded* case, and 21H tests construct it on purpose.
      */
     val liveCollectionKey: String? = if (backendId == BACKEND) null else COLLECTION_KEY
-    val fake = FakeAnkiBackend(id = backendId, decks = listOf(AnkiDeck(deck, "Deck")), cards = cards,
+    val fake: FakeAnkiBackend = customBackend ?: FakeAnkiBackend(
+        id = backendId, decks = listOf(AnkiDeck(deck, "Deck")), cards = cards,
         commitSteps = commitSteps, nextErrors = nextErrors, instanceId = "gate11", mode = fakeMode,
-        guaranteeLevel = guarantee).apply {
+        guaranteeLevel = guarantee
+    ).apply {
         currentCollectionIdentity = liveCollectionKey?.let { AnkiCollectionIdentity(backendId, it) }
     }
     val backend: AnkiBackend = wrap(fake)

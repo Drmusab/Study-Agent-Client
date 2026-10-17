@@ -2,12 +2,15 @@ package com.studyagent.client.data.repository
 
 import com.studyagent.client.core.anki.AnkiBackend
 import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.AnkiDeck
 import com.studyagent.client.core.anki.AnkiBackendMode
 import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiBackendResolver2
 import com.studyagent.client.core.anki.AnkiDeckRef
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiResult
+import com.studyagent.client.core.anki.customstudy.AnkiStudyMode
+import com.studyagent.client.core.anki.customstudy.CustomStudyPolicy
 import com.studyagent.client.core.anki.BackendResolutionRequest2
 import com.studyagent.client.core.anki.BackendResolutionResult2
 import com.studyagent.client.core.anki.ReviewerActionCapabilities
@@ -101,7 +104,12 @@ class AnkiLocalStudyStarter(
             val studySessionId: String,
             val backendId: AnkiBackendId,
             val deck: AnkiDeckRef,
-            val reviewerActions: ReviewerActionCapabilities
+            val reviewerActions: ReviewerActionCapabilities,
+            /**
+             * GATE 20 — the mode the session was admitted in, echoed so diagnostics and tests can
+             * assert exactly what the session was started as (DECISION-20-09).
+             */
+            val studyMode: AnkiStudyMode = AnkiStudyMode.DEFAULT
         ) : Result
 
         /**
@@ -163,6 +171,20 @@ class AnkiLocalStudyStarter(
         val deck = resolveDeck(backend, options.deckName, options.deckId)
             ?: return Result.Refused(REASON_DECK_NOT_FOUND, null)
 
+        // GATE 20 — the pre-binding custom-study gate (DECISION-20-02/20-15, IMPLEMENTATION-20-08).
+        // Nothing here filters, sorts or counts a card: the question is only *which* of the
+        // backend's study surfaces this session may draw from, and the answer comes from the
+        // backend's own listing plus its audited custom-study claims. A filtered deck on a backend
+        // that cannot review one is refused here, before any session exists — never started and then
+        // stalled at its first ambiguous rating (INV-20-11/INV-20-18).
+        val studyMode = when (val decision = evaluateCustomStudy(backend, deck)) {
+            is CustomStudyPolicy.Decision.Proceed -> decision.mode
+            is CustomStudyPolicy.Decision.Refused -> return Result.Refused(
+                REASON_CUSTOM_STUDY_REFUSED,
+                CustomStudyPolicy.errorFor(decision.refusal)
+            )
+        }
+
         // STEP 32.2 — the freeze. Session capabilities come from the backend's own audited contract at
         // this instant and are immutable for the session's lifetime.
         val reviewerActions = backend.reviewerActionCapabilities()
@@ -172,35 +194,63 @@ class AnkiLocalStudyStarter(
             AnkiStudyRequest(
                 studySessionId = studySessionId,
                 preference = preference,
-                deck = deck,
+                deck = deck.ref,
                 speakQuestion = options.speakQuestion,
                 evaluateAnswers = options.evaluateAnswers,
                 speakFeedback = options.speakFeedback,
                 speakAnswer = options.speakAnswer,
-                reviewerActions = reviewerActions
+                reviewerActions = reviewerActions,
+                studyMode = studyMode
             )
         )
         return Result.Started(
             studySessionId = studySessionId,
             backendId = backendId,
-            deck = deck,
-            reviewerActions = reviewerActions
+            deck = deck.ref,
+            reviewerActions = reviewerActions,
+            studyMode = studyMode
         )
     }
+
+    /**
+     * GATE 20 — ask the backend, not the UI, what this deck is and what a session in it means.
+     *
+     * The rescheduling disclosure is only fetched for a deck the backend itself reports as
+     * filtered, so an ordinary start performs exactly the same provider traffic as before.
+     */
+    private suspend fun evaluateCustomStudy(
+        backend: AnkiBackend,
+        deck: AnkiDeck
+    ): CustomStudyPolicy.Decision = CustomStudyPolicy.evaluate(
+        deck = deck,
+        backendId = backend.id,
+        capabilities = backend.customStudyCapabilities,
+        rescheduling = if (deck.isFiltered == true) {
+            (backend.filteredDeckRescheduling(deck.ref) as? AnkiResult.Success)?.value
+        } else {
+            null
+        }
+    )
 
     /** `null` = the user's deck name is not in this backend's collection (or it said nothing). */
     private suspend fun resolveDeck(
         backend: AnkiBackend,
         deckName: String?,
         deckId: String?
-    ): AnkiDeckRef? {
+    ): AnkiDeck? {
         if (deckName == null && deckId == null) {
-            // "The deck AnkiDroid has selected", when the contract exposes that notion; otherwise the
-            // backend's own current deck is not ours to guess, and the caller must name one.
-            return when (val selected = backend.getSelectedDeck()) {
-                is AnkiResult.Success -> selected.value
+            // "The deck AnkiDroid has selected", when the contract exposes that notion. That read
+            // carries no filtered flag, so this start spends one extra *batched* listing read — the
+            // same single read the Library performs — to know the deck before dispatching. A named
+            // start pays nothing extra, and the binding moment re-asks the question either way.
+            val selected = when (val result = backend.getSelectedDeck()) {
+                is AnkiResult.Success -> result.value
                 is AnkiResult.Failure -> null
-            }
+            } ?: return null
+            return when (val decks = backend.getDecks()) {
+                is AnkiResult.Success -> decks.value.firstOrNull { it.ref == selected }
+                is AnkiResult.Failure -> null
+            } ?: AnkiDeck(ref = selected, name = selected.deckId, isFiltered = null)
         }
         return when (val decks = backend.getDecks()) {
             is AnkiResult.Success -> decks.value.firstOrNull { deck ->
@@ -209,7 +259,7 @@ class AnkiLocalStudyStarter(
                 } else {
                     deck.ref.backendId == backend.id && deck.name == deckName
                 }
-            }?.ref
+            }
             is AnkiResult.Failure -> null
         }
     }
@@ -267,5 +317,12 @@ class AnkiLocalStudyStarter(
         const val REASON_BACKEND_NOT_REGISTERED = "backend_not_registered"
         const val REASON_BACKEND_NOT_READY = "backend_not_ready"
         const val REASON_DECK_NOT_FOUND = "deck_not_found"
+
+        /**
+         * GATE 20 — the deck cannot be studied as ordinary review and no custom-study mode exists on
+         * this backend to study it as anything else (a filtered deck on a backend that cannot review
+         * one). The refusal's [Result.Refused.error] names the exact reason.
+         */
+        const val REASON_CUSTOM_STUDY_REFUSED = "custom_study_unsupported"
     }
 }
