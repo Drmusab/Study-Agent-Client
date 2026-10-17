@@ -33,6 +33,8 @@ import com.studyagent.client.core.anki.edit.NoteDeckChangeScope
 import com.studyagent.client.core.anki.edit.NoteMutationBackendResult
 import com.studyagent.client.core.anki.edit.NoteMutationSemantics
 import com.studyagent.client.core.anki.edit.NoteMutationStep
+import com.studyagent.client.core.anki.customstudy.AnkiCustomStudyCapabilities
+import com.studyagent.client.core.anki.customstudy.AnkiReschedulingDisclosure
 import com.studyagent.client.core.anki.AnkiScheduledCard
 import com.studyagent.client.core.anki.unavailabilityError
 import com.studyagent.client.core.anki.BeginReviewRequest
@@ -153,6 +155,17 @@ class AnkiDroidBackend(
 ) : AnkiBackend {
 
     override val id: AnkiBackendId = AnkiBackendId.AnkiDroidLocal
+
+    /**
+     * GATE 20 — the audited custom-study claim for the pinned public provider: **nothing is
+     * supported**. See [AnkiDroidCustomStudyCapabilities] for the per-property evidence. The
+     * adapter can detect a filtered deck (`deck_dyn`) and must refuse to study one; it can neither
+     * create, rebuild, empty, filter, order nor de-schedule a session, and it cannot prove what a
+     * rating did inside a filtered deck (GATE 11 leaves that permanently ambiguous).
+     */
+    override val customStudyCapabilities: AnkiCustomStudyCapabilities =
+        AnkiDroidCustomStudyCapabilities.AUDITED
+
     // The public provider has neither a ReviewCommitId key nor a durable commit receipt.
     // Construction fails closed if this claim is later widened without the matching primitives.
     override val commitSemantics = com.studyagent.client.core.anki.CommitSemantics.ANKIDROID
@@ -675,6 +688,22 @@ class AnkiDroidBackend(
         } catch (cancellation: CancellationException) {
             throw cancellation
         }
+    }
+
+    /**
+     * GATE 20 — what answers inside this filtered deck do to normal scheduling.
+     *
+     * Always refused at this pin (never inferred): `FlashCardsContract.Deck` exposes no `reschedule`
+     * flag, no deck config and no filtered-deck metadata beyond `deck_dyn`, so the adapter has no
+     * public source for the answer. A per-card `queue = 4` (`PreviewRepeat`) is observable only
+     * *after* a card has been scheduled and says nothing about the deck, so using it here would be
+     * a guess about the mode the user is about to enter (INV-20-16/INV-20-17).
+     */
+    override suspend fun filteredDeckRescheduling(deckRef: AnkiDeckRef): AnkiResult<AnkiReschedulingDisclosure> {
+        if (deckRef.backendId != id) {
+            return AnkiResult.Failure(AnkiError.InvalidRequest(detail = "custom_study_foreign_deck"))
+        }
+        return AnkiDroidCustomStudyCapabilities.filteredDeckRescheduling(deckRef)
     }
 
     fun lastDeckQueryDiagnostics(): AnkiDeckQueryDiagnostics = deckGateway.lastListingDiagnostics()

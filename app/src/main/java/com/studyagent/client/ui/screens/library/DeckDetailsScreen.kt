@@ -41,6 +41,7 @@ import com.studyagent.client.ui.components.BannerTone
 import com.studyagent.client.ui.components.InfoBanner
 import com.studyagent.client.ui.components.PrimaryButton
 import com.studyagent.client.ui.components.SecondaryButton
+import com.studyagent.client.ui.screens.customstudy.CustomStudyPanel
 import com.studyagent.client.ui.components.StudyAgentTopBar
 import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.AppShape
@@ -188,6 +189,9 @@ fun DeckDetailsScreen(
                         }
                         item(key = "identity") { DeckIdentityCard(current) }
                         item(key = "summary") { DeckSummaryCard(current) }
+                        current.customStudy?.let { panel ->
+                            item(key = "custom-study") { CustomStudyPanel(state = panel) }
+                        }
                         if (current.capabilities.cardBrowser.canBrowseDeck) {
                             item(key = "browse-cards") {
                                 SecondaryButton(

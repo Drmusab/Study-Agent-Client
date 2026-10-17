@@ -6,6 +6,7 @@ import com.studyagent.client.core.anki.AnkiCapabilities
 import com.studyagent.client.core.anki.AnkiDeckSummary
 import com.studyagent.client.core.anki.AnkiError
 import com.studyagent.client.core.anki.AnkiReadContext
+import com.studyagent.client.ui.screens.customstudy.CustomStudyPanelState
 
 sealed interface DeckDetailsUiState {
     data object Loading : DeckDetailsUiState
@@ -22,7 +23,12 @@ sealed interface DeckDetailsUiState {
         val isStartingStudy: Boolean = false,
         val readError: AnkiError? = null,
         val studyStartError: AnkiError? = null,
-        val readContext: AnkiReadContext? = null
+        val readContext: AnkiReadContext? = null,
+        /**
+         * GATE 20 — the capability-honest custom-study surface for this deck. Present whenever the
+         * deck itself is known; `null` only before the first successful read.
+         */
+        val customStudy: CustomStudyPanelState? = null
     ) : DeckDetailsUiState
 
     data class Unavailable(

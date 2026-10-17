@@ -1,6 +1,7 @@
 package com.studyagent.client.core.study
 
 import com.studyagent.client.core.anki.*
+import com.studyagent.client.core.anki.customstudy.AnkiStudyMode
 import com.studyagent.client.core.models.Evaluation
 import com.studyagent.client.core.models.Rating
 
@@ -258,7 +259,14 @@ data class AnkiStudyRequest(
      * (INV-13-15); the default offers nothing, so a caller that has not consulted the backend's
      * capabilities cannot accidentally enable a mutation it never audited.
      */
-    val reviewerActions: ReviewerActionCapabilities = ReviewerActionCapabilities.NONE
+    val reviewerActions: ReviewerActionCapabilities = ReviewerActionCapabilities.NONE,
+    /**
+     * GATE 20 — which of the backend's study surfaces this session draws from
+     * (DECISION-20-09, IMPLEMENTATION-20-07). Decided before the request exists, by
+     * [com.studyagent.client.core.anki.customstudy.CustomStudyPolicy] against the backend's live
+     * deck listing and its audited custom-study capabilities, and immutable from then on.
+     */
+    val studyMode: AnkiStudyMode = AnkiStudyMode.DEFAULT
 ) {
     init { require(studySessionId.isNotBlank()) }
 }

@@ -24,6 +24,7 @@ import com.studyagent.client.core.anki.BackendCommitResult
 import com.studyagent.client.core.anki.BeginReviewRequest
 import com.studyagent.client.core.anki.CommitPreparation
 import com.studyagent.client.core.anki.CommitRatingRequest
+import com.studyagent.client.core.anki.customstudy.AnkiReschedulingDisclosure
 import com.studyagent.client.core.anki.NextCardResult
 import com.studyagent.client.core.anki.ReconcileCommitRequest
 import com.studyagent.client.core.anki.ReconcileCommitResult
@@ -138,6 +139,13 @@ internal class ProbeOnlyBackend(
 
     override suspend fun browseCards(query: AnkiCardQuery): AnkiResult<AnkiCardPage> =
         AnkiResult.Failure(refuse("browseCards"))
+
+    /**
+     * GATE 20 — the custom-study read. Recorded like every other member: a probe-only backend must
+     * not be able to answer a question it has no business answering, either.
+     */
+    override suspend fun filteredDeckRescheduling(deckRef: AnkiDeckRef): AnkiResult<AnkiReschedulingDisclosure> =
+        AnkiResult.Failure(refuse("filteredDeckRescheduling"))
 
     override suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession> =
         AnkiResult.Failure(refuse("beginReview"))

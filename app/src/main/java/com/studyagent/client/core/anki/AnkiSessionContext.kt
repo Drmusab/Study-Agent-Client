@@ -1,5 +1,6 @@
 package com.studyagent.client.core.anki
 
+import com.studyagent.client.core.anki.customstudy.AnkiStudyMode
 import kotlinx.serialization.Serializable
 
 /**
@@ -13,11 +14,31 @@ data class AnkiSessionContext(
     val deckRef: AnkiDeckRef?,
     val startedAtEpochMs: Long,
     val capabilities: AnkiCapabilities,
-    val studySessionId: String
+    val studySessionId: String,
+    /**
+     * GATE 20 — which of the backend's study surfaces this session draws from
+     * (DECISION-20-09, IMPLEMENTATION-20-07). It is part of the *session's* identity for its
+     * lifetime and is immutable like every other field here: a session never migrates from filtered
+     * review to ordinary review, or the other way round (INV-20-14/INV-20-18).
+     *
+     * It is deliberately **not** persisted (see [StudySessionBackendLock.studyMode]): a restored
+     * session is always [AnkiStudyMode.Normal], and a non-normal mode is unreachable in this build
+     * because [com.studyagent.client.core.anki.customstudy.CustomStudyPolicy] refuses every start
+     * that would need one. That makes the restore default a documented impossibility rather than a
+     * silent downgrade.
+     */
+    val studyMode: AnkiStudyMode = AnkiStudyMode.DEFAULT
 ) {
     init {
         require(studySessionId.isNotBlank())
         require(startedAtEpochMs >= 0)
+        // A filtered session studies the filtered deck it is bound to; a context that names a
+        // different deck is contradictory data, refused at construction (never repaired).
+        require(studyMode !is AnkiStudyMode.Filtered || deckRef == null ||
+            (deckRef.backendId == studyMode.filteredDeckRef.backendId &&
+                deckRef.deckId == studyMode.filteredDeckRef.deckId)) {
+            "A filtered study mode must be bound to the filtered deck it names"
+        }
         // A collection identity naming a *different* backend than its own context is
         // self-contradictory data — structural nonsense, refused at construction.
         // A foreign *deckRef* is different in kind: it is a cross-backend request that the

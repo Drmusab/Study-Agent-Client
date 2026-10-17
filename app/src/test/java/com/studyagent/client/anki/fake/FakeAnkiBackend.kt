@@ -1,6 +1,8 @@
 package com.studyagent.client.anki.fake
 
 import com.studyagent.client.core.anki.*
+import com.studyagent.client.core.anki.customstudy.AnkiCustomStudyCapabilities
+import com.studyagent.client.core.anki.customstudy.AnkiReschedulingDisclosure
 import com.studyagent.client.core.models.Rating
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
@@ -54,7 +56,19 @@ class FakeAnkiBackend(
      * Test-only opt-in for a hypothetical backend with transaction-correlated historical action
      * reconciliation. False by default: current AnkiDroid card state is not such evidence.
      */
-    private val authoritativeReviewerActionReconciliation: Boolean = false
+    private val authoritativeReviewerActionReconciliation: Boolean = false,
+    /**
+     * GATE 20 — the custom-study claims this fake makes. Defaults to "nothing", the same safe
+     * answer every unaudited adapter gives; a test that needs a backend which *claims* filtered
+     * review passes a value here (and the capability type refuses any claim that is not also
+     * provable and disclosed).
+     */
+    override val customStudyCapabilities: AnkiCustomStudyCapabilities = AnkiCustomStudyCapabilities.NONE,
+    /**
+     * GATE 20 — what this fake discloses about answers in a filtered deck. `null` (the default)
+     * models a backend that cannot disclose it: the read is refused, exactly like AnkiDroid's.
+     */
+    private val filteredRescheduling: AnkiReschedulingDisclosure? = null
 ) : AnkiBackend {
     override val commitSemantics = CommitSemantics(guaranteeLevel,
         supportsIdempotentReplay = guaranteeLevel == CommitGuaranteeLevel.IDEMPOTENT_REPLAY_SUPPORTED ||
@@ -121,6 +135,13 @@ class FakeAnkiBackend(
     private var session: AnkiReviewSession? = null
     private var beginRequest: BeginReviewRequest? = null
     private var queue: List<AnkiRenderedCard> = emptyList()
+
+    /**
+     * GATE 20 — the card order *this scheduler* is serving, read-only, for tests that must prove a
+     * presented card came from the backend's queue rather than from a client-side list. It is the
+     * fake's own state, never a prediction of what the app will show.
+     */
+    val schedulerQueueCardIds: List<String> get() = queue.map { it.ref.cardId ?: it.ref.noteId ?: "?" }
     private var cursor = 0
     private var active: AnkiReviewTurn? = null
 
@@ -563,6 +584,11 @@ class FakeAnkiBackend(
             AnkiResult.Success(selectedDeckRef)
         }
     }
+
+    override suspend fun filteredDeckRescheduling(deckRef: AnkiDeckRef): AnkiResult<AnkiReschedulingDisclosure> =
+        filteredRescheduling
+            ?.let { AnkiResult.Success(it) }
+            ?: AnkiResult.Failure(AnkiError.UnsupportedAction(action = "filtered_deck_rescheduling"))
 
     override suspend fun beginReview(request: BeginReviewRequest): AnkiResult<AnkiReviewSession> {
         delay(latencyMs)
