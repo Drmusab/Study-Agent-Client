@@ -486,3 +486,53 @@ is unreachable must **not** become blindly replayable because an offline queue n
 ```text
 offline read tolerance ≠ offline mutation queue
 ```
+
+---
+
+## 18. Addendum (GATE 21K evidence, revision of `b4ea0be3`)
+
+**Why a locked document is being touched.** Mandatory Execution Rule 6 forbids modifying a locked Gate
+without documenting the dependency and the regression risk. Both are stated here. This addendum
+changes **no lock semantics, no invariant and no test**: it corrects a bookkeeping overstatement in
+§16 and records the current state of two Sub-Gates that §16 does not mention.
+
+**Dependency.** `docs/GATE_21J_NOTE_EDIT_BINDING.md` §1 recorded `GATE 21K: NOT STARTED`. The 21K
+*implementation* later landed at HEAD, but its Sub-Gate *evidence* never did:
+
+| Item | State at `b4ea0be3c5ee8e988a3eb9d3322c3956b4d49149` |
+|---|---|
+| `docs/GATE_21K_*.md` | absent |
+| `Gate21k*Test.kt` | absent |
+| `Gate21kFixtures.kt` | orphaned — zero referencing tests |
+
+§16 lists `core/anki/create/NoteCreationRoutingPolicy.kt — GATE 21K` as produced and lists
+`Gate21kFixtures.kt` under tests, but lists no 21K report and no 21K test class. VER-21K-01 … 06
+therefore had **no executed evidence** when this lock was written.
+
+**What has changed since.** `docs/GATE_21K_NOTE_CREATION_BINDING.md` now supplies canonical executed
+evidence: `AUDIT-21K-01 … 12` (16 tests) and `VER-21K-01 … 06` plus K01/K04/K05/K06 (27 tests),
+43/43 PASS. Full-suite regression re-measured in the same sandbox:
+
+```text
+baseline (reproduced independently):  classes=227  tests=2756  passed=2756  failed=0
+after 21K evidence:                   classes=229  tests=2799  passed=2799  failed=0
+capability pins:                      13 hold, 0 disagree, 0 not verifiable
+```
+
+**Regression risk of this addendum.** None to code: no production source changed. The risk is to the
+*claim*, and it is recorded rather than repaired silently.
+
+**Corrected lock-matrix state.**
+
+| Sub-Gate | §16/§"Gate Status" implied | Actual |
+|---|---|---|
+| 21A – 21J | LOCKED | **LOCKED** (unchanged) |
+| 21K | listed as produced, no evidence | **LOCKED (harness-scoped)** as of this addendum |
+| 21L | — | **NOT STARTED / BLOCKED** on GATE 20 (§14 item 7, `docs/GATE_21L_BLOCKED_REPORT.md`) |
+| 21M | not mentioned in §16 | **NOT STARTED** — `ui/screens/diagnostics/` holds no Anki-backend diagnostics, although `AnkiBackendRoutingDiagnostics` exists in `core/anki/AnkiBackendPreference.kt` |
+| 21N | PASS | **PASS (harness-scoped)**; Gradle, device and real-backend evidence still BLOCKED |
+
+Per the plan's own FINAL GATE 21 LOCK MATRIX (21A–21M must be `LOCKED`), the overall
+`GATE 21 LOCKED` banner at the top of this file is **still overstated**: 21L is BLOCKED and 21M is not
+started. That banner is deliberately left in place, unedited, so the discrepancy is visible rather than
+quietly rewritten. `NEXT AUTHORIZED GATE: 21M`.
