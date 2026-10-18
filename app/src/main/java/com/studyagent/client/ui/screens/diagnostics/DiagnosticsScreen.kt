@@ -58,6 +58,15 @@ import com.studyagent.client.ui.theme.AppTextStyle
 const val DIAGNOSTICS_LIST_TEST_TAG = "diagnostics_list"
 
 /**
+ * GATE 21M — the read-only Anki backend section (CHECKPOINT 21M-16 … 21M-19).
+ *
+ * Identity, availability, capability truth on both dimensions, the four selection roles, the active
+ * session's owner with its collection assurance category, and each durable family's unresolved
+ * transactions grouped by the backend that owns them. Tokens and counts only.
+ */
+const val ANKI_BACKEND_DIAGNOSTICS_TEST_TAG = "diagnostics_anki_backends"
+
+/**
  * Diagnostics (§43): dense, monospace, engineer-facing. This is the only screen where raw
  * technical detail is shown. Section order: system → TTS → study audio → recognition →
  * session → network/protocol → performance → dashboard/control/persistence → timeline → logs.
@@ -208,6 +217,18 @@ fun DiagnosticsScreen(
                 // AnkiDroid integration (GATE 02): technical facts only — no card content exists
                 // in this section, and none is needed (§68).
                 item(key = "ankidroid") { DiagnosticsRowsCard("AnkiDroid", viewModel.ankiDroidRows()) }
+
+                // GATE 21M — every configured backend, read-only. Rendered only when this surface was
+                // wired with an observation point, so it never shows a fabricated backend list. This
+                // section deliberately offers no retry, force-commit, clear or reassign control: it has
+                // no mutation authority and must not acquire any (AUDIT-21M-R2-13, CHECKPOINT 21M-16).
+                if (viewModel.hasAnkiBackendDiagnostics) {
+                    item(key = "anki-backends") {
+                        Box(modifier = Modifier.testTag(ANKI_BACKEND_DIAGNOSTICS_TEST_TAG)) {
+                            DiagnosticsRowsCard("Anki backends", viewModel.ankiBackendRows())
+                        }
+                    }
+                }
 
                 // Structured timeline: the ordering evidence for a race.
                 item(key = "timeline-header") {

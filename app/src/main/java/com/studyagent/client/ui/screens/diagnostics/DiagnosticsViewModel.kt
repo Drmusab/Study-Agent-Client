@@ -1,6 +1,14 @@
 package com.studyagent.client.ui.screens.diagnostics
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.studyagent.client.core.anki.AnkiBackendRegistry
+import com.studyagent.client.core.anki.AnkiBackendRoutingDiagnostics
+import com.studyagent.client.core.anki.AnkiBackendState
+import com.studyagent.client.core.anki.AnkiStudyBackendLockTracker
+import com.studyagent.client.core.anki.AnkiUnresolvedTransactionRead
+import com.studyagent.client.core.anki.AnkiUnresolvedTransactionReader
+import com.studyagent.client.core.anki.BackendPreference
 import com.studyagent.client.core.audio.AudioDeviceInfoModel
 import com.studyagent.client.core.audio.EffectiveStudyAudioRoute
 import com.studyagent.client.core.audio.PhoneModeMetrics
@@ -12,7 +20,13 @@ import com.studyagent.client.core.models.ConnectionState
 import com.studyagent.client.core.voice.stt.RecognitionHealthSnapshot
 import com.studyagent.client.core.voice.tts.TtsHealthSnapshot
 import com.studyagent.client.data.repository.DiagnosticsRepository
+import com.studyagent.client.ui.components.anki.AnkiBackendDiagnosticsInput
+import com.studyagent.client.ui.components.anki.buildAnkiBackendDiagnosticsLines
+import com.studyagent.client.ui.components.anki.pendingTransactionGroups
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Diagnostics screen state.
@@ -21,8 +35,74 @@ import kotlinx.coroutines.flow.StateFlow
  * screen never accumulates its own copy of session or network state (§58).
  */
 class DiagnosticsViewModel(
-    private val diagnosticsRepository: DiagnosticsRepository
+    private val diagnosticsRepository: DiagnosticsRepository,
+    /**
+     * GATE 21M — read-only Anki backend diagnostics (CHECKPOINT 21M-16 … 21M-19).
+     *
+     * Every parameter is an existing authoritative projection; all are optional so the screen keeps
+     * working (and existing call sites keep compiling) when this surface is not wired. This ViewModel
+     * gains **no** authority from them: it reads snapshots and renders tokens. It never writes a
+     * ledger, resets a mutation status, forces a recovery, reassigns a transaction or probes a
+     * backend (AUDIT-21M-R2-13).
+     */
+    private val ankiBackendStates: StateFlow<List<AnkiBackendState>>? = null,
+    private val ankiBackendPreference: StateFlow<BackendPreference>? = null,
+    private val ankiBackendRouting: (() -> AnkiBackendRoutingDiagnostics?)? = null,
+    private val ankiSessionLocks: AnkiStudyBackendLockTracker? = null,
+    private val ankiBackendRegistry: AnkiBackendRegistry? = null,
+    private val ankiUnresolvedTransactions: AnkiUnresolvedTransactionReader? = null
 ) : ViewModel() {
+
+    private val _ankiPendingTransactions =
+        MutableStateFlow(AnkiUnresolvedTransactionRead.NOT_READ)
+
+    /** One read of the unresolved-transaction projections, taken when the screen was opened. */
+    val ankiPendingTransactions: StateFlow<AnkiUnresolvedTransactionRead> =
+        _ankiPendingTransactions.asStateFlow()
+
+    init {
+        // Read-only ledger reads: no Anki call, no probe, no mutation and no polling
+        // (VER-21M-R2-36). A family that cannot be read is reported as not projected.
+        val reader = ankiUnresolvedTransactions
+        if (reader != null) {
+            viewModelScope.launch { _ankiPendingTransactions.value = reader.read() }
+        }
+    }
+
+    /** True when the Anki backend section has anything authoritative to render. */
+    val hasAnkiBackendDiagnostics: Boolean get() = ankiBackendStates != null
+
+    /**
+     * Anki backend rows: one configured instance's identity, availability, capability truth on both
+     * dimensions, the four selection roles, the active session's own owner with its collection
+     * assurance category, and each family's unresolved transactions grouped by the backend that owns
+     * them. Tokens and counts only — see `AnkiBackendDiagnosticsUi` for what may not appear here.
+     */
+    fun ankiBackendRows(): List<Pair<String, String>> {
+        val input = ankiBackendDiagnosticsInput() ?: return emptyList()
+        return buildAnkiBackendDiagnosticsLines(input).map { it.toPair() }
+    }
+
+    private fun ankiBackendDiagnosticsInput(): AnkiBackendDiagnosticsInput? {
+        val states = ankiBackendStates?.value ?: return null
+        val registry = ankiBackendRegistry
+        return AnkiBackendDiagnosticsInput(
+            states = states,
+            preference = ankiBackendPreference?.value,
+            routing = ankiBackendRouting?.invoke(),
+            sessionLocks = ankiSessionLocks?.locks?.value ?: emptyMap(),
+            // Observations only: reading a backend's already-published collection discriminator is not
+            // a probe, and the value itself is never rendered (only its presence).
+            liveCollectionKeys = registry?.registered
+                ?.associate { it.id to it.currentCollectionIdentity?.collectionKey }
+                ?: emptyMap(),
+            customStudyClaims = registry?.registered
+                ?.associate { it.id to it.customStudyCapabilities }
+                ?: emptyMap(),
+            pendingTransactions = pendingTransactionGroups(_ankiPendingTransactions.value),
+            pendingTransactionsLoaded = _ankiPendingTransactions.value.loaded
+        )
+    }
 
     val logs: StateFlow<List<LogEntry>> = diagnosticsRepository.logs
     val connectionState: StateFlow<ConnectionState> = diagnosticsRepository.connectionState

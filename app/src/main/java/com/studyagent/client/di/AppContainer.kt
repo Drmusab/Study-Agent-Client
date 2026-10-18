@@ -6,13 +6,17 @@ import com.studyagent.client.core.anki.AnkiBackendPreferenceStore
 import com.studyagent.client.core.anki.AnkiBackendRegistry
 import com.studyagent.client.core.anki.AnkiBackendResolver2
 import com.studyagent.client.core.anki.AnkiBackendResolver
+import com.studyagent.client.core.anki.AnkiBackendState
 import com.studyagent.client.core.anki.AnkiBackendStatusCenter
+import com.studyagent.client.core.anki.AnkiRequiredCapability
 import com.studyagent.client.core.anki.AnkiStudyBackendLockTracker
 import com.studyagent.client.core.anki.AnkiTransactionRecoveryPlanner
-import com.studyagent.client.core.anki.STUDY_SESSION_REQUIREMENTS
+import com.studyagent.client.core.anki.AnkiUnresolvedTransactionReader
+import com.studyagent.client.core.anki.BackendPreference
 import com.studyagent.client.core.anki.BackendResolutionRequest2
-import com.studyagent.client.core.anki.BackendResolutionResult
 import com.studyagent.client.core.anki.BackendResolutionResult2
+import com.studyagent.client.core.anki.STUDY_SESSION_REQUIREMENTS
+import com.studyagent.client.core.anki.BackendResolutionResult
 import com.studyagent.client.core.anki.CREATION_CONTEXT_REQUIREMENTS
 import com.studyagent.client.core.anki.AnkiBackendRoutingDiagnostics
 import com.studyagent.client.core.anki.AnkiBackendSelector
@@ -115,6 +119,7 @@ import com.studyagent.client.data.repository.DefaultStudyControlRepository
 import com.studyagent.client.data.repository.DefaultStudySessionRepository
 import com.studyagent.client.data.repository.DiagnosticsAppInfo
 import com.studyagent.client.data.repository.DiagnosticsRepository
+import com.studyagent.client.data.repository.LedgerUnresolvedTransactionReader
 import com.studyagent.client.data.repository.ManagementCacheStorage
 import com.studyagent.client.data.repository.PreferencesManagementCacheStorage
 import com.studyagent.client.data.repository.StudyControlRepository
@@ -207,6 +212,37 @@ interface AppContainer {
      * active session, bound editor or durable transaction (DECISION-21-32, INV-21-08).
      */
     val ankiBackendPreferenceStore: AnkiBackendPreferenceStore
+
+    /**
+     * GATE 21M — the four selection roles as one **read-only** snapshot (CHECKPOINT 21M-18).
+     *
+     * Already computed here for the diagnostics repository (GATE 21) and now exposed so the read-only
+     * diagnostics section can render preferred/resolved/locked/transaction from the same snapshot
+     * instead of re-deriving them (AUDIT-21M-R2-07). A UI surface may call it; it must never write it.
+     */
+    val ankiBackendRouting: () -> AnkiBackendRoutingDiagnostics?
+
+    /**
+     * GATE 21M — the **only** transaction authority a read-only surface receives
+     * (CHECKPOINT 21M-16/17; AUDIT-21M-R2-13).
+     *
+     * The four durable ledgers stay behind it: they are not exposed to the UI, because their own
+     * interfaces can write. What crosses this boundary is one read of each family's existing
+     * `unresolved()` projection, reduced to family + owner identity + the family's own status token.
+     */
+    val ankiUnresolvedTransactions: AnkiUnresolvedTransactionReader
+
+    /**
+     * GATE 21M — the Settings selector's **pre-binding AUTO preview** (CHECKPOINT 21M-08).
+     *
+     * The composition root owns this wiring so that no ViewModel becomes a second resolution site: the
+     * one selection policy stays `AnkiBackendResolver2` (AUDIT-21-07's closed list is unchanged). The
+     * function is pure and resolves the *hypothetical* AUTO preference against exactly the states the
+     * caller is rendering, so the preview can never disagree with the rows next to it. It binds nothing,
+     * writes no preference and probes no backend; a session's owner stays its own GATE 21G lock.
+     */
+    val ankiBackendAutoPreview:
+        (List<AnkiBackendState>, Set<AnkiRequiredCapability>) -> BackendResolutionResult2
 
     /**
      * GATE 21E — the user's persisted backend preference with optional instance-pin support.
@@ -580,6 +616,31 @@ class DefaultAppContainer(private val context: Context) : AppContainer {
 
     override val ankiBackendResolver: AnkiBackendResolver by lazy {
         AnkiBackendResolver(ankiBackendRegistry)
+    }
+
+    override val ankiBackendRouting: () -> AnkiBackendRoutingDiagnostics? =
+        ::ankiBackendRoutingDiagnostics
+
+    override val ankiBackendAutoPreview:
+        (List<AnkiBackendState>, Set<AnkiRequiredCapability>) -> BackendResolutionResult2 =
+        { states, requiredCapabilities ->
+            AnkiBackendResolver2.resolve(
+                BackendResolutionRequest2(
+                    preference = BackendPreference.Auto,
+                    requiredCapabilities = requiredCapabilities,
+                    purpose = "settings_preview"
+                ),
+                states.map { it.descriptor }
+            )
+        }
+
+    override val ankiUnresolvedTransactions: AnkiUnresolvedTransactionReader by lazy {
+        LedgerUnresolvedTransactionReader(
+            reviewCommits = { reviewCommitLedger.unresolved() },
+            reviewerActions = { reviewerActionLedger.unresolved() },
+            noteMutations = { noteMutationLedger.unresolved() },
+            noteCreations = { noteCreationLedger.unresolved() }
+        )
     }
 
     override val ankiBackendStatusCenter: AnkiBackendStatusCenter by lazy {
