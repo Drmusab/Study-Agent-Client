@@ -392,7 +392,9 @@ class Gate21mDiagnosticsSafetyTest {
             AnkiUnresolvedTransactionFact(AnkiTransactionFamily.NOTE_MUTATION, ankiDroid, "CONFLICT"),
             AnkiUnresolvedTransactionFact(AnkiTransactionFamily.NOTE_MUTATION, ankiDroid, "AMBIGUOUS"),
             AnkiUnresolvedTransactionFact(AnkiTransactionFamily.NOTE_MUTATION, pcHome, "CONFLICT"),
-            AnkiUnresolvedTransactionFact(AnkiTransactionFamily.REVIEW_COMMIT, pcHome, "SUBMITTING")
+            AnkiUnresolvedTransactionFact(AnkiTransactionFamily.REVIEW_COMMIT, pcHome, "SUBMITTING"),
+            // CHECKPOINT 21M-17 / VER-21M-R2-28 — an AMBIGUOUS ReviewCommit keeps its own owner.
+            AnkiUnresolvedTransactionFact(AnkiTransactionFamily.REVIEW_COMMIT, ankiDroid, "AMBIGUOUS")
         )
         val groups = pendingTransactionGroups(
             AnkiUnresolvedTransactionRead(facts = facts, loaded = true)
@@ -425,6 +427,10 @@ class Gate21mDiagnosticsSafetyTest {
         assertTrue(rendered.contains("Unresolved NoteMutation @ ankidroid_local" to "AMBIGUOUS=1, CONFLICT=1"))
         assertTrue(rendered.contains("Unresolved NoteMutation @ pc_agent:home" to "CONFLICT=1"))
         assertTrue(rendered.contains("Unresolved ReviewCommit @ pc_agent:home" to "SUBMITTING=1"))
+        assertTrue(
+            "an ambiguous review commit stays on its original backend",
+            rendered.contains("Unresolved ReviewCommit @ ankidroid_local" to "AMBIGUOUS=1")
+        )
         // A family that was read and holds nothing is a truthful zero, with no owner invented for it.
         assertTrue(rendered.contains("Unresolved ReviewerAction" to "0"))
         assertTrue(rendered.contains("Unresolved NoteCreation" to "0"))

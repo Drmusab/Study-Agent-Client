@@ -1,5 +1,6 @@
 package com.studyagent.client.ui.components.anki
 
+import com.studyagent.client.core.anki.AnkiAvailability
 import com.studyagent.client.core.anki.AnkiBackendId
 import com.studyagent.client.core.anki.AnkiBackendKind
 import com.studyagent.client.core.anki.AnkiBackendState
@@ -895,6 +896,13 @@ private fun sectionActions(states: List<AnkiBackendState>): List<AnkiBackendUiAc
     add(AnkiBackendUiAction.VIEW_CAPABILITY_DETAILS)
     add(AnkiBackendUiAction.OPEN_BACKEND_CONFIGURATION)
     add(AnkiBackendUiAction.OPEN_DIAGNOSTICS)
-    // The launcher opens an installed app; it is offered only when this build wires that backend kind.
-    if (states.any { it.kind == AnkiBackendKind.ANKIDROID_LOCAL }) add(AnkiBackendUiAction.OPEN_ANKIDROID)
+    // The launcher opens an installed app. It is offered only when this build wires that backend
+    // kind *and* the app is not known to be absent; a button that can only log "not installed" is
+    // not a working action. Checking/permission states still allow the launch.
+    if (states.any {
+            it.kind == AnkiBackendKind.ANKIDROID_LOCAL && it.availability !is AnkiAvailability.NotInstalled
+        }
+    ) {
+        add(AnkiBackendUiAction.OPEN_ANKIDROID)
+    }
 }

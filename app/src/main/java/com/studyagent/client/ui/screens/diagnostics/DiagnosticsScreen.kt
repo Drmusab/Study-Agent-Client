@@ -224,8 +224,14 @@ fun DiagnosticsScreen(
                 // no mutation authority and must not acquire any (AUDIT-21M-R2-13, CHECKPOINT 21M-16).
                 if (viewModel.hasAnkiBackendDiagnostics) {
                     item(key = "anki-backends") {
+                        // The unresolved-transaction read is asynchronous. Observe it here so the
+                        // card recomposes from NOT_PROJECTED to the real counts when the read
+                        // completes, instead of freezing its first frame (CHECKPOINT 21M-17).
+                        val pendingTransactions by
+                            viewModel.ankiPendingTransactions.collectAsStateWithLifecycle()
+                        val rows = remember(pendingTransactions) { viewModel.ankiBackendRows() }
                         Box(modifier = Modifier.testTag(ANKI_BACKEND_DIAGNOSTICS_TEST_TAG)) {
-                            DiagnosticsRowsCard("Anki backends", viewModel.ankiBackendRows())
+                            DiagnosticsRowsCard("Anki backends", rows)
                         }
                     }
                 }
