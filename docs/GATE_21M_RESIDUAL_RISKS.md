@@ -1,7 +1,7 @@
 # GATE 21M — Residual Risks
 
 **Date:** 2026-10-18 (UTC)
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
 **Rule:** only risks supported by actual source inspection or executed evidence are listed. No generic
 risk catalogue is copied in.
 
@@ -12,8 +12,8 @@ risk catalogue is copied in.
 | # | Risk | Evidence | Consequence | Owner / next action |
 |---|---|---|---|---|
 | R-21M-01 | **Android compilation is unverified** | Gradle 8.7 distribution cannot be downloaded; no Android SDK; all Gradle tasks exit before configuration | The Settings/Diagnostics Compose code is not proven to compile under the real Android toolchain; the harness only compiles pure Kotlin and a separate UI closure | Run `./gradlew testDebugUnitTest lint assembleDebug` in a configured Android environment |
-| R-21M-02 | **No GATE 21M instrumentation** | No 21M `androidTest`; no device/emulator; `connectedDebugAndroidTest` blocked | TalkBack, keyboard, large text, RTL, theme, recreation and real navigation are unverified | Add/run `Gate21m...InstrumentedTest` on a device/emulator |
-| R-21M-03 | **Historical baseline not reproducible** | Checkout is a single parentless commit (`19c8a0d`); 229/2799 revision is not present as a separate commit | The delta from the reported 229/2799 run cannot be independently attributed per gate; only current 237/2924 is executed | Re-run the same harness at the reported revision, or accept the historical figure as report-only |
+| R-21M-02 | **Android/device verification is blocked** | A two-method GATE 21M `androidTest` source file now exists but is uncompiled/unexecuted; no SDK/device; `connectedDebugAndroidTest` blocked before configuration | TalkBack, keyboard, large text, RTL, theme, recreation and real navigation remain unverified | Run the Gradle unit/lint/build/instrumentation checks in a configured Android environment |
+| R-21M-03 | **Historical baseline not reproducible** | Current checkout is a parentless snapshot (`e22a327…`); historical `19c8a0d…` is absent locally; 229/2799 revision cannot be checked out | The delta from the reported 229/2799 run cannot be independently attributed per gate; only current 237/2924 is executed | Re-run the same harness at the reported revision, or accept the historical figure as report-only |
 | R-21M-04 | **Prior final-lock document is internally inconsistent** | `docs/GATE_21_FINAL_LOCK.md` claims `GATE 21 LOCKED` while line 532 records 21M `NOT STARTED` and 21L blocked | A reader may mistake the banner for a current lock; this gate does not edit prior documents | Resolve in the GATE 21 final-closure gate, not in 21M |
 
 ---
@@ -22,7 +22,8 @@ risk catalogue is copied in.
 
 | # | Risk | Evidence | Consequence | Owner |
 |---|---|---|---|---|
-| R-21M-05 | **GATE 21L remains blocked by GATE 20** | `GATE_21L_REPORT.md:3`; `GATE_20_CUSTOM_STUDY_CONTRACT.md:3` | No filtered-session lifecycle, identity, ledger or Custom Study UI can be implemented or claimed | GATE 20 then 21L |
+| R-21M-05 | **GATE 21L remains blocked pending its prerequisite** | `GATE_21L_REPORT.md:3`; `GATE_20_CUSTOM_STUDY_CONTRACT.md`; limited-scope lock claims in `GATE_20_FINAL_REPORT.md` / `GATE_20B_CONTRACT_LOCK.md` | No filtered-session lifecycle, identity, ledger or Custom Study UI can be implemented or claimed under the current authorization | GATE 20 scope reconciliation, then 21L |
+| R-21M-22 | **GATE 20 scope/status artifacts conflict** | Final/contract-lock reports say limited refusal/disclosure/identity/capability truth scope is locked; Custom Study contract and 21L report retain broader BLOCKED status | The limited subset must not be mistaken for filtered-session lifecycle completion or a 21L unlock | Resolve only in the owning Gate process; preserve the current 21L BLOCKED status here |
 | R-21M-06 | **Production PC Anki adapter is absent** | no `PcAnkiBackend`; registry is `AnkiBackendRegistry(listOf(ankiDroidBackend))` | PC Anki cannot be selected or shown operational; PC Custom Study is unsupported | Future PC backend gate |
 | R-21M-07 | **No real PC integration evidence** | No PC adapter, no PC configuration, no PC endpoint; `FooSoft/anki-connect` pin is unpinned | Every PC capability row is either absent or a generic future UI fixture; no real PC behavior is proven | Future PC integration gate |
 | R-21M-08 | **Read-context projection is not exposed** | `AnkiReadContextController.activeLeases` is private; diagnostics input has no `readContextOwners` supplier | The diagnostics surface reports `NOT_PROJECTED` for Library/Browser/Details ownership; it does not display live read-context owners | Future projection owner (21F follow-up or 21N) |
@@ -87,3 +88,37 @@ No risk in this register justifies:
 
 The implementation itself has no known production defect after this audit. The residual risk is
 concentrated in unexecuted Android/device evidence and explicitly blocked GATE 20/21L scope.
+
+---
+
+## 7. Current checkout revalidation — Arena session (2026-10-18 UTC)
+
+The current source is `e22a32798259c3abd88001963afe511fd950cb2e` on
+`arena/95bebe16-study-agent-client`; the original report's `19c8a0d…` object is unavailable locally.
+The worktree was clean before revalidation. A new two-method Compose test file was created at
+`app/src/androidTest/java/com/studyagent/client/ui/Gate21mBackendSelectionInstrumentedTest.kt`.
+It reads and restores the stored preference semantically and uses production row keys; it is **not**
+compiled or run. `assertExists()` is used as in existing repository instrumentation tests and does
+not require a separate import.
+
+Fresh current-source checks:
+
+```text
+GATE 21M JVM:       7 classes / 115 tests / 0 failed
+Full JVM harness:  237 classes / 2924 tests / 0 failed
+Capability pins:    13 hold / 0 disagree / 0 not verifiable
+Architecture audit: 26/26 source-level; runtime checks still blocked
+Gradle tasks:       blocked before configuration by Gradle 8.7 download TLS EOF
+Android SDK/device: absent
+```
+
+No Gradle task reached configuration. The new `androidTest` source is outside the JVM harness, so it
+cannot reduce R-21M-01/02. GATE 21M remains eligible for source-level acceptance only; its lock stays
+BLOCKED pending Android evidence.
+
+The GATE 20 artifact disagreement is now explicitly recorded as R-21M-22: a limited contract-enforcing
+subset is described as locked in the final/contract-lock reports, but lifecycle prerequisite status
+remains blocked in the Custom Study contract and GATE 21L report. Current source has no production PC
+Anki adapter, no filtered-session lifecycle, and an AnkiDroid custom-study capability claim of NONE.
+Per the explicit current instruction, GATE 21L remains BLOCKED; this session does not change earlier
+Gate status documents or implement GATE 20/21L.

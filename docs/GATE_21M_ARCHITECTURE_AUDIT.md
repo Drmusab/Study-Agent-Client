@@ -1,9 +1,12 @@
 # GATE 21M — Independent Architecture Audit (Revision 2)
 
 **Date:** 2026-10-18 (UTC)
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
 **Auditor:** this gate run, after implementation inspection and executed tests.
 **Scope:** `AUDIT-21M-R2-01` … `AUDIT-21M-R2-26` (gate audit matrix).
+
+> This is the original audit record at `19c8a0d…`. Current-checkout source/test revalidation is in
+> §5; the original source HEAD is unavailable in the local parentless snapshot.
 
 ```text
 ARCHITECTURE AUDIT: PASS (26/26 at source level)
@@ -32,7 +35,7 @@ condition in `GATE_21M_FINAL_STATUS.md`, not by an audit failure.
 | **AUDIT-21M-R2-09** Capability/readiness separation | **PASS** | Two fields per row (`implemented`, `operational`); `usableNow` requires READY | `a ready backend still reports the capabilities it does not implement`; `an implemented capability on a disconnected backend is supported and not available now`; stress `capabilityOverPromise=0` | none | None observed. |
 | **AUDIT-21M-R2-10** StudySession ownership | **PASS** | Active owner read from `AnkiStudyBackendLockTracker`; controller cannot call `locked()`/`released()` | `a preference change never rewrites an active session's owner`; `the controller reads the lock tracker and can never write it`; `the active session owner is its own fact and is never the preference`; `several active sessions are counted and no single owner is named` | none | Lock persistence across process death is a GATE 21G contract, not changed here. |
 | **AUDIT-21M-R2-11** Read-context accuracy | **PASS** | Diagnostics does not derive read ownership from preference; absent projection renders `NOT_PROJECTED`; GATE 21F read paths untouched | `read-context owners are rendered as identity plus presence, or as not projected`; `the four selection roles are read from the existing projection, never re-derived`; GATE 21F suite in full harness | none | No active read-context projection exists at HEAD, so the UI cannot show live owners. |
-| **AUDIT-21M-R2-12** Custom Study boundary | **PASS** | `buildCustomStudyStatus` only; no lifecycle control; `FILTERED_SESSION` marked `NOT_APPLICABLE` | `a backend with no custom-study claim says so and offers no lifecycle control`; `a backend that claims part of the vocabulary still reports the missing lifecycle`; `the filtered-session family states its omission instead of being filled in`; `no Custom Study lifecycle control exists anywhere in the gate`; R20_2 `the only production backend claims no custom study, so none may be offered` | none | GATE 20 remains design-only; 21L remains blocked. |
+| **AUDIT-21M-R2-12** Custom Study boundary | **PASS** | `buildCustomStudyStatus` only; no lifecycle control; `FILTERED_SESSION` marked `NOT_APPLICABLE` | `a backend with no custom-study claim says so and offers no lifecycle control`; `a backend that claims part of the vocabulary still reports the missing lifecycle`; `the filtered-session family states its omission instead of being filled in`; `no Custom Study lifecycle control exists anywhere in the gate`; R20_2 `the only production backend claims no custom study, so none may be offered` | none | GATE 20 artifacts are scope-split: limited contract-enforcement subset reported locked; lifecycle unavailable; 21L remains blocked. |
 | **AUDIT-21M-R2-13** Diagnostics read-only | **PASS** | Reader interface has one read method; constructed from read lambdas; no ledger exposed to UI | Diagnostics 19 tests; `the read-only surfaces hold no mutation authority`; `no rendered row offers a mutation, retry-all or reassignment` | none | Existing unrelated clear-logs actions remain; they do not touch Anki state. |
 | **AUDIT-21M-R2-14** AMBIGUOUS safety | **PASS** | Family status token preserved verbatim; no retry/force control; owner preserved | `unresolved transactions keep their own owner and their own status vocabulary`; `no rendered row offers a mutation, retry-all or reassignment`; `transaction truth keeps owner and status vocabulary, and distinguishes absence` | none | No UI recovery action exists by design. |
 | **AUDIT-21M-R2-15** Collection identity | **PASS** | Category rendered verbatim; key value never rendered; presence only | `every identity assurance category is rendered verbatim`; `a collection key is never measured into a value, only into presence`; `the active session owner line reports assurance without inventing continuity`; `the assurance category is rendered verbatim and never reworded` | none | AnkiDroid still publishes no authoritative collection key (GATE 21B R1); assurance remains nominal/unverifiable in production. |
@@ -146,3 +149,28 @@ contract in every audited row.
 
 Source-text audit tests are not a substitute for runtime verification. Their limitations are stated in
 the residual-risk and Android-status documents.
+
+---
+
+## 5. Current checkout revalidation — Arena session (2026-10-18 UTC)
+
+```text
+HEAD:   e22a32798259c3abd88001963afe511fd950cb2e
+BRANCH: arena/95bebe16-study-agent-client
+```
+
+No production Kotlin or JVM-test source changed in this revalidation. The focused current-source
+GATE 21M harness rerun passed **7 classes / 115 tests / 0 failures**, including all 26 executable
+source-audit checks. The full current-source harness passed **237 classes / 2924 tests / 0 failures**.
+The 26/26 architecture result remains **source-level only**. Runtime screen composition, TalkBack,
+keyboard navigation, RTL, text scaling and theme rendering remain BLOCKED/unverified because the
+Gradle wrapper could not download Gradle 8.7 and there is no Android SDK/device. The new two-method
+Compose test source is not part of these JVM counts and was not compiled or executed.
+
+**GATE 20 scope note:** current repository artifacts describe a limited contract-enforcing refusal,
+disclosure, identity and capability-truth subset as locked (`GATE_20_FINAL_REPORT.md`,
+`GATE_20B_CONTRACT_LOCK.md`), while `GATE_20_CUSTOM_STUDY_CONTRACT.md` and `GATE_21L_REPORT.md`
+retain a broader blocked lifecycle prerequisite. Current source confirms no production PC Anki
+adapter, no filtered-session lifecycle, and AnkiDroid's audited custom-study claim is `NONE`. The
+user-directed GATE 21L status remains **BLOCKED**; no prior Gate status document was changed and no
+GATE 20/21L implementation was added.

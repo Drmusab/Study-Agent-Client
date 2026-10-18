@@ -6,6 +6,10 @@
 **Status of this handoff:** informational. It does **not** authorize GATE 21N and does **not** lock
 GATE 21M or GATE 21.
 
+> Sections 1–6 preserve the original handoff record. The current Arena-checkout revalidation in §7
+> supersedes statements about present instrumentation and the GATE 20 scope split only; it does not
+> alter prior Gate status documents.
+
 ---
 
 ## 1. What GATE 21M leaves behind
@@ -58,18 +62,19 @@ Production corrections: DiagnosticsScreen.kt observes the asynchronous ledger re
 The next sub-gate must not assume any of the following without newer concrete evidence:
 
 ```text
-GATE 21L LOCKED                    — false; BLOCKED by GATE 20
-GATE 20 IMPLEMENTED                — false; DESIGN_ONLY / BLOCKED
+GATE 21L LOCKED                    — false; remains BLOCKED pending its prerequisite
+GATE 20 LIFECYCLE AVAILABLE        — false; the broader Custom Study/lifecycle prerequisite remains blocked
+GATE 20 NARROW ENFORCEMENT SUBSET  — reported locked by the final/contract-lock artifacts; do not treat as lifecycle completion
 PC ANKI IMPLEMENTED                — false; no production adapter
 PC CUSTOM STUDY SUPPORTED          — false; no lifecycle
-ANDROID BUILD VERIFIED             — false; Gradle/lint/build/instrumentation UNVERIFIED
+ANDROID BUILD VERIFIED             — false; Gradle/lint/build/instrumentation remain unverified
 GATE 21M LOCKED                    — false; implementation complete but lock BLOCKED
 GATE 21 FINAL LOCKED               — false; prior banner is overstated and internally inconsistent
 ```
 
 Also do not assume:
 
-- that a GATE 21M instrumentation test exists (it does not);
+- that a GATE 21M instrumentation test is absent: a two-method Compose test file now exists, but it is uncompiled and unexecuted;
 - that the 21M diagnostics rows are included in the export/copy path (they are not);
 - that a read-context ownership projection exists (it does not);
 - that collection continuity is proven on AnkiDroid (it is not; nominal/unverifiable);
@@ -81,10 +86,10 @@ Also do not assume:
 
 | # | Prerequisite | Current state | Required evidence |
 |---|---|---|---|
-| P1 | GATE 20 Custom Study contract/implementation | blocked / design-only | GATE 20 unlock + audited implementation |
-| P2 | GATE 21L Custom Study backend ownership | blocked | GATE 20 first; then 21L authorization and implementation |
-| P3 | 21M Android compilation | unverified | `./gradlew testDebugUnitTest lint assembleDebug` (and release where applicable) |
-| P4 | 21M device/instrumentation | unverified | `connectedDebugAndroidTest` on an emulator/device |
+| P1 | Broader GATE 20 Custom Study/lifecycle prerequisite | blocked / scope-split in prior artifacts | Resolve the owning GATE 20 contract and audited lifecycle scope; do not infer it from the limited refusal/capability subset |
+| P2 | GATE 21L Custom Study backend ownership | blocked | Keep blocked until its prerequisite and separate authorization are satisfied |
+| P3 | 21M Android compilation | blocked before Gradle configuration | Run `testDebugUnitTest`, `lint`, `assembleDebug` (and release where applicable) in a configured Android environment |
+| P4 | 21M device/instrumentation | unverified | Compile and run the new test file via `connectedDebugAndroidTest` on an emulator/device |
 | P5 | Accessibility/RTL/large-text execution | unverified | device or Compose test evidence |
 | P6 | Production PC Anki adapter | absent | separate PC backend gate and audited capability claim |
 | P7 | Read-context ownership projection | absent | an explicit read-only projection from GATE 21F |
@@ -120,8 +125,8 @@ In order:
 
 1. Run the Android Gradle/lint/build tasks in a configured environment and update
    `GATE_21M_ANDROID_VALIDATION_STATUS.md` with real results.
-2. Add and run a GATE 21M instrumentation test for selection, disabled PC row, TalkBack semantics,
-   recreation and RTL/large text.
+2. Compile and run `Gate21mBackendSelectionInstrumentedTest.kt` for AUTO, disabled-PC and persisted
+   selection behavior; separately add/run device scenarios for TalkBack, recreation and RTL/large text.
 3. Keep GATE 21L blocked until GATE 20 is implemented and audited.
 4. Do not implement a PC adapter or PC Custom Study under 21N.
 5. Resolve the final-lock document inconsistency only in the final GATE 21 closure process.
@@ -143,3 +148,37 @@ NEXT GATE:                 subject to the current GATE 21 plan and prerequisite 
 ```
 
 This handoff does not authorize GATE 21N. It records what exists and what remains.
+
+---
+
+## 7. Current checkout revalidation — Arena session (2026-10-18 UTC)
+
+```text
+HEAD:   e22a32798259c3abd88001963afe511fd950cb2e
+BRANCH: arena/95bebe16-study-agent-client
+```
+
+The starting worktree was clean. The current focused JVM harness was rerun: **7 classes / 115 tests /
+0 failures**. The full harness was rerun: **237 classes / 2924 tests / 0 failures**. The capability-pin
+script was rerun: **13 hold / 0 disagree / 0 not verifiable**. These are source/JVM results only.
+
+One Compose instrumentation file with two tests was created at
+`app/src/androidTest/java/com/studyagent/client/ui/Gate21mBackendSelectionInstrumentedTest.kt`.
+It checks the production AUTO row, the disabled/informational PC row, and persisted selection between
+AUTO and the exact configured AnkiDroid instance. The setup reads the atomic preference snapshot and
+uses production row tags. The file was not compiled or run.
+
+Gradle wrapper download failed for `--version`, `testDebugUnitTest`, `lint`, `assembleDebug`,
+`assembleRelease`, and `connectedDebugAndroidTest` before project configuration (`SSL peer shut down
+incorrectly` fetching Gradle 8.7). No Android SDK or device was found. Therefore Android compilation,
+lint, APK builds, recreation, TalkBack, keyboard, RTL, text scaling and instrumentation remain
+UNVERIFIED/BLOCKED; GATE 21M lock remains BLOCKED.
+
+**Current GATE 20 reconciliation:** the final report and GATE 20B contract lock record a limited
+refusal/disclosure/identity/capability-truth subset as locked. The Custom Study contract and GATE 21L
+report still record the broader lifecycle prerequisite as blocked/not available. Current source confirms no PC Anki adapter, no filtered-session lifecycle, and
+`AnkiDroidCustomStudyCapabilities.AUDITED = NONE`. In line with the explicit instruction, GATE 21L
+remains BLOCKED; this revalidation does not change prior Gate documents, add lifecycle behavior, or
+claim a GATE 21 final lock.
+
+This current handoff is informational only and still does not authorize GATE 21N.

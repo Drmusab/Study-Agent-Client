@@ -1,7 +1,7 @@
 # GATE 21M — R-20-2 Compliance
 
 **Date:** 2026-10-18 (UTC)
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
 **Boundary:** R-20-2 — the production PC Anki backend has not been implemented; the capability model
 must refuse unsupported operations until a real, audited PC backend supplies a capability claim.
 
@@ -197,3 +197,35 @@ CASE C (unsupported PC capability operational): NOT TRIGGERED
 
 No unsupported PC Anki operation is displayed as operational. No PC Custom Study lifecycle is
 displayed. No Fake production capability claim exists. The capability model fails closed.
+
+---
+
+## 7. Current checkout revalidation and Gate 20 scope reconciliation
+
+Revalidated 2026-10-18 UTC at `e22a32798259c3abd88001963afe511fd950cb2e` on
+`arena/95bebe16-study-agent-client` (the source HEAD recorded in the original audit is absent from
+this parentless Git snapshot).
+
+Current source inspection confirms:
+
+- `AppContainer` registers only the production AnkiDroid backend; there is no production PC Anki
+  adapter or configured PC profile.
+- PC AI/agent availability remains independent of Anki availability; it cannot make the informational
+  PC Anki row operational.
+- `AnkiDroidCustomStudyCapabilities.AUDITED` is `AnkiCustomStudyCapabilities.NONE`.
+- No Custom Study / filtered-session create, rebuild, empty, or lifecycle operation was added by this
+  gate; no scheduler, session machine, PC integration, or backend was added.
+- `tools/check-capability-pins.sh /tmp/arena21m-r2-current` was rerun: **13 checks held, 0 disagreed,
+  0 unverifiable**, exit 0. This is source evidence only, not behavioral evidence.
+
+**Gate 20 status is scope-split in the repository artifacts, not wholly absent.**
+`GATE_20_FINAL_REPORT.md` and `GATE_20B_CONTRACT_LOCK.md` describe a narrow contract-enforcing subset
+(detection/refusal/disclosure/identity/capability truth) as locked, while
+`GATE_20_CUSTOM_STUDY_CONTRACT.md` and `GATE_21L_REPORT.md` still describe the broader lifecycle
+prerequisite as blocked/not available. The present revalidation preserves both facts without editing
+those prior-gate documents. Under the user's explicit direction, GATE 21L remains **BLOCKED** pending
+its prerequisite; this gate does not decide or implement the missing lifecycle behavior.
+
+R-20-2 remains **PASS at source level**: PC Anki is not selectable or represented as operational;
+PC AI availability does not imply PC Anki readiness; capability/refusal claims are fail-closed. This
+is not Android runtime verification and does not constitute a GATE 21M or GATE 21 final lock.

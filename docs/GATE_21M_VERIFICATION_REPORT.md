@@ -1,10 +1,13 @@
 # GATE 21M — Authoritative Verification Report (Revision 2)
 
 **Date:** 2026-10-18 (UTC)
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
-**Branch:** `arena/19fcfcc5-study-agent-client`
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit branch:** `arena/19fcfcc5-study-agent-client`
 **Verification source:** Part V of the R2 prompt (`VER-21M-R2-01` … `VER-21M-R2-49`).
 **Status vocabulary:** `PASS`, `PASS (source)`, `BLOCKED`, `NOT_APPLICABLE`, `FAIL`.
+
+> Sections 1–5 preserve the original audit. Current-checkout execution is in §6; the historical
+> source commit is unavailable in the current parentless snapshot.
 
 ```text
 PASS:            42
@@ -187,3 +190,49 @@ MANDATORY FAILURES:   0
 GATE 21M LOCK:        BLOCKED PENDING ANDROID EVIDENCE
 GATE 21 FINAL:        NOT LOCKED
 ```
+
+---
+
+## 6. Current checkout revalidation — Arena session (2026-10-18 UTC)
+
+The original report above records evidence at `19c8a0d…` on another Arena branch. This section records
+fresh execution at the current checkout; it supersedes the original report only for current-source
+status. The original commit object is absent from this parentless snapshot, so historical commit
+ancestry cannot be reconstructed.
+
+```text
+HEAD:   e22a32798259c3abd88001963afe511fd950cb2e
+BRANCH: arena/95bebe16-study-agent-client
+START WORKTREE: clean
+```
+
+| Check | Exact command | Current result |
+|---|---|---|
+| Harness bootstrap/compile | `tools/jvm-harness/bin/bootstrap-gate20.sh` | exit 0; main 344 files, GATE 16 Compose closure 24 files / 0 errors, JVM tests 271 files / 0 errors |
+| GATE 21M focused suite | `tools/jvm-harness/bin/run.sh 'Gate21m'` | **7 classes / 115 tests / 115 passed / 0 failed / 0 ignored**, exit 0 |
+| Full JVM harness | `tools/jvm-harness/bin/run.sh` | **237 classes / 2924 tests / 2924 passed / 0 failed / 0 ignored**, exit 0 (52.0 s) |
+| Capability pins | `tools/check-capability-pins.sh /tmp/arena21m-r2-current` | **13 hold / 0 disagree / 0 not verifiable**, exit 0; pinned upstream SHAs match the Android-status report |
+| Gradle distribution | `JAVA_HOME=/tmp/pp/jdk/jdk4py/java-runtime ./gradlew --version` | exit 1; SSL handshake to `services.gradle.org` ended before Gradle started |
+| Gradle unit tests | `JAVA_HOME=… ./gradlew testDebugUnitTest --offline` | exit 1; wrapper distribution fetch failed before project configuration |
+| Android lint | `JAVA_HOME=… ./gradlew lint --offline` | exit 1; same wrapper failure |
+| Debug build | `JAVA_HOME=… ./gradlew assembleDebug --offline` | exit 1; same wrapper failure |
+| Release build | `JAVA_HOME=… ./gradlew assembleRelease --offline` | exit 1; same wrapper failure |
+| Instrumentation | `JAVA_HOME=… ./gradlew connectedDebugAndroidTest --offline` | exit 1; same wrapper failure; additionally no SDK/device |
+
+The two GATE 21M Compose instrumentation tests added in this checkout are in
+`Gate21mBackendSelectionInstrumentedTest.kt`. They are not included in `tools/jvm-harness/bin/run.sh`;
+no Android test compilation or execution is claimed. The existing matrix dispositions therefore remain:
+
+```text
+PASS:     42
+BLOCKED:   7  (recreation, runtime accessibility, text/keyboard/RTL, theme, Gradle tests/lint/build,
+               instrumentation)
+FAIL:      0
+```
+
+`VER-21M-R2-42` remains historical/report-only for the reported 229/2799 revision; `VER-21M-R2-43`
+through `VER-21M-R2-45` are freshly PASS on this checkout. GATE 21M's seeded stress case remains
+600 model events plus 120 controller events (seed `21_000_049`), with all asserted safety counters
+zero. GATE 21L remains BLOCKED. GATE 20's current artifacts conflict on its broader status; the
+verified operational boundary is unchanged: only its narrow refusal/capability subset is present,
+while filtered-session lifecycle and PC Anki support remain absent. No GATE 20/21L behavior was added.

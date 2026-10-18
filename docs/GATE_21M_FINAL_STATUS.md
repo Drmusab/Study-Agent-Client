@@ -2,10 +2,61 @@
 
 **Date:** 2026-10-18 (UTC)
 **Repository:** `Drmusab/Study-Agent-Client`
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
-**Branch:** `arena/19fcfcc5-study-agent-client`
-**Worktree at gate start:** clean
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit branch:** `arena/19fcfcc5-study-agent-client`
+**Original worktree at gate start:** clean
 **Gate instruction:** GATE 21M Revision 2 (corrected entry contract)
+
+> The sections below preserve the original audit record. The current Arena-checkout revalidation is
+> recorded first and is authoritative for the present branch; it does not rewrite the earlier run's
+> source revision or evidence.
+
+## Current checkout revalidation — 2026-10-18 UTC
+
+```text
+REPOSITORY:                 Study-Agent-Client
+SOURCE HEAD:                e22a32798259c3abd88001963afe511fd950cb2e
+BRANCH:                     arena/95bebe16-study-agent-client
+WORKTREE AT START:           CLEAN
+GATE 21M ENTRY:              AUTHORIZED
+GATE 21L:                   BLOCKED
+GATE 20 CURRENT STATUS:     LIMITED CONTRACT-ENFORCING SCOPE PRESENT;
+                            FILTERED-SESSION LIFECYCLE PREREQUISITE UNAVAILABLE
+PRODUCTION PC ANKI ADAPTER: ABSENT
+IMPLEMENTATION:             PRESENT AT HEAD; REUSED / RE-AUDITED
+NEW UI TEST SOURCE:         1 ANDROIDTEST FILE / 2 COMPOSE TESTS ADDED
+ARCHITECTURE AUDIT:         PASS (26/26 SOURCE-LEVEL TESTS)
+GATE 21M JVM SUITE:         PASS (7 classes / 115 tests / 0 failed)
+FULL JVM HARNESS:           PASS (237 classes / 2924 tests / 0 failed)
+CAPABILITY PINS:            PASS (13 hold / 0 disagree / 0 not verifiable)
+GRADLE / LINT / BUILD:      BLOCKED BEFORE GRADLE CONFIGURATION
+INSTRUMENTATION:            UNVERIFIED (NO ANDROID SDK / DEVICE; TEST SOURCE NOT EXECUTED)
+GATE 21M LOCK:              BLOCKED PENDING REQUIRED ANDROID EVIDENCE
+GATE 21 FINAL LOCK:         NOT IMPLIED / NOT CLAIMED
+```
+
+The repository is a parentless squashed snapshot at `e22a327…`; the earlier report's `19c8a0d…`
+object is not present in this checkout, so the historical 229-class / 2799-test report cannot be
+compared by commit ancestry. The current 237/2924 harness was freshly executed against this checkout.
+
+**Authorization:** the current R2 authorization to proceed with GATE 21M while GATE 21L is blocked is
+supported by `docs/GATE_21_FINAL_LOCK.md:538` and `docs/GATE_21K_NOTE_CREATION_BINDING.md:310–311`.
+The prior documents were read-only inputs and were not modified. GATE 21L remains BLOCKED and no
+GATE 21N work is authorized by this revalidation.
+
+**GATE 20 scope reconciliation:** `docs/GATE_20_FINAL_REPORT.md` and `docs/GATE_20B_CONTRACT_LOCK.md`
+claim a limited contract-enforcing subset (detection, refusal, disclosure, identity and capability
+truth) is locked, explicitly without enabling a new study mode. `docs/GATE_20_CUSTOM_STUDY_CONTRACT.md`
+and `docs/GATE_21L_REPORT.md` describe the broader lifecycle prerequisite as blocked/not available.
+Current source confirms the safety boundary: AnkiDroid's audited custom-study claim is `NONE`; no
+production PC Anki adapter or filtered-session lifecycle exists. Therefore GATE 21L remains BLOCKED;
+this revalidation does not resolve the artifact disagreement or implement GATE 20/21L behavior.
+
+The only new test source in this Arena session is
+`app/src/androidTest/java/com/studyagent/client/ui/Gate21mBackendSelectionInstrumentedTest.kt`.
+Its two Compose tests are intentionally reported as **unverified** because the Gradle wrapper could
+not download Gradle and no Android SDK/emulator/device is available. The standard JVM harness excludes
+`androidTest` and is not evidence that those tests compile or execute.
 
 ---
 
