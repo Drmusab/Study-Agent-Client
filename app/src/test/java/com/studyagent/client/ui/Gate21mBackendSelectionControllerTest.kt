@@ -395,6 +395,34 @@ class Gate21mBackendSelectionControllerTest {
     }
 
     @Test
+    fun `AUTO to AnkiDroid to AUTO converges on the authoritative store`() = runTest {
+        val h = harness(writerBehavior = { target ->
+            preference.value = target
+            true
+        })
+        settle()
+
+        h.controller.select(BackendPreference.Explicit(ankiDroid))
+        settle()
+        assertTrue(h.controller.saveFeedback.value is AnkiBackendSaveFeedbackUi.Saved)
+        assertEquals("ankidroid_local", h.section()!!.selectedKey)
+
+        // The sequence the checkpoint pins: the second choice must be written after the first, and
+        // the rendered selection must follow the store rather than either intent.
+        h.controller.select(BackendPreference.Auto)
+        settle()
+
+        assertEquals(BackendPreference.Auto, h.preference.value)
+        assertEquals("preference:auto", h.section()!!.selectedKey)
+        assertEquals(
+            listOf(BackendPreference.Explicit(ankiDroid), BackendPreference.Auto),
+            h.writes
+        )
+        val feedback = h.controller.saveFeedback.value as AnkiBackendSaveFeedbackUi.Saved
+        assertEquals("auto", feedback.targetToken)
+    }
+
+    @Test
     fun `a selection with no writer changes nothing at all`() = runTest {
         val h = harness(writerBehavior = null)
         settle()

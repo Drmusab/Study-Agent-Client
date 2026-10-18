@@ -448,8 +448,10 @@ class Gate21mArchitectureAuditTest {
             "the Settings screen"
         )
         // The diagnostics section reuses the existing rows card and its key-based list items.
-        assertTrue(diagnosticsScreen.contains("DiagnosticsRowsCard(\"Anki backends\", viewModel.ankiBackendRows())"))
+        assertTrue(diagnosticsScreen.contains("DiagnosticsRowsCard(\"Anki backends\", rows)"))
         assertTrue(diagnosticsScreen.contains("item(key = \"anki-backends\")"))
+        // The asynchronous read must be observed, or the card freezes on NOT_PROJECTED.
+        assertTrue(diagnosticsScreen.contains("viewModel.ankiPendingTransactions.collectAsStateWithLifecycle()"))
     }
 
     // ----------------------------------------------------------------------------- AUDIT-21M-R2-17

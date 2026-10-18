@@ -398,6 +398,12 @@ class Gate21mBackendSelectionUiTest {
             "no AnkiDroid launcher action when no AnkiDroid backend is wired",
             AnkiBackendUiAction.OPEN_ANKIDROID in pcOnly.actions
         )
+
+        val notInstalled = section(listOf(state(ankiDroid, AnkiAvailability.NotInstalled)))
+        assertFalse(
+            "no launcher action when AnkiDroid is known to be absent",
+            AnkiBackendUiAction.OPEN_ANKIDROID in notInstalled.actions
+        )
     }
 
     // ------------------------------------------------------------------ write feedback honesty
