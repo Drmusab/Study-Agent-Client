@@ -35,6 +35,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.studyagent.client.core.anki.AnkiAvailability
+import com.studyagent.client.core.anki.AnkiBackendId
+import com.studyagent.client.core.anki.BackendPreference
 import com.studyagent.client.core.audio.StudyAudioMode
 import com.studyagent.client.core.models.AppSettings
 import com.studyagent.client.core.models.AppSettingsPolicy
@@ -51,6 +53,8 @@ import com.studyagent.client.data.anki.ankidroid.AnkiDroidHealthSnapshot
 import com.studyagent.client.ui.components.AppCard
 import com.studyagent.client.ui.components.BannerTone
 import com.studyagent.client.ui.components.ChoiceRow
+import com.studyagent.client.ui.components.EmptyState
+import com.studyagent.client.ui.components.ExpandableSection
 import com.studyagent.client.ui.components.InfoBanner
 import com.studyagent.client.ui.components.InlineTextButton
 import com.studyagent.client.ui.components.KeyValueRow
@@ -58,6 +62,15 @@ import com.studyagent.client.ui.components.SecondaryButton
 import com.studyagent.client.ui.components.SectionHeader
 import com.studyagent.client.ui.components.SettingRow
 import com.studyagent.client.ui.components.StudyAgentTopBar
+import com.studyagent.client.ui.components.anki.AnkiBackendAutoRowUi
+import com.studyagent.client.ui.components.anki.AnkiBackendInstanceRowUi
+import com.studyagent.client.ui.components.anki.AnkiBackendRefreshUi
+import com.studyagent.client.ui.components.anki.AnkiBackendRowUi
+import com.studyagent.client.ui.components.anki.AnkiBackendSaveFeedbackUi
+import com.studyagent.client.ui.components.anki.AnkiBackendSectionUiState
+import com.studyagent.client.ui.components.anki.AnkiBackendUiAction
+import com.studyagent.client.ui.components.anki.AnkiBackendUnimplementedKindRowUi
+import com.studyagent.client.ui.components.anki.AnkiBackendUnresolvedRowUi
 import com.studyagent.client.ui.theme.AppColors
 import com.studyagent.client.ui.theme.AppSpacing
 import kotlin.math.roundToInt
@@ -79,8 +92,24 @@ const val ANKI_REFRESH_TEST_TAG = "settings_anki_refresh"
 /** Semantics tag for the Anki integration "Open AnkiDroid" action (GATE 02 §31). */
 const val ANKI_OPEN_TEST_TAG = "settings_anki_open"
 
-/** GATE 21 — semantics tag prefix for one backend-selection row, suffixed with the mode token. */
+/**
+ * GATE 21M — semantics tag prefix for one backend row, suffixed with the row's **stable key**:
+ * `preference:auto`, one exact `AnkiBackendId.stableId`, or `kind:<KIND>` for an informational row.
+ * A row is addressed by identity, never by list position or display label (CHECKPOINT 21M-04).
+ */
 const val ANKI_BACKEND_OPTION_TEST_TAG = "settings_anki_backend_"
+
+/** GATE 21M — the read-only availability re-check action (`AnkiBackendRegistry.refresh`). */
+const val ANKI_BACKEND_REFRESH_TEST_TAG = "settings_anki_backend_refresh"
+
+/** GATE 21M — the active StudySession owner line, which is never the preference. */
+const val ANKI_BACKEND_SESSION_TEST_TAG = "settings_anki_backend_active_session"
+
+/** GATE 21M — preference write feedback; a refused write must never read as a saved one. */
+const val ANKI_BACKEND_SAVE_TEST_TAG = "settings_anki_backend_save_feedback"
+
+/** GATE 21M — capability detail disclosure of one backend row. */
+const val ANKI_BACKEND_CAPABILITIES_TEST_TAG = "settings_anki_backend_capabilities_"
 
 private fun testTagSlug(text: String): String {
     val sb = StringBuilder(text.length)
@@ -95,7 +124,13 @@ private fun testTagSlug(text: String): String {
 fun SettingsScreen(
     viewModel: SettingsViewModel,
     onNavigateBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * GATE 21M — safe troubleshooting navigation (CHECKPOINT 21M-20). Optional: a control is rendered
+     * only when a real destination exists, so there is never an inert button.
+     */
+    onOpenDiagnostics: (() -> Unit)? = null,
+    onOpenConnection: (() -> Unit)? = null
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val englishVoices by viewModel.englishVoices.collectAsStateWithLifecycle()
@@ -105,10 +140,13 @@ fun SettingsScreen(
     val recognitionCapabilities by viewModel.recognitionCapabilities.collectAsStateWithLifecycle()
     val persistenceError by viewModel.persistenceError.collectAsStateWithLifecycle()
     val ankiHealth by viewModel.ankiDroidHealth.collectAsStateWithLifecycle()
-    // GATE 21 — null when this screen was built without the backend components; the section hides.
-    val ankiBackendSelection by viewModel.ankiBackendSelection.collectAsStateWithLifecycle()
+    // GATE 21M — null when this screen was built without the backend components; the section hides
+    // rather than inventing a backend list (CHECKPOINT 21M-07).
+    val ankiBackendSection by viewModel.ankiBackendSection.collectAsStateWithLifecycle()
     var showResetConfirmation by rememberSaveable { mutableStateOf(false) }
     var showAdvanced by rememberSaveable { mutableStateOf(false) }
+    // One expanded capability disclosure at a time; keyed by the row's stable identity.
+    var expandedBackendCapabilities by rememberSaveable { mutableStateOf<String?>(null) }
 
     Scaffold(
         containerColor = AppColors.appBackground,
@@ -474,58 +512,32 @@ fun SettingsScreen(
             // ------------------------------------------------------------------------------
             item(key = "anki-integration") { SettingsSectionLabel("Anki integration") }
 
-            // GATE 21 — explicit backend selection (IMPLEMENTATION-21-18). Every mode stays pickable
-            // even when nothing answers: choosing an unavailable backend must produce a blocked
-            // operation, never a silent substitute (DECISION-21-26, INV-21-10).
-            ankiBackendSelection?.let { selection ->
+            // GATE 21M — capability-aware backend selection (CHECKPOINT 21M-02 … 21M-15).
+            //
+            // What may be picked comes from the registry, not from a kind list: one row per configured
+            // instance keyed by its exact BackendId, plus AUTO. A backend kind this build wires no
+            // adapter for is rendered as an informational, disabled row (R-20-2) — never as a pickable
+            // backend, and never with an invented instance identity. An unavailable configured backend
+            // stays pickable, because choosing it must produce a typed refusal rather than a silent
+            // substitute (INV-21-10).
+            ankiBackendSection?.let { section ->
                 item(key = "anki-backend-selection") {
-                    SettingsCard {
-                        SectionHeader(
-                            title = "Anki backend",
-                            color = AppColors.actionAccent
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        selection.options.forEach { option ->
-                            val selected = option.mode == selection.selected
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { viewModel.selectAnkiBackend(option.mode) }
-                                    .padding(vertical = 6.dp)
-                                    .testTag("$ANKI_BACKEND_OPTION_TEST_TAG${option.mode.stableId}"),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                RadioButton(selected = selected, onClick = { viewModel.selectAnkiBackend(option.mode) })
-                                Spacer(modifier = Modifier.width(AppSpacing.XS))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = option.title,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = AppColors.contentPrimary
-                                    )
-                                    Text(
-                                        text = option.statusLabel,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = AppColors.contentMuted
-                                    )
-                                    option.detail?.let { detail ->
-                                        Text(
-                                            text = detail,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = AppColors.contentMuted
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        // DECISION-21-37 — say what a switch does and does not touch.
-                        Text(
-                            text = selection.switchEffectNotice,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = AppColors.contentMuted
-                        )
-                    }
+                    AnkiBackendSectionCard(
+                        section = section,
+                        expandedCapabilitiesKey = expandedBackendCapabilities,
+                        onToggleCapabilities = { key ->
+                            expandedBackendCapabilities =
+                                if (expandedBackendCapabilities == key) null else key
+                        },
+                        onSelectAuto = { viewModel.selectAnkiBackend(BackendPreference.Auto) },
+                        onSelectInstance = { id ->
+                            viewModel.selectAnkiBackend(BackendPreference.Explicit(id))
+                        },
+                        onRefresh = { viewModel.refreshAnkiBackendStatus() },
+                        onOpenAnkiDroid = { viewModel.openAnkiDroid() },
+                        onOpenDiagnostics = onOpenDiagnostics,
+                        onOpenConnection = onOpenConnection
+                    )
                 }
             }
 
@@ -785,6 +797,302 @@ fun SettingsScreen(
                 }
             }
         )
+    }
+}
+
+// ---------------------------------------------------------------- GATE 21M backend section
+
+/**
+ * The Settings **Anki backend** card (CHECKPOINT 21M-02/25).
+ *
+ * Rendering only: every fact comes from [AnkiBackendSectionUiState], which is built from the
+ * registry, the persisted preference and the session locks. No probe, resolution or write happens
+ * during composition, and each row's Compose key is the row's stable identity, so a recomposition
+ * cannot duplicate or reorder a backend.
+ */
+@Composable
+private fun AnkiBackendSectionCard(
+    section: AnkiBackendSectionUiState,
+    expandedCapabilitiesKey: String?,
+    onToggleCapabilities: (String) -> Unit,
+    onSelectAuto: () -> Unit,
+    onSelectInstance: (AnkiBackendId) -> Unit,
+    onRefresh: () -> Unit,
+    onOpenAnkiDroid: () -> Unit,
+    onOpenDiagnostics: (() -> Unit)?,
+    onOpenConnection: (() -> Unit)?
+) {
+    SettingsCard {
+        SectionHeader(title = "Anki backend", color = AppColors.actionAccent)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = section.preferenceSummary,
+            style = MaterialTheme.typography.bodyMedium,
+            color = AppColors.contentPrimary
+        )
+
+        // Write feedback. "Saved" is only ever shown for a write the authoritative repository
+        // confirmed, so a refused or unconfirmed persistence cannot read as success (21M-11).
+        when (val feedback = section.saveFeedback) {
+            is AnkiBackendSaveFeedbackUi.Saving -> Text(
+                text = "Saving preference…",
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.contentMuted,
+                modifier = Modifier.testTag(ANKI_BACKEND_SAVE_TEST_TAG)
+            )
+
+            is AnkiBackendSaveFeedbackUi.Saved -> InfoBanner(
+                message = feedback.message,
+                tone = BannerTone.INFO,
+                modifier = Modifier.testTag(ANKI_BACKEND_SAVE_TEST_TAG)
+            )
+
+            is AnkiBackendSaveFeedbackUi.Failed -> InfoBanner(
+                title = "Preference not saved",
+                message = feedback.message,
+                tone = BannerTone.DANGER,
+                modifier = Modifier.testTag(ANKI_BACKEND_SAVE_TEST_TAG)
+            )
+
+            is AnkiBackendSaveFeedbackUi.Unconfirmed -> InfoBanner(
+                title = "Not confirmed yet",
+                message = feedback.message,
+                tone = BannerTone.WARNING,
+                modifier = Modifier.testTag(ANKI_BACKEND_SAVE_TEST_TAG)
+            )
+
+            AnkiBackendSaveFeedbackUi.Idle -> Unit
+        }
+
+        section.emptyInventory?.let { empty ->
+            EmptyState(title = empty.headline, message = empty.explanation)
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+        section.rows.forEach { row ->
+            AnkiBackendRow(
+                row = row,
+                expanded = expandedCapabilitiesKey == row.key,
+                onToggleCapabilities = onToggleCapabilities,
+                onSelectAuto = onSelectAuto,
+                onSelectInstance = onSelectInstance
+            )
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+        // DECISION-21-37 — always say what a preference change does and does not touch.
+        Text(
+            text = section.scopeNotice,
+            style = MaterialTheme.typography.bodySmall,
+            color = AppColors.contentMuted
+        )
+
+        // The active session's own owner: a preference of AUTO next to a session locked to AnkiDroid
+        // is a valid, truthful state and must be shown as two separate facts (CHECKPOINT 21M-13).
+        KeyValueRow(
+            label = "Active study session",
+            value = section.activeSession.headline,
+            modifier = Modifier.testTag(ANKI_BACKEND_SESSION_TEST_TAG)
+        )
+        section.switchEffectNotice?.let { notice ->
+            InfoBanner(message = notice, tone = BannerTone.INFO)
+        }
+
+        // Freshness honesty: the registry contract has no timestamp, so no age, TTL or "still
+        // connected" claim may be implied (CHECKPOINT 21M-10).
+        Text(
+            text = section.observationNotice,
+            style = MaterialTheme.typography.bodySmall,
+            color = AppColors.contentMuted
+        )
+        when (val refresh = section.refresh) {
+            is AnkiBackendRefreshUi.Running -> Text(
+                text = "Checking backends…",
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.contentMuted
+            )
+
+            is AnkiBackendRefreshUi.Failed -> Text(
+                text = "Availability check did not complete (${refresh.errorToken}).",
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.statusWarning
+            )
+
+            is AnkiBackendRefreshUi.Completed ->
+                if (refresh.resultToken == AnkiBackendRefreshUi.NOT_REGISTERED) {
+                    Text(
+                        text = "A backend was removed while it was being checked; its status is no " +
+                            "longer shown.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = AppColors.contentMuted
+                    )
+                }
+
+            AnkiBackendRefreshUi.Idle -> Unit
+        }
+
+        Spacer(modifier = Modifier.height(10.dp))
+        // Safe troubleshooting actions only: each rendered control is backed by an existing service or
+        // an existing destination, so nothing here is inert (CHECKPOINT 21M-20).
+        Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.XS)) {
+            if (AnkiBackendUiAction.REFRESH_STATUS in section.actions) {
+                SecondaryButton(
+                    text = "Refresh status",
+                    onClick = onRefresh,
+                    enabled = section.refresh !is AnkiBackendRefreshUi.Running,
+                    modifier = Modifier.testTag(ANKI_BACKEND_REFRESH_TEST_TAG)
+                )
+            }
+            if (AnkiBackendUiAction.OPEN_ANKIDROID in section.actions) {
+                SecondaryButton(text = "Open AnkiDroid", onClick = onOpenAnkiDroid)
+            }
+            if (AnkiBackendUiAction.OPEN_BACKEND_CONFIGURATION in section.actions && onOpenConnection != null) {
+                SecondaryButton(text = "Backend configuration", onClick = onOpenConnection)
+            }
+            if (AnkiBackendUiAction.OPEN_DIAGNOSTICS in section.actions && onOpenDiagnostics != null) {
+                SecondaryButton(text = "Diagnostics", onClick = onOpenDiagnostics)
+            }
+        }
+    }
+}
+
+/**
+ * One selector row. The three row kinds are deliberately not interchangeable:
+ *
+ * - a configured instance is selectable even while unavailable, and its capability detail separates
+ *   *implemented* from *available now* (CHECKPOINT 21M-05/09);
+ * - a kind with no wired adapter is disabled **and** explained (R-20-2, CHECKPOINT 21M-26);
+ * - a persisted preference that names a backend this build does not have is surfaced as a warning
+ *   with the exact stored identity, never silently converted to AUTO (CHECKPOINT 21M-12).
+ */
+@Composable
+private fun AnkiBackendRow(
+    row: AnkiBackendRowUi,
+    expanded: Boolean,
+    onToggleCapabilities: (String) -> Unit,
+    onSelectAuto: () -> Unit,
+    onSelectInstance: (AnkiBackendId) -> Unit
+) {
+    val tag = Modifier.testTag("$ANKI_BACKEND_OPTION_TEST_TAG${row.key}")
+    when (row) {
+        is AnkiBackendAutoRowUi -> ChoiceRow(
+            title = row.title,
+            selected = row.selected,
+            onSelect = onSelectAuto,
+            description = autoDescription(row),
+            enabled = row.selectable,
+            modifier = tag
+        )
+
+        is AnkiBackendInstanceRowUi -> Column(modifier = Modifier.fillMaxWidth()) {
+            ChoiceRow(
+                title = row.title,
+                selected = row.selected,
+                onSelect = { onSelectInstance(row.backendId) },
+                description = instanceDescription(row),
+                enabled = row.selectable,
+                modifier = tag
+            )
+            ExpandableSection(
+                title = "Capabilities · ${row.title}",
+                expanded = expanded,
+                onToggle = { onToggleCapabilities(row.key) },
+                summary = capabilitySummary(row),
+                modifier = Modifier.testTag("$ANKI_BACKEND_CAPABILITIES_TEST_TAG${row.key}"),
+                content = { AnkiBackendCapabilityList(row) }
+            )
+        }
+
+        is AnkiBackendUnimplementedKindRowUi -> ChoiceRow(
+            title = row.title,
+            selected = false,
+            // Disabled and explained: no adapter exists, so there is nothing to select and nothing
+            // to configure from here. The row is never rendered as an operational backend.
+            onSelect = {},
+            description = "${row.statusLabel}. ${row.explanation}",
+            enabled = false,
+            modifier = tag
+        )
+
+        is AnkiBackendUnresolvedRowUi -> InfoBanner(
+            title = row.statusLabel,
+            message = row.explanation,
+            tone = BannerTone.WARNING,
+            modifier = tag
+        )
+    }
+}
+
+/** AUTO's description states what it would pick *now* without promising merged data or failover. */
+private fun autoDescription(row: AnkiBackendAutoRowUi): String = buildString {
+    append(row.statusLabel)
+    row.explanation?.let { append(" ").append(it) }
+}
+
+/**
+ * An instance's description: status, then the exact identity token. The stable id is a technical
+ * identifier and is shown verbatim — it is never translated, and never replaced by a display label
+ * (CHECKPOINT 21M-04/27).
+ */
+private fun instanceDescription(row: AnkiBackendInstanceRowUi): String = buildString {
+    append(row.statusLabel)
+    append(" · ")
+    append(row.identityToken)
+    if (row.testDouble) append(" · test backend, not selectable")
+}
+
+private fun capabilitySummary(row: AnkiBackendInstanceRowUi): String {
+    val supported = row.capabilities.count { it.implemented.name == "SUPPORTED" }
+    val ready = row.capabilities.count { it.usableNow }
+    return "Implemented: $supported/${row.capabilities.size} · Available now: $ready"
+}
+
+/**
+ * Capability detail, grouped for reading and rendered on both dimensions.
+ *
+ * "Supported" and "Available now" are separate columns on purpose: a backend can implement note
+ * editing and be disconnected, and a backend with no wired adapter cannot claim the operation at all
+ * (CHECKPOINT 21M-09, BACKEND_SELECTION_POLICY §2.1).
+ */
+@Composable
+private fun AnkiBackendCapabilityList(row: AnkiBackendInstanceRowUi) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        KeyValueRow(label = "Availability", value = row.statusToken)
+        KeyValueRow(label = "Capability evidence", value = row.capabilityEvidenceToken)
+        row.unavailableReasonToken?.let { reason ->
+            KeyValueRow(label = "Unavailable reason", value = reason)
+            row.retryabilityToken?.let { KeyValueRow(label = "Retryability", value = it) }
+        }
+        row.capabilityGroups.forEach { group ->
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = group.title,
+                style = MaterialTheme.typography.labelLarge,
+                color = AppColors.contentSecondary
+            )
+            group.capabilities.forEach { item ->
+                KeyValueRow(
+                    label = item.title,
+                    value = "${item.implementedLabel} · ${item.currentStateLabel}"
+                )
+            }
+        }
+        // GATE 20 / GATE 21L boundary: custom study is disclosed as capability truth and offers no
+        // lifecycle control, because no wired backend implements one (CHECKPOINT 21M-06).
+        row.customStudy?.let { customStudy ->
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "Custom Study",
+                style = MaterialTheme.typography.labelLarge,
+                color = AppColors.contentSecondary
+            )
+            KeyValueRow(label = customStudy.headline, value = customStudy.token)
+            Text(
+                text = customStudy.explanation,
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.contentMuted
+            )
+        }
     }
 }
 

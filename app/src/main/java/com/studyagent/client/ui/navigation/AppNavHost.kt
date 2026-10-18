@@ -546,21 +546,45 @@ fun AppNavHost(
                     recognitionOrchestrator = container.recognitionOrchestrator,
                     ankiDroidHealthRepository = container.ankiDroidHealthRepository,
                     ankiDroidLauncher = container.ankiDroidLauncher,
-                    // GATE 21 — explicit backend selection with live availability/reason.
+                    // GATE 21M — instance-exact backend selection over the existing authoritative
+                    // components: the registry inventory, the 21D observation point, the 21E
+                    // preference repository (as the projection it already publishes) and the 21G
+                    // session locks. No new registry, resolver or selection authority is created here.
+                    ankiBackendRegistry = container.ankiBackendRegistry,
                     ankiBackendStatusCenter = container.ankiBackendStatusCenter,
-                    ankiBackendPreferenceStore = container.ankiBackendPreferenceStore
+                    ankiBackendPreference = container.backendPreferenceRepository.preference,
+                    ankiBackendPreferenceWriteError =
+                        container.backendPreferenceRepository.lastWriteError,
+                    ankiBackendPreferenceWriter = { preference ->
+                        container.backendPreferenceRepository.setPreference(preference)
+                    },
+                    ankiSessionLocks = container.ankiStudyBackendLocks,
+                    ankiBackendAutoPreview = container.ankiBackendAutoPreview
                 )
             }
             SettingsScreen(
                 viewModel = settingsViewModel,
-                onNavigateBack = { navController.popBackStack() }
+                onNavigateBack = { navController.popBackStack() },
+                // GATE 21M — safe troubleshooting destinations only (CHECKPOINT 21M-20).
+                onOpenDiagnostics = { navController.navigate(Screen.Diagnostics.route) },
+                onOpenConnection = { navController.navigate(Screen.Connection.route) }
             )
         }
 
         composable(Screen.Diagnostics.route) {
             val diagViewModel: DiagnosticsViewModel = viewModel {
                 DiagnosticsViewModel(
-                    diagnosticsRepository = container.diagnosticsRepository
+                    diagnosticsRepository = container.diagnosticsRepository,
+                    // GATE 21M — read-only backend diagnostics: observation snapshots plus the
+                    // unresolved-transaction projections each durable family already exposes. Nothing
+                    // here can write a ledger, reassign a transaction or probe a backend
+                    // (AUDIT-21M-R2-13).
+                    ankiBackendStates = container.ankiBackendStatusCenter.states,
+                    ankiBackendPreference = container.backendPreferenceRepository.preference,
+                    ankiBackendRouting = container.ankiBackendRouting,
+                    ankiSessionLocks = container.ankiStudyBackendLocks,
+                    ankiBackendRegistry = container.ankiBackendRegistry,
+                    ankiUnresolvedTransactions = container.ankiUnresolvedTransactions
                 )
             }
             DiagnosticsScreen(
