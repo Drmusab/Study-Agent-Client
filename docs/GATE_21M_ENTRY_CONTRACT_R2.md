@@ -2,8 +2,8 @@
 
 **Date:** 2026-10-18 (UTC)
 **Repository:** `Drmusab/Study-Agent-Client`
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
-**Branch:** `arena/19fcfcc5-study-agent-client`
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit branch:** `arena/19fcfcc5-study-agent-client`
 **Worktree at gate start:** clean (`git status --short` → empty)
 **Execution:** repository inspection → contract reconciliation → source audit → executed verification → documentation.
 **Production code changed by this run:** two files — `DiagnosticsScreen.kt` (observe the asynchronous
@@ -12,7 +12,11 @@ absent). Both are wiring defects found during verification.
 **Test code changed by this run:** one test added to `Gate21mBackendSelectionControllerTest`; one
 existing assertion strengthened in `Gate21mDiagnosticsSafetyTest`; one source-audit assertion updated
 in `Gate21mArchitectureAuditTest`; one action assertion extended in `Gate21mBackendSelectionUiTest`.
-**Prior gate documents changed:** none.
+**Prior gate documents changed:** none in the original audit run.
+
+> Sections 1–6 below preserve the original audit record and its original scope interpretation. The
+> current Arena-checkout revalidation is in §7 and supersedes its present-state evidence only; it does
+> not rewrite any prior GATE 20, GATE 21L or final GATE 21 status document.
 
 ```text
 GATE 21M:                    AUTHORIZED (Revision 2 entry contract)
@@ -234,3 +238,57 @@ No new backend, resolver, registry, scheduler, ledger, session machine or recove
 The prior `GATE_21_FINAL_LOCK.md` banner remains internally inconsistent (it says `GATE 21 LOCKED`
 while its own matrix records 21M not started and 21L blocked). That inconsistency is recorded here and
 is **not** repaired by editing a previous gate's document. GATE 21M does not make GATE 21 final.
+
+---
+
+## 7. Current checkout revalidation — Arena session (2026-10-18 UTC)
+
+This section corrects the current-source context without altering the historical entry record above.
+
+```text
+CURRENT HEAD:   e22a32798259c3abd88001963afe511fd950cb2e
+CURRENT BRANCH: arena/95bebe16-study-agent-client
+WORKTREE AT START OF REVALIDATION: clean
+GATE 21M AUTHORIZATION: verified
+GATE 21L: BLOCKED
+```
+
+GATE 21M authorization while 21L is blocked is supported by `docs/GATE_21_FINAL_LOCK.md:538` and
+`docs/GATE_21K_NOTE_CREATION_BINDING.md:310–311`. This revalidation does not authorize 21N, and it
+does not authorize changing GATE 20 or 21L status documents.
+
+**Current Gate 20 scope is split across artifacts.** `GATE_20_FINAL_REPORT.md` and
+`GATE_20B_CONTRACT_LOCK.md` record a limited contract-enforcing subset (detection/refusal/disclosure/
+identity/capability truth) as locked, with no new study mode. `GATE_20_CUSTOM_STUDY_CONTRACT.md` and
+`GATE_21L_REPORT.md` still describe the broader lifecycle prerequisite as blocked/not available.
+Current source inspection confirms the narrow subset's safety boundary, but no production PC Anki
+adapter, no filtered-session lifecycle, and `AnkiDroidCustomStudyCapabilities.AUDITED = NONE`.
+Therefore GATE 21L remains BLOCKED. The conflict is documented, not resolved by this gate.
+
+The current production GATE 21M implementation is already present at HEAD and was reused/re-audited;
+no production Kotlin was changed in this Arena session. One Android instrumentation file was created:
+`app/src/androidTest/java/com/studyagent/client/ui/Gate21mBackendSelectionInstrumentedTest.kt`, with
+two Compose tests covering AUTO/disabled-PC row presentation and persistence between AUTO and the exact
+configured AnkiDroid identity. Its baseline uses the atomic stored-preference snapshot and decoder; the
+production tags were source-checked. The file is **uncompiled and unexecuted**.
+
+Current fresh evidence:
+
+```text
+GATE 21M focused JVM suite: 7 classes / 115 tests / 0 failed
+Full JVM harness:           237 classes / 2924 tests / 0 failed
+Capability pins:            13 hold / 0 disagree / 0 unverifiable
+Architecture audit:         26/26 source-level checks pass
+Gradle/lint/build:          blocked before project configuration (Gradle 8.7 TLS/EOF failure)
+Instrumentation:             unverified (no Android SDK/device; Gradle wrapper unavailable)
+```
+
+The Gradle wrapper failed for `--version`, `testDebugUnitTest`, `lint`, `assembleDebug`,
+`assembleRelease` and `connectedDebugAndroidTest`; no Gradle task executed. GATE 21M lock remains
+BLOCKED pending Android evidence; final GATE 21 lock is neither implied nor claimed.
+
+Current evidence addenda are in `GATE_21M_FINAL_STATUS.md`, `GATE_21M_VERIFICATION_REPORT.md`,
+`GATE_21M_ANDROID_VALIDATION_STATUS.md`, `GATE_21M_FILE_REPORT.md`,
+`GATE_21M_ARCHITECTURE_AUDIT.md`, `GATE_21M_R20_2_COMPLIANCE.md`,
+`GATE_21M_RESIDUAL_RISKS.md`, `GATE_21M_BACKEND_SELECTION_CONTRACT.md` and
+`GATE_21N_HANDOFF.md`. Prior GATE 20 / GATE 21L / final-lock status documents remain untouched.

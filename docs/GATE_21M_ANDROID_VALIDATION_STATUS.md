@@ -1,9 +1,13 @@
 # GATE 21M — Android Validation Status
 
 **Date:** 2026-10-18 (UTC)
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
 **Principle:** a harness PASS is not a Gradle PASS; Kotlin compilation is not an APK build; a fake PC
 test is not PC Anki support.
+
+> The environment and “no GATE 21M instrumentation test was added” statements below preserve the
+> original audit at `19c8a0d…`. Current-checkout attempts and the newly added, still-unexecuted test
+> source are recorded in §7 and supersede those statements for the Arena branch only.
 
 ```text
 GRADLE:          UNVERIFIED
@@ -145,3 +149,57 @@ GATE 21M LOCK:               BLOCKED PENDING ANDROID EVIDENCE
 
 If a future run executes the tasks, replace this section with the actual command, exit code, log
 artifact and environment; do not copy the harness result or a prior gate's Gradle result.
+
+---
+
+## 7. Current checkout revalidation — 2026-10-18 UTC
+
+This update was performed at `e22a32798259c3abd88001963afe511fd950cb2e` on
+`arena/95bebe16-study-agent-client`. The prior source HEAD `19c8a0d…` is unavailable in the local
+Git object database. Current environment inspection found no `java`, `gradle`, or `adb` on `PATH`,
+`ANDROID_HOME` / `ANDROID_SDK_ROOT` unset, and no SDK directory in the checked standard locations.
+The JVM harness had bootstrapped a temporary Java runtime at
+`/tmp/pp/jdk/jdk4py/java-runtime`.
+
+| Attempt | Exit | Result |
+|---|---:|---|
+| `JAVA_HOME=/tmp/pp/jdk/jdk4py/java-runtime ./gradlew --version` | 1 | **BLOCKED before Gradle starts**; wrapper could not fetch Gradle 8.7 (`java.io.EOFException: SSL peer shut down incorrectly`) |
+| `JAVA_HOME=/tmp/pp/jdk/jdk4py/java-runtime ./gradlew testDebugUnitTest --offline` | 1 | **BLOCKED before configuration**; same wrapper fetch failure |
+| `JAVA_HOME=/tmp/pp/jdk/jdk4py/java-runtime ./gradlew lint --offline` | 1 | **BLOCKED before configuration**; same wrapper fetch failure |
+| `JAVA_HOME=/tmp/pp/jdk/jdk4py/java-runtime ./gradlew assembleDebug --offline` | 1 | **BLOCKED before configuration**; same wrapper fetch failure |
+| `JAVA_HOME=/tmp/pp/jdk/jdk4py/java-runtime ./gradlew assembleRelease --offline` | 1 | **BLOCKED before configuration**; same wrapper fetch failure |
+| `JAVA_HOME=/tmp/pp/jdk/jdk4py/java-runtime ./gradlew connectedDebugAndroidTest --offline` | 1 | **BLOCKED before configuration**; same wrapper fetch failure; also no SDK/emulator/device |
+
+No Gradle task reached project configuration or execution. Consequently Gradle unit tests, lint, APK
+builds and instrumentation are **not PASS and remain unverified**. The Android SDK/device blocker is
+independently confirmed.
+
+### Current GATE 21M instrumentation source
+
+`app/src/androidTest/java/com/studyagent/client/ui/Gate21mBackendSelectionInstrumentedTest.kt`
+was added in this checkout with two Compose tests against the production Settings screen, production
+registry/resolver wiring and the real DataStore-backed preference repository. The baseline is read
+from the atomic `backendPreferenceSnapshotFlow` and decoded with
+`decodeStoredBackendPreference`; it does not rely on the repository `StateFlow`'s initial `AUTO` value.
+The verified tags match production semantics:
+
+- AUTO: `settings_anki_backend_preference:auto` (`AnkiBackendAutoRowUi.KEY`);
+- configured AnkiDroid: `settings_anki_backend_ankidroid_local` (exact stable ID);
+- informational PC kind: `settings_anki_backend_kind:PC_AGENT` (`kind:${kind.name}`).
+
+`assertExists()` is used as in existing repository instrumentation tests (it is available on the
+Compose node interaction; no extra import is needed). These two methods are **source only**: they were
+not compiled or executed. The JVM harness does not compile `androidTest`. No claim is made for screen
+recreation, TalkBack runtime behavior, RTL, text scaling, keyboard traversal, theme screenshots, or a
+real Settings navigation tap.
+
+### Current-source JVM and capability evidence (not Android evidence)
+
+```text
+GATE 21M focused JVM suite: 7 classes / 115 tests / 0 failed
+Full JVM harness:           237 classes / 2924 tests / 0 failed
+Capability pins:             13 hold / 0 disagree / 0 not verifiable
+```
+
+These commands were rerun against the current checkout. They do not change the Android-validation
+status or unlock the GATE 21M lock.

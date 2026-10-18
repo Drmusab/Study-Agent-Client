@@ -1,7 +1,7 @@
 # GATE 21M — Backend Selection Contract
 
 **Date:** 2026-10-18 (UTC)
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
 **Scope:** Settings preference selection, exact configured-instance identity, persistence, unresolved
 preferences, active-session ownership, and the safe action set.
 **Production changes in this run:** two wiring corrections — `DiagnosticsScreen.kt` (observe the
@@ -242,4 +242,8 @@ This gate does **not**:
 - migrate an active session when the preference changes;
 - declare GATE 21 final closure.
 
-GATE 21L remains blocked; GATE 20 remains design-only.
+GATE 21L remains blocked. Current Gate 20 records are scope-split: its final/contract-lock reports
+describe a limited refusal/disclosure/identity/capability-truth subset as locked, while the broader
+Custom Study lifecycle prerequisite remains unavailable in the Custom Study contract and GATE 21L
+report. This selection contract does not implement that lifecycle; see `GATE_21M_FINAL_STATUS.md`
+and `GATE_21M_R20_2_COMPLIANCE.md` for the current-checkout reconciliation.

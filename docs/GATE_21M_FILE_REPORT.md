@@ -1,7 +1,7 @@
 # GATE 21M — File-by-File Implementation Report
 
 **Date:** 2026-10-18 (UTC)
-**Source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
+**Original audit source HEAD:** `19c8a0d76169b18e4f2bf1787d107fbc96c41069`
 **Important attribution note:** the GATE 21M production set was already present at this squashed HEAD.
 It was **reused and independently audited** by this run. This report distinguishes `REUSED` production
 files from the files this run actually `MODIFIED` or `CREATED`. Two production files required
@@ -261,9 +261,9 @@ RESULT:              PASS
 
 | File / area | Reason |
 |---|---|
-| `docs/GATE_20_*` | GATE 20 remains design-only; prior status must not be rewritten |
+| `docs/GATE_20_*` | Prior Gate 20 records were left untouched; see the current scope reconciliation in this report's Arena revalidation and `GATE_21M_R20_2_COMPLIANCE.md` |
 | `docs/GATE_21L_*` | BLOCKED status preserved |
-| `docs/GATE_21N_*` | 21N not executed; its STOP report preserved |
+| `docs/GATE_21N_*` | 21N not executed; prior status/STOP reports preserved; only this GATE 21M handoff was refreshed with current evidence |
 | `docs/GATE_21_FINAL_LOCK.md` | Prior gate record; its internal inconsistency is reported, not edited |
 | `AnkiBackend`, `AnkiDroidBackend`, ledgers, resolvers, registry, session machine | Out of 21M scope; no new backend or authority |
 | `DiagnosticsRepository` export | Deliberately unchanged; 21M rows are not silently exported |
@@ -299,3 +299,49 @@ VERIFICATION DEFECTS FOUND / CLOSED:   1
 GATE 21M IMPLEMENTATION:               COMPLETE AT HEAD
 GATE 21M LOCK:                         NOT CLAIMED (Android evidence missing)
 ```
+
+---
+
+## 6. Current checkout revalidation — Arena session (2026-10-18 UTC)
+
+The historical table above describes the original audit at `19c8a0d…`, which is unavailable in the
+current local Git object database. The present checkout is the parentless snapshot
+`e22a32798259c3abd88001963afe511fd950cb2e` on `arena/95bebe16-study-agent-client`. The worktree was
+clean before this revalidation began.
+
+### Actual source changes in this Arena session
+
+| Path | Action in this session | Validation |
+|---|---|---|
+| `app/src/androidTest/java/com/studyagent/client/ui/Gate21mBackendSelectionInstrumentedTest.kt` | **CREATED** — two Compose tests for AUTO/PC informational row semantics and persisted AUTO ↔ configured AnkiDroid selection | Test tags and production row keys were source-checked; file was **not** compiled or run because Gradle/Android tooling was blocked |
+| Production Kotlin | **No files changed** | Existing GATE 21M implementation was reused and re-audited |
+| JVM test source | **No files changed in this session** | Focused and full JVM suites rerun on current source |
+
+The two new Compose tests are not part of the JVM harness test count. They do not prove TalkBack,
+recreation, RTL, keyboard, text scaling, or device rendering.
+
+### Current evidence
+
+```text
+GATE 21M focused harness: 7 classes / 115 tests / 115 passed / 0 failed
+Full JVM harness:         237 classes / 2924 tests / 2924 passed / 0 failed
+Capability pins:          13 hold / 0 disagree / 0 not verifiable
+Android / Gradle tasks:   BLOCKED before project configuration; not PASS
+Instrumentation source:   2 methods present; uncompiled and unexecuted
+```
+
+The current GATE 20 evidence is scope-split: the final report and GATE 20B contract lock document a
+limited contract-enforcing refusal/disclosure/identity/capability-truth subset as locked, while the
+older Custom Study contract and GATE 21L report retain a broader blocked prerequisite. Current source
+has `AnkiDroidCustomStudyCapabilities.AUDITED = NONE` and no production PC Anki adapter or filtered-
+session lifecycle. GATE 21L remains BLOCKED; this session changed no Gate 20/21L source and did not
+edit their status documents.
+
+### Current evidence-document updates
+
+The current-checkout addenda are recorded in this file and in
+`GATE_21M_ENTRY_CONTRACT_R2.md`, `GATE_21M_FINAL_STATUS.md`, `GATE_21M_VERIFICATION_REPORT.md`,
+`GATE_21M_ANDROID_VALIDATION_STATUS.md`, `GATE_21M_R20_2_COMPLIANCE.md`,
+`GATE_21M_ARCHITECTURE_AUDIT.md`, `GATE_21M_RESIDUAL_RISKS.md`, `GATE_21M_BACKEND_SELECTION_CONTRACT.md`,
+and `GATE_21N_HANDOFF.md`.
+Those documents do not change the earlier gate artifacts or claim a final GATE 21 lock.
